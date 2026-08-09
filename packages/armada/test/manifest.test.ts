@@ -59,6 +59,18 @@ describe("decodeArmadaManifest", () => {
 		expect(outcome.manifest.vehicles[0]?.env).toEqual({ PI_BIN: "/abs/path/pi" });
 	});
 
+	it("accepts and preserves portable runtime requirements", () => {
+		const runtime = {
+			preventPrivilegeEscalation: { enforcement: "required" },
+			privateTemporaryDirectory: { enforcement: "optional" },
+			networkReadiness: { enforcement: "required" },
+		} as const;
+		const outcome = decodeArmadaManifest(manifestJson([{ ...JSON.parse(manifestJson()).vehicles[0], runtime }]));
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.manifest.vehicles[0]?.runtime).toEqual(runtime);
+	});
+
 	it("rejects an env key that isn't a valid environment-variable name", () => {
 		const outcome = decodeArmadaManifest(manifestJson([{ ...JSON.parse(manifestJson()).vehicles[0], env: { "not-a-valid-name": "x" } }]));
 		expect(outcome.ok).toBe(false);

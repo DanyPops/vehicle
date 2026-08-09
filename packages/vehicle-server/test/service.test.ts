@@ -95,11 +95,18 @@ describe("Armada service ownership", () => {
 			reason: "Armada service declarations cannot contain environment or credential material",
 		});
 		expect(deps.commands).toEqual([]);
-		expect(installUserService({ ...SPEC, privateTmp: true }, deps)).toEqual({
-			installed: false,
-			reason: "legacy systemd-only service controls cannot be projected into Armada",
+	});
+
+	it("projects portable hardening and network-readiness requirements into Armada desired state", () => {
+		const deps = fakeDeps();
+		expect(installUserService({ ...SPEC, noNewPrivileges: true, privateTmp: true, waitForNetwork: true }, deps)).toEqual({
+			installed: true,
 		});
-		expect(deps.commands).toEqual([]);
+		expect(JSON.parse(deps.commands[0]?.input ?? "{}").runtime).toEqual({
+			preventPrivilegeEscalation: { enforcement: "required" },
+			privateTemporaryDirectory: { enforcement: "required" },
+			networkReadiness: { enforcement: "required" },
+		});
 	});
 
 	it("surfaces upsert and reconcile failures", () => {

@@ -4,6 +4,7 @@ import type { VehicleResources, VehicleSpec } from "../fleet/manifest.js";
 import type { NativeManagerCapabilities } from "./service-manager.js";
 
 const RESOURCE_KEYS = ["maximumMemoryBytes", "maximumCpuPercent", "maximumTasks"] as const;
+const RUNTIME_KEYS = ["preventPrivilegeEscalation", "privateTemporaryDirectory", "networkReadiness"] as const;
 
 export function nativeServiceIdentity(value: string): NativeServiceIdentity {
 	const outcome = createNativeServiceIdentity(value);
@@ -23,6 +24,25 @@ function resourceDiagnostics(resources: VehicleResources | undefined, capabiliti
 				required ? "NATIVE_RESOURCE_UNSUPPORTED_REQUIRED" : "NATIVE_RESOURCE_UNSUPPORTED_OPTIONAL",
 				required ? "error" : "warning",
 				`/resources/${key}`,
+				`${key} is not supported by this native manager`,
+			),
+		);
+	}
+	return diagnostics;
+}
+
+function runtimeDiagnostics(vehicle: VehicleSpec, capabilities: NativeManagerCapabilities): Diagnostic[] {
+	if (!vehicle.runtime) return [];
+	const diagnostics: Diagnostic[] = [];
+	for (const key of RUNTIME_KEYS) {
+		const requirement = vehicle.runtime[key];
+		if (!requirement || capabilities[key]) continue;
+		const required = requirement.enforcement === "required";
+		diagnostics.push(
+			diagnostic(
+				required ? "NATIVE_RUNTIME_UNSUPPORTED_REQUIRED" : "NATIVE_RUNTIME_UNSUPPORTED_OPTIONAL",
+				required ? "error" : "warning",
+				`/runtime/${key}`,
 				`${key} is not supported by this native manager`,
 			),
 		);
@@ -89,6 +109,7 @@ export function capabilityDiagnostics(vehicle: VehicleSpec, capabilities: Native
 	return Object.freeze([
 		...descriptorTextDiagnostics(vehicle),
 		...resourceDiagnostics(vehicle.resources, capabilities),
+		...runtimeDiagnostics(vehicle, capabilities),
 		...restartDiagnostics(vehicle, capabilities),
 	]);
 }

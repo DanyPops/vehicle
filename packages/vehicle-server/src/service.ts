@@ -25,11 +25,11 @@ export interface ServiceSpec {
 	restartOnFailure?: boolean;
 	/** Restart delay in seconds, applied with restartOnFailure. */
 	restartSec?: number;
-	/** Legacy systemd renderer option; Armada installation rejects it rather than ignoring it. */
+	/** Requires the native manager to prevent privilege escalation. */
 	noNewPrivileges?: boolean;
-	/** Legacy systemd renderer option; Armada installation rejects it rather than ignoring it. */
+	/** Requires the native manager to isolate the daemon's temporary directory. */
 	privateTmp?: boolean;
-	/** Legacy systemd renderer option; Armada installation rejects it rather than ignoring it. */
+	/** Requires the native manager to wait for network readiness before starting. */
 	waitForNetwork?: boolean;
 }
 
@@ -165,6 +165,11 @@ export function windowsRunCommand(spec: ServiceSpec): string {
 }
 
 function toVehicleRegistrationInput(spec: ServiceSpec): VehicleRegistrationInput {
+	const runtime = {
+		...(spec.noNewPrivileges ? { preventPrivilegeEscalation: { enforcement: "required" as const } } : {}),
+		...(spec.privateTmp ? { privateTemporaryDirectory: { enforcement: "required" as const } } : {}),
+		...(spec.waitForNetwork ? { networkReadiness: { enforcement: "required" as const } } : {}),
+	};
 	return {
 		name: spec.name,
 		version: spec.version,
@@ -181,6 +186,7 @@ function toVehicleRegistrationInput(spec: ServiceSpec): VehicleRegistrationInput
 				}
 			: { policy: "never" },
 		readiness: { timeoutMs: 10_000, pollIntervalMs: 100 },
+		...(Object.keys(runtime).length === 0 ? {} : { runtime }),
 	};
 }
 
@@ -191,9 +197,6 @@ function armadaVehicle(spec: ServiceSpec): string {
 function armadaValidationFailure(spec: ServiceSpec): ServiceInstallResult | undefined {
 	if (spec.env && Object.keys(spec.env).length > 0) {
 		return { installed: false, reason: "Armada service declarations cannot contain environment or credential material" };
-	}
-	if (spec.noNewPrivileges || spec.privateTmp || spec.waitForNetwork) {
-		return { installed: false, reason: "legacy systemd-only service controls cannot be projected into Armada" };
 	}
 	return undefined;
 }

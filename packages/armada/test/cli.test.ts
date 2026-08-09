@@ -22,6 +22,9 @@ const manager: NativeServiceManager = {
 		restartOnFailure: true,
 		restartAttemptLimit: true,
 		restartAttemptWindow: true,
+		preventPrivilegeEscalation: true,
+		privateTemporaryDirectory: true,
+		networkReadiness: true,
 	},
 	inspect: () => Promise.resolve({ ok: true, services: [], diagnostics: [] }),
 };

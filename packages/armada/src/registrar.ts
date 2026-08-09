@@ -12,7 +12,7 @@
 import { defaultManifestPath, managerKind } from "./cli.js";
 import type { Diagnostic } from "./fleet/diagnostic.js";
 import type { ManifestHash } from "./fleet/identity.js";
-import type { ArmadaManifest, VehicleRestartPolicy, VehicleResources } from "./fleet/manifest.js";
+import type { ArmadaManifest, VehicleResources, VehicleRestartPolicy, VehicleRuntimeRequirements } from "./fleet/manifest.js";
 import { readManifestFile, removeManifestVehicle, upsertManifestVehicle } from "./fleet/manifest-store.js";
 import { type PlanOperation, planFleet } from "./fleet/planner.js";
 import { createHandleReadinessProbe } from "./fleet/readiness.js";
@@ -31,10 +31,16 @@ export interface VehicleRegistrationInput {
 	readonly restart: VehicleRestartPolicy;
 	readonly readiness: { readonly timeoutMs: number; readonly pollIntervalMs: number };
 	readonly resources?: VehicleResources;
+	readonly runtime?: VehicleRuntimeRequirements;
 }
 
 export type VehicleRegistrationOutcome =
-	| { readonly ok: true; readonly manifestHash: ManifestHash; readonly applied: readonly PlanOperation[]; readonly diagnostics: readonly Diagnostic[] }
+	| {
+			readonly ok: true;
+			readonly manifestHash: ManifestHash;
+			readonly applied: readonly PlanOperation[];
+			readonly diagnostics: readonly Diagnostic[];
+	  }
 	| { readonly ok: false; readonly diagnostics: readonly Diagnostic[] };
 
 export interface VehicleRegistrar {

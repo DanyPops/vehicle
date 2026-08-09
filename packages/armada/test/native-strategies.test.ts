@@ -30,6 +30,11 @@ describe("native service strategies", () => {
 					maximumCpuPercent: { value: 75, enforcement: "required" },
 					maximumTasks: { value: 32, enforcement: "required" },
 				},
+				runtime: {
+					preventPrivilegeEscalation: { enforcement: "required" },
+					privateTemporaryDirectory: { enforcement: "required" },
+					networkReadiness: { enforcement: "required" },
+				},
 			}),
 		);
 		expect(outcome.ok).toBe(true);
@@ -44,6 +49,10 @@ describe("native service strategies", () => {
 		expect(outcome.descriptor.content).toContain("MemoryMax=268435456");
 		expect(outcome.descriptor.content).toContain("CPUQuota=75%");
 		expect(outcome.descriptor.content).toContain("TasksMax=32");
+		expect(outcome.descriptor.content).toContain("NoNewPrivileges=true");
+		expect(outcome.descriptor.content).toContain("PrivateTmp=true");
+		expect(outcome.descriptor.content).toContain("After=network-online.target");
+		expect(outcome.descriptor.content).toContain("Wants=network-online.target");
 		expect(outcome.diagnostics).toEqual([]);
 	});
 
@@ -129,6 +138,21 @@ describe("native service strategies", () => {
 		expect(outcome.descriptor.content).toContain("<Interval>PT1S</Interval>");
 		expect(outcome.descriptor.content).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
 		expect(outcome.diagnostics).toMatchObject([{ code: "NATIVE_RESTART_WINDOW_UNSUPPORTED", severity: "warning" }]);
+	});
+
+	it("reports unsupported runtime requirements according to their enforcement", () => {
+		const required = launchdStrategy.generateDescriptor(
+			vehicle({ restart: { policy: "never" }, runtime: { privateTemporaryDirectory: { enforcement: "required" } } }),
+		);
+		expect(required).toMatchObject({ ok: false, diagnostics: [{ code: "NATIVE_RUNTIME_UNSUPPORTED_REQUIRED", severity: "error" }] });
+
+		const optional = windowsTaskSchedulerStrategy.generateDescriptor(
+			vehicle({ restart: { policy: "never" }, runtime: { networkReadiness: { enforcement: "optional" } } }),
+		);
+		expect(optional).toMatchObject({
+			ok: true,
+			diagnostics: [{ code: "NATIVE_RUNTIME_UNSUPPORTED_OPTIONAL", severity: "warning" }],
+		});
 	});
 
 	it("rejects unsupported required resources and restart modes", () => {

@@ -13,6 +13,9 @@ export interface NativeManagerCapabilities {
 	readonly restartOnFailure: boolean;
 	readonly restartAttemptLimit: boolean;
 	readonly restartAttemptWindow: boolean;
+	readonly preventPrivilegeEscalation: boolean;
+	readonly privateTemporaryDirectory: boolean;
+	readonly networkReadiness: boolean;
 }
 
 export interface NativeServiceState {

@@ -13,13 +13,15 @@ const EnvironmentMap = Type.Record(Type.String({ pattern: "^[A-Z_][A-Z0-9_]*$" }
 	maxProperties: 32,
 	additionalProperties: false,
 });
+const Enforcement = Type.Union([Type.Literal("required"), Type.Literal("optional")]);
 const Requirement = Type.Object(
 	{
 		value: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-		enforcement: Type.Union([Type.Literal("required"), Type.Literal("optional")]),
+		enforcement: Enforcement,
 	},
 	{ additionalProperties: false },
 );
+const CapabilityRequirement = Type.Object({ enforcement: Enforcement }, { additionalProperties: false });
 const RestartPolicy = Type.Union([
 	Type.Object({ policy: Type.Literal("never") }, { additionalProperties: false }),
 	Type.Object(
@@ -59,6 +61,16 @@ const VehicleSchema = Type.Object(
 				{ additionalProperties: false },
 			),
 		),
+		runtime: Type.Optional(
+			Type.Object(
+				{
+					preventPrivilegeEscalation: Type.Optional(CapabilityRequirement),
+					privateTemporaryDirectory: Type.Optional(CapabilityRequirement),
+					networkReadiness: Type.Optional(CapabilityRequirement),
+				},
+				{ additionalProperties: false },
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -85,6 +97,17 @@ export interface VehicleResources {
 	readonly maximumTasks?: ResourceRequirement;
 }
 
+export interface CapabilityRequirement {
+	readonly enforcement: "required" | "optional";
+}
+
+/** Portable service requirements. Native strategies must enforce them or emit an explicit capability diagnostic. */
+export interface VehicleRuntimeRequirements {
+	readonly preventPrivilegeEscalation?: CapabilityRequirement;
+	readonly privateTemporaryDirectory?: CapabilityRequirement;
+	readonly networkReadiness?: CapabilityRequirement;
+}
+
 export type VehicleRestartPolicy =
 	| { readonly policy: "never" }
 	| {
@@ -108,6 +131,7 @@ export interface VehicleSpec {
 		readonly pollIntervalMs: number;
 	};
 	readonly resources?: VehicleResources;
+	readonly runtime?: VehicleRuntimeRequirements;
 }
 
 export interface ArmadaManifest {
@@ -154,6 +178,7 @@ function toVehicle(raw: RawVehicle): VehicleSpec {
 		restart: { ...raw.restart },
 		readiness: { ...raw.readiness },
 		...(raw.resources === undefined ? {} : { resources: { ...raw.resources } }),
+		...(raw.runtime === undefined ? {} : { runtime: { ...raw.runtime } }),
 	});
 }
 

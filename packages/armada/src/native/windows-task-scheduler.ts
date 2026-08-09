@@ -11,6 +11,9 @@ const capabilities: NativeManagerCapabilities = Object.freeze({
 	restartOnFailure: true,
 	restartAttemptLimit: true,
 	restartAttemptWindow: false,
+	preventPrivilegeEscalation: false,
+	privateTemporaryDirectory: false,
+	networkReadiness: false,
 });
 
 function quoteArgument(value: string): string {

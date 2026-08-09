@@ -11,6 +11,9 @@ const capabilities: NativeManagerCapabilities = Object.freeze({
 	restartOnFailure: true,
 	restartAttemptLimit: false,
 	restartAttemptWindow: false,
+	preventPrivilegeEscalation: false,
+	privateTemporaryDirectory: false,
+	networkReadiness: false,
 });
 
 function keyValue(key: string, value: string): readonly string[] {

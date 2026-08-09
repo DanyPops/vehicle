@@ -11,6 +11,9 @@ const capabilities: NativeManagerCapabilities = Object.freeze({
 	restartOnFailure: true,
 	restartAttemptLimit: true,
 	restartAttemptWindow: true,
+	preventPrivilegeEscalation: true,
+	privateTemporaryDirectory: true,
+	networkReadiness: true,
 });
 
 function quote(value: string): string {
@@ -31,6 +34,7 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	const specHash = manifestHash(vehicle);
 	const unitName = `armada-${vehicle.name}.service`;
 	const unit: string[] = ["[Unit]", `Description=Armada Vehicle ${vehicle.name}`, `X-Armada-SpecHash=${specHash}`];
+	if (vehicle.runtime?.networkReadiness) unit.push("After=network-online.target", "Wants=network-online.target");
 	if (vehicle.restart.policy !== "never") {
 		unit.push(`StartLimitIntervalSec=${seconds(vehicle.restart.windowMs)}`, `StartLimitBurst=${vehicle.restart.maxAttempts + 1}`);
 	}
@@ -45,6 +49,8 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	if (vehicle.workingDirectory !== undefined) unit.push(`WorkingDirectory=${quote(vehicle.workingDirectory)}`);
 	if (vehicle.restart.policy === "never") unit.push("Restart=no");
 	else unit.push(`Restart=${vehicle.restart.policy}`, `RestartSec=${seconds(vehicle.restart.delayMs)}`);
+	if (vehicle.runtime?.preventPrivilegeEscalation) unit.push("NoNewPrivileges=true");
+	if (vehicle.runtime?.privateTemporaryDirectory) unit.push("PrivateTmp=true");
 	const resources = vehicle.resources;
 	if (resources?.maximumMemoryBytes) unit.push(`MemoryMax=${resources.maximumMemoryBytes.value}`);
 	if (resources?.maximumCpuPercent) unit.push(`CPUQuota=${resources.maximumCpuPercent.value}%`);
