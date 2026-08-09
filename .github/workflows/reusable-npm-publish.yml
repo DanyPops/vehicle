@@ -136,6 +136,50 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - if: steps.registry.outputs.published != 'true'
+        name: "Resolve workspace: protocol dependencies for a plain npm publish"
+        # bun/pnpm/yarn publish rewrite a workspace:* / workspace:^ / workspace:~
+        # specifier to a real version range automatically; plain `npm publish`
+        # (the only publish path this workflow ever uses, even when
+        # package-manager is bun) does not -- it would ship the literal
+        # "workspace:^" string to the registry, which npm install can never
+        # resolve outside this monorepo (EUNSUPPORTEDPROTOCOL for every
+        # consumer). Rewrite any surviving workspace: specifier to the real
+        # version already resolved into node_modules by the install step
+        # above, for every dependency field npm actually publishes.
+        working-directory: ${{ inputs.package-directory }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const pkgPath = path.resolve("package.json");
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+          const fields = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+          let changed = false;
+          for (const field of fields) {
+            const deps = pkg[field];
+            if (!deps) continue;
+            for (const [name, range] of Object.entries(deps)) {
+              if (typeof range !== "string" || !range.startsWith("workspace:")) continue;
+              const specifier = range.slice("workspace:".length);
+              let resolvedVersion;
+              try {
+                resolvedVersion = require(require.resolve(`${name}/package.json`)).version;
+              } catch (err) {
+                console.error(`::error::cannot resolve installed version of ${name} to rewrite its workspace: specifier (${range}) -- ${err.message}`);
+                process.exit(1);
+              }
+              const rewritten =
+                specifier === "*" || specifier === "" ? resolvedVersion : specifier === "^" || specifier === "~" ? `${specifier}${resolvedVersion}` : specifier;
+              console.log(`rewriting ${field}.${name}: "${range}" -> "${rewritten}"`);
+              deps[name] = rewritten;
+              changed = true;
+            }
+          }
+          if (changed) fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+
       - if: steps.registry.outputs.published != 'true' && inputs.prepare-command != ''
         name: Prepare package
         env:
