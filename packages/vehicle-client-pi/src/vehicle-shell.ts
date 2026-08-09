@@ -63,24 +63,95 @@ export function formatOperationOneLiner(descriptor: VehicleOperationDescriptor):
 	return `${descriptor.name} -- ${descriptor.description}`;
 }
 
-/** Case-insensitive substring match against the same text formatOperationOneLiner shows -- apropos's own matching model (name + description), not a fuzzy/ranked search. */
+function normalizeShellTerms(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[._\s-]+/g, " ");
+}
+
+function shellQueryScore(descriptor: VehicleOperationDescriptor, query: string): number | undefined {
+	const rawNeedle = query.trim().toLowerCase();
+	if (rawNeedle.length === 0) return 0;
+	const normalizedNeedle = normalizeShellTerms(query);
+	const normalizedName = normalizeShellTerms(descriptor.name);
+	if (normalizedNeedle.length === 0) {
+		return `${descriptor.name} ${descriptor.description}`.toLowerCase().includes(rawNeedle) ? 3 : undefined;
+	}
+	if (normalizedName === normalizedNeedle) return 0;
+	if (normalizedName.startsWith(normalizedNeedle)) return 1;
+	if (normalizedName.includes(normalizedNeedle)) return 2;
+	return `${descriptor.name} ${descriptor.description}`.toLowerCase().includes(rawNeedle) ? 3 : undefined;
+}
+
+/** Separator-insensitive operation-name matching plus the existing raw description substring match. */
 export function matchesShellQuery(descriptor: VehicleOperationDescriptor, query: string): boolean {
-	const needle = query.trim().toLowerCase();
-	if (needle.length === 0) return true;
-	return `${descriptor.name} ${descriptor.description}`.toLowerCase().includes(needle);
+	return shellQueryScore(descriptor, query) !== undefined;
+}
+
+const MAX_SCHEMA_DEPTH = 5;
+const MAX_SCHEMA_LINES = 80;
+const MAX_EXAMPLE_LENGTH = 500;
+
+function schemaRecord(value: unknown): Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function schemaDetails(schema: Record<string, unknown>): string {
+	const details: string[] = [];
+	if (Array.isArray(schema.enum)) details.push(`enum: ${schema.enum.map(String).join(" | ")}`);
+	if (schema.default !== undefined) details.push(`default: ${JSON.stringify(schema.default)}`);
+	for (const key of ["minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"] as const) {
+		if (typeof schema[key] === "number") details.push(`${key}: ${schema[key]}`);
+	}
+	return details.join("; ");
+}
+
+function boundedExample(value: unknown): string {
+	const serialized = JSON.stringify(value);
+	const text = typeof serialized === "string" ? serialized : String(value);
+	return text.length <= MAX_EXAMPLE_LENGTH ? text : `${text.slice(0, MAX_EXAMPLE_LENGTH - 1)}…`;
+}
+
+function formatSchemaChildren(schema: Record<string, unknown>, indent: string, depth: number, lines: string[]): void {
+	if (depth >= MAX_SCHEMA_DEPTH || lines.length >= MAX_SCHEMA_LINES) return;
+	const properties = schemaRecord(schema.properties);
+	const required = new Set(
+		Array.isArray(schema.required) ? schema.required.filter((value): value is string => typeof value === "string") : [],
+	);
+	for (const [key, raw] of Object.entries(properties)) {
+		if (lines.length >= MAX_SCHEMA_LINES) return;
+		const property = schemaRecord(raw);
+		const type = typeof property.type === "string" ? property.type : "any";
+		const marker = required.has(key) ? "required" : "optional";
+		const details = schemaDetails(property);
+		const description = typeof property.description === "string" ? property.description : "";
+		lines.push(`${indent}- ${key} (${type}, ${marker}${details ? `; ${details}` : ""})${description ? `: ${description}` : ""}`);
+		formatSchemaChildren(property, `${indent}  `, depth + 1, lines);
+	}
+	if (schema.items !== undefined) {
+		const items = schemaRecord(schema.items);
+		const type = typeof items.type === "string" ? items.type : "any";
+		const details = schemaDetails(items);
+		lines.push(`${indent}items (${type}${details ? `; ${details}` : ""})`);
+		formatSchemaChildren(items, `${indent}  `, depth + 1, lines);
+	}
+	if (typeof schema.additionalProperties === "object" && schema.additionalProperties !== null) {
+		const values = schemaRecord(schema.additionalProperties);
+		const type = typeof values.type === "string" ? values.type : "any";
+		lines.push(`${indent}values (${type})`);
+		formatSchemaChildren(values, `${indent}  `, depth + 1, lines);
+	}
+	if (Array.isArray(schema.examples)) {
+		for (const example of schema.examples.slice(0, 4)) lines.push(`${indent}example: ${boundedExample(example)}`);
+	}
 }
 
 function formatSchemaProperties(schema: JsonSchema): string[] {
-	const properties = schema.properties;
-	if (typeof properties !== "object" || properties === null) return [];
-	const required = new Set(Array.isArray(schema.required) ? (schema.required as unknown[]).filter((v) => typeof v === "string") : []);
-	return Object.entries(properties as Record<string, unknown>).map(([key, raw]) => {
-		const prop = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
-		const type = typeof prop.type === "string" ? prop.type : "any";
-		const desc = typeof prop.description === "string" ? prop.description : "";
-		const marker = required.has(key) ? "required" : "optional";
-		return desc.length > 0 ? `  - ${key} (${type}, ${marker}): ${desc}` : `  - ${key} (${type}, ${marker})`;
-	});
+	const lines: string[] = [];
+	formatSchemaChildren(schema as Record<string, unknown>, "  ", 0, lines);
+	if (lines.length >= MAX_SCHEMA_LINES) lines[MAX_SCHEMA_LINES - 1] = "  … schema documentation truncated";
+	return lines.slice(0, MAX_SCHEMA_LINES);
 }
 
 /** The full man page for one operation -- description, parameters, and the safety-relevant facts
@@ -201,7 +272,13 @@ function createToolsListTool(listToolName: string, manifest: VehicleManifest): T
 		}),
 		async execute(_toolCallId, params) {
 			const query = (params as { query?: string }).query ?? "";
-			const matches = manifest.operations.filter((descriptor) => matchesShellQuery(descriptor, query));
+			const matches = manifest.operations
+				.flatMap((descriptor, index) => {
+					const score = shellQueryScore(descriptor, query);
+					return score === undefined ? [] : [{ descriptor, index, score }];
+				})
+				.sort((left, right) => left.score - right.score || left.index - right.index)
+				.map((entry) => entry.descriptor);
 			const text =
 				matches.length === 0
 					? `No operations matched "${query}".`

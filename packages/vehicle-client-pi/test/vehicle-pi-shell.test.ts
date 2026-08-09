@@ -96,6 +96,56 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(result.content[0]?.text).not.toContain("tasks.create");
 	});
 
+	it("tools_list treats spaces, dots, underscores, and hyphens as equivalent operation-name separators", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(
+			pi,
+			new FakeClient(manifest([operation("docs.create", { description: "Create a task document." }), operation("tasks.create")])),
+			{ shell: {} },
+		);
+
+		for (const query of ["tasks create", "tasks_create", "tasks-create", "tasks.create"]) {
+			const result = (await callTool(tools, "tools_list", { query })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text.split("\n")[0]).toStartWith("tasks.create --");
+		}
+	});
+
+	it("tools_man recursively documents nested schemas, constraints, enums, and examples", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(
+			pi,
+			new FakeClient(
+				manifest([
+					operation("tasks.create", {
+						inputSchema: {
+							type: "object",
+							properties: {
+								gates: {
+									type: "array",
+									minItems: 1,
+									items: {
+										type: "object",
+										properties: { type: { type: "string", enum: ["command", "test"] }, target: { type: "string" } },
+										required: ["type", "target"],
+									},
+									examples: [[{ type: "command", target: "bun test" }]],
+								},
+							},
+						},
+					}),
+				]),
+			),
+			{ shell: {} },
+		);
+
+		const result = (await callTool(tools, "tools_man", { names: ["tasks.create"] })) as { content: Array<{ text: string }> };
+		const text = result.content[0]?.text ?? "";
+		expect(text).toContain("gates (array, optional; minItems: 1)");
+		expect(text).toContain("items (object)");
+		expect(text).toContain("type (string, required; enum: command | test)");
+		expect(text).toContain('example: [{"type":"command","target":"bun test"}]');
+	});
+
 	it("tools_man activates a discovered operation for the model's next turn", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: {} });
