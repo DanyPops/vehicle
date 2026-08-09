@@ -11,6 +11,7 @@
  * dashboards) built against the old hand-rolled loggers keep working
  * unchanged.
  */
+import { VEHICLE_CREDENTIAL_FIELD_NAMES } from "@danypops/vehicle-core";
 import pino from "pino";
 import { getCurrentRpcCallId } from "./rpc-correlation.js";
 
@@ -40,18 +41,7 @@ const LEVELS: ReadonlySet<string> = new Set(["debug", "info", "warn", "error"]);
  * deeper than one level needs its own explicit path, see
  * `additionalRedactPaths` below).
  */
-const DEFAULT_REDACT_FIELD_NAMES: readonly string[] = [
-	"password",
-	"token",
-	"accessToken",
-	"refreshToken",
-	"apiKey",
-	"secret",
-	"authorization",
-	"credential",
-];
-
-const DEFAULT_REDACT_PATHS: readonly string[] = DEFAULT_REDACT_FIELD_NAMES.flatMap((name) => [name, `*.${name}`]);
+const DEFAULT_REDACT_PATHS: readonly string[] = VEHICLE_CREDENTIAL_FIELD_NAMES.flatMap((name) => [name, `*.${name}`]);
 
 export interface CreateLoggerOptions {
 	/** Env var read for the minimum level, e.g. "PI_PACKED_LOG_LEVEL". Defaults to "info" when unset or unrecognized. */

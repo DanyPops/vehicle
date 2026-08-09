@@ -11,21 +11,48 @@ name) rather than Pi's generic JSON dump: an effect-colored call row, a
 table for array-of-object results, a progress bar for a mid-flight partial
 result, and collapsible JSON otherwise -- built on
 [`malevich-tui-components`](https://www.npmjs.com/package/malevich-tui-components).
-A consumer with real UX investment in one operation can still supply its
-own pair via `registerVehicleTools(pi, client, { renderers })`; every other
-operation keeps the generic rendering. Call `registerVehicleTools()` from an
-async extension factory so Pi has those renderers before replaying persisted
+Generic results are projected once, before persistence, into the strict,
+versioned `vehicle.tool-details/v1` DTO. It has independent serialized-detail,
+row, column, field-text, and preview-text bounds; expanded mode can reveal only
+rows already in that DTO. A consumer with real UX investment in one operation
+supplies a paired `presentations(descriptor)` contract: its required
+`projector.maxBytes` and `project()` produce JSON-safe persisted details, and
+its `renderResult` parses that exact DTO. Projection errors fail closed after
+the application invocation has succeeded; raw output is never silently
+persisted as a fallback. The older `renderers` option remains a compatibility
+path and retains legacy `{ vehicle, output }` details until that renderer is
+migrated. The human can select the generic bar's
+block language through the host extension: pass `progressBarGlyphs: "shade" |
+"smooth" | "blocks" | "ascii"` (or a custom Malevich glyph set) to
+`registerVehicleTools`; progress geometry and transport data are unchanged.
+Call `registerVehicleTools()` from an async extension factory so Pi has those renderers before replaying persisted
 tool rows. Runtime-dependent availability synchronization is deferred to
 `session_start` automatically.
 
 That rendering is the human TUI channel only. What the model itself reads
-is separate: an operation's output defaults to raw formatted JSON, but an
+is separate: an operation's output defaults to bounded formatted JSON, but an
 operation whose result is meant to be read as a narrative (a workflow run's
 summary, a gate report) can include its own `content: [{ type: "text",
 text }]` field -- the same field name and shape MCP's `CallToolResult` and
 Pi's own tool-result type already use -- and that gets sent to the model
-instead. See `extractVehicleContent`/`WithVehicleContent` in
-`@danypops/vehicle-core`.
+instead. `modelContentMaxBytes` defaults to 16 KiB of UTF-8 text, independently
+of the operation transport limit and presentation-details limit. ANSI is
+removed; truncation ends with deterministic omitted-byte/`complete=false`
+metadata. Continue with a domain cursor/job/read operation rather than asking
+the renderer to reveal unpersisted output. See `extractVehicleContent`/
+`WithVehicleContent` in `@danypops/vehicle-core`.
+
+Progress uses the same bounded generic DTO for transient updates. An
+interactive follow-up's replacement output is what gets projected, while its
+model `content` is bounded independently. Replay strictly parses v1; malformed
+or newer presentation details fall back to useful model content without
+throwing. Historical `{ vehicle, output }` rows still use the legacy renderer
+compatibility path.
+
+Generic call rendering consults each operation's input JSON Schema recursively.
+`writeOnly: true`, `format: "password"`, and credential-shaped field names are
+always omitted. Use `x-vehicle-presentation: "omit"` for another sensitive or
+noisy field, or `"summarize"` to show only shape/size without its value.
 
 A consumer-local side effect the operation's own output can't carry --
 e.g. broadcasting on a same-process Pi extension event bus so a sibling

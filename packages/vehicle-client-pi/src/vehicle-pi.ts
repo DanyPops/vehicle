@@ -1,6 +1,7 @@
 import { MutationOutcomeUnknownError, PreDispatchConnectionError } from "@danypops/vehicle-client/daemon-client";
 import type {
 	AtomicJsonFsAdapter,
+	JsonValue,
 	VehicleClient,
 	VehicleContentBlock,
 	VehicleEffect,
@@ -25,10 +26,17 @@ import type {
 	ToolDefinition,
 	ToolExecutionMode,
 } from "@earendil-works/pi-coding-agent";
+import type { ProgressBarGlyphStyle, ProgressBarGlyphs } from "malevich-tui-components";
 import type { TSchema } from "typebox";
 import { publishVehicleActivity } from "./activity-broker.js";
 import { guardExtensionRuntimeInitialized, syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
 import { renderVehicleCall, renderVehicleResult } from "./vehicle-render.js";
+import {
+	assertJsonSafePresentation,
+	DEFAULT_PRESENTATION_MAX_BYTES,
+	projectGenericVehiclePresentation,
+	projectGenericVehicleProgress,
+} from "./vehicle-render-model.js";
 import { classifyVehicleOperationSafety, type VehicleSafetyPolicyStore, type VehicleSafetyState } from "./vehicle-safety.js";
 import { registerVehicleSafetyContributor } from "./vehicle-safety-registry.js";
 import {
@@ -49,7 +57,11 @@ export interface PiVehicleIdentity {
 
 export interface PiVehicleToolDetails {
 	readonly vehicle: PiVehicleIdentity;
+	/** Versioned, JSON-safe human-presentation DTO persisted for new projected rows. */
+	readonly presentation?: JsonValue;
+	/** Legacy compatibility only: historical/custom renderers may still consume raw output during the documented migration window. */
 	readonly output?: unknown;
+	/** Transient legacy progress compatibility; final rows do not persist this field. */
 	readonly progress?: unknown;
 }
 
@@ -73,6 +85,21 @@ export type PiVehicleInvocationResolver = (
 export interface VehicleToolRenderers {
 	readonly renderCall?: ToolDefinition<TSchema, PiVehicleToolDetails>["renderCall"];
 	readonly renderResult?: ToolDefinition<TSchema, PiVehicleToolDetails>["renderResult"];
+}
+
+export interface PiVehiclePresentationProjector {
+	/** Required bound over UTF-8 JSON bytes of the projector's return value. */
+	readonly maxBytes: number;
+	/** Runs once after the successful invocation and any interactive follow-up, before Pi persists details. */
+	project(output: unknown, request: PiVehicleInvocationRequest): JsonValue | Promise<JsonValue>;
+	/** Optional synchronous projection for transient progress updates. A failure drops that update and never aborts the invocation. */
+	projectProgress?(progress: unknown, request: PiVehicleInvocationRequest): JsonValue;
+}
+
+/** Keeps a custom renderer and the exact persisted DTO contract it parses next to each other. */
+export interface PiVehiclePresentationContract {
+	readonly projector: PiVehiclePresentationProjector;
+	readonly renderResult: ToolDefinition<TSchema, PiVehicleToolDetails>["renderResult"];
 }
 
 export interface PiVehicleFollowUpResult {
@@ -137,6 +164,16 @@ export interface RegisterVehicleToolsOptions {
 	 * to narrate what it computed.
 	 */
 	readonly renderers?: (descriptor: VehicleOperationDescriptor) => VehicleToolRenderers | undefined;
+	/**
+	 * Paired custom pre-persistence projector + renderer. Projection failures fail closed after the
+	 * application invocation has succeeded: raw output is never substituted into persisted details.
+	 * Omit this for the bounded generic vehicle.tool-details/v1 projector/renderer pair.
+	 */
+	readonly presentations?: (descriptor: VehicleOperationDescriptor) => PiVehiclePresentationContract | undefined;
+	/** Independent UTF-8 transcript budget. Defaults to 16 KiB; unrelated to transport and presentation-detail bounds. */
+	readonly modelContentMaxBytes?: number;
+	/** Human-selected glyph strategy for the generic renderer's progress bars. Geometry/math is unchanged. */
+	readonly progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle;
 	/**
 	 * Per-operation escape hatch for a client-local interactive step after a
 	 * successful invoke() -- see PiVehicleInteractiveFollowUp. Returning
@@ -285,6 +322,14 @@ export class PiVehicleInvocationError extends Error {
 	}
 }
 
+/** A fail-closed local projection error. The operation already succeeded; raw output is intentionally not persisted as fallback. */
+export class PiVehiclePresentationProjectionError extends Error {
+	constructor(operation: string, cause: unknown) {
+		super(`Could not project bounded presentation details for ${operation}`, { cause });
+		this.name = "PiVehiclePresentationProjectionError";
+	}
+}
+
 /** How long a local ctx.ui.confirm() prompt stays open before auto-denying (confirm()'s own documented timeout behavior) -- deliberately shorter than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses server-side while still mid-prompt locally. */
 const LOCAL_APPROVAL_PROMPT_TIMEOUT_MS = 2 * 60_000;
 
@@ -361,6 +406,59 @@ function formatJson(value: unknown): string {
 	const text = JSON.stringify(value, null, 2);
 	if (text === undefined) throw new Error("Vehicle returned a non-JSON result");
 	return text;
+}
+
+export const DEFAULT_MODEL_CONTENT_MAX_BYTES = 16 * 1024;
+const textEncoder = new TextEncoder();
+// biome-ignore lint/complexity/useRegexLiterals: a constructor avoids control-character lint on the equivalent literal.
+const ANSI_ESCAPE_PATTERN = new RegExp("\\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\\u0007]*(?:\\u0007|\\u001B\\\\))", "g");
+
+function utf8Bytes(text: string): number {
+	return textEncoder.encode(text).byteLength;
+}
+
+function truncateUtf8(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	if (utf8Bytes(text) <= maxBytes) return text;
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (utf8Bytes(text.slice(0, middle)) <= maxBytes) low = middle;
+		else high = middle - 1;
+	}
+	let end = low;
+	if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
+	return text.slice(0, end);
+}
+
+/** Applies the Pi transcript budget to semantic blocks and JSON fallback alike, stripping terminal-only ANSI first. */
+export function boundVehicleModelContent(
+	content: readonly VehicleContentBlock[],
+	maxBytes = DEFAULT_MODEL_CONTENT_MAX_BYTES,
+): readonly VehicleContentBlock[] {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("modelContentMaxBytes must be a positive integer");
+	const clean = content.map((block) => ({ type: "text" as const, text: block.text.replace(ANSI_ESCAPE_PATTERN, "") }));
+	const totalBytes = clean.reduce((total, block) => total + utf8Bytes(block.text), 0);
+	if (totalBytes <= maxBytes) return clean;
+
+	const joined = clean.map((block) => block.text).join("\n\n");
+	let retained = Math.max(0, maxBytes - 96);
+	let prefix = truncateUtf8(joined, retained);
+	for (let attempt = 0; attempt < 4; attempt++) {
+		const omittedBytes = Math.max(0, utf8Bytes(joined) - utf8Bytes(prefix));
+		const notice = `\n\n[Vehicle model content truncated: omitted ${omittedBytes} UTF-8 bytes; complete=false]`;
+		retained = Math.max(0, maxBytes - utf8Bytes(notice));
+		prefix = truncateUtf8(joined, retained);
+		if (utf8Bytes(prefix) + utf8Bytes(notice) <= maxBytes) return [{ type: "text", text: `${prefix}${notice}` }];
+	}
+	const notice = `[Vehicle model content truncated; complete=false]`;
+	return [{ type: "text", text: truncateUtf8(notice, maxBytes) }];
+}
+
+function modelContentFor(output: unknown, maxBytes: number | undefined): readonly VehicleContentBlock[] {
+	const content = extractVehicleContent(output) ?? [{ type: "text" as const, text: formatJson(output) }];
+	return boundVehicleModelContent(content, maxBytes ?? DEFAULT_MODEL_CONTENT_MAX_BYTES);
 }
 
 function vehicleIdentity(manifest: VehicleManifest, descriptor: VehicleOperationDescriptor, toolCallId: string): PiVehicleIdentity {
@@ -528,6 +626,8 @@ export interface VehicleOperationInvocationParams {
 	readonly signal?: AbortSignal;
 	readonly onUpdate?: AgentToolUpdateCallback<PiVehicleToolDetails>;
 	readonly options: RegisterVehicleToolsOptions;
+	/** Internal resolved contract. Omitted preserves standalone/custom legacy {vehicle, output} behavior. */
+	readonly presentationProjector?: PiVehiclePresentationProjector;
 }
 
 export interface VehicleOperationInvocationResult {
@@ -560,20 +660,24 @@ export interface VehicleOperationInvocationResult {
  */
 export async function invokeVehicleOperation(params: VehicleOperationInvocationParams): Promise<VehicleOperationInvocationResult> {
 	const { client, manifest, descriptor, toolName, toolCallId, input, context, signal, onUpdate, options } = params;
+	const presentationProjector = params.presentationProjector ?? options.presentations?.(descriptor)?.projector;
 	const identity = vehicleIdentity(manifest, descriptor, toolCallId);
-	const resolved = await options.resolveInvocation?.({
-		descriptor,
-		manifest,
-		toolName,
-		toolCallId,
-		input,
-		context,
-	});
+	const request: PiVehicleInvocationRequest = { descriptor, manifest, toolName, toolCallId, input, context, signal, onUpdate };
+	const resolved = await options.resolveInvocation?.(request);
 
 	const reportProgress: VehicleInvocationOptions["onProgress"] = (progress) => {
+		let presentation: JsonValue | undefined;
+		if (presentationProjector?.projectProgress) {
+			try {
+				presentation = presentationProjector.projectProgress(progress, request);
+				assertJsonSafePresentation(presentation, presentationProjector.maxBytes);
+			} catch {
+				return;
+			}
+		}
 		onUpdate?.({
-			content: [{ type: "text", text: formatJson(progress) }],
-			details: { vehicle: identity, progress },
+			content: [...boundVehicleModelContent([{ type: "text", text: formatJson(progress) }], options.modelContentMaxBytes)],
+			details: presentation === undefined ? { vehicle: identity, progress } : { vehicle: identity, presentation },
 		});
 	};
 	const baseInvocation: VehicleInvocationOptions = {
@@ -666,18 +770,36 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			// must never surface as a failed tool call.
 		}
 	}
+	let presentationOutput = output;
+	let content: readonly VehicleContentBlock[] | undefined;
 	const followUp = options.interactiveFollowUps?.(descriptor);
 	if (followUp) {
-		const request: PiVehicleInvocationRequest = { descriptor, manifest, toolName, toolCallId, input, context, signal, onUpdate };
 		const result = await followUp(request, output, client);
-		if (result) return { content: [...result.content], details: { vehicle: identity, output: result.output ?? output } };
+		if (result) {
+			presentationOutput = result.output ?? output;
+			content = boundVehicleModelContent(result.content, options.modelContentMaxBytes);
+		}
 	}
-	const content = extractVehicleContent(output) ?? [{ type: "text" as const, text: formatJson(output) }];
-	return {
-		content: [...content],
-		details: { vehicle: identity, output },
-	};
+	content ??= modelContentFor(output, options.modelContentMaxBytes);
+	if (!presentationProjector) {
+		return { content: [...content], details: { vehicle: identity, output: presentationOutput } };
+	}
+
+	let presentation: JsonValue;
+	try {
+		presentation = await presentationProjector.project(presentationOutput, request);
+		assertJsonSafePresentation(presentation, presentationProjector.maxBytes);
+	} catch (cause) {
+		throw new PiVehiclePresentationProjectionError(operationKey(descriptor), cause);
+	}
+	return { content: [...content], details: { vehicle: identity, presentation } };
 }
+
+const GENERIC_PRESENTATION_PROJECTOR: PiVehiclePresentationProjector = Object.freeze({
+	maxBytes: DEFAULT_PRESENTATION_MAX_BYTES,
+	project: (output: unknown) => projectGenericVehiclePresentation(output, DEFAULT_PRESENTATION_MAX_BYTES) as unknown as JsonValue,
+	projectProgress: (progress: unknown) => projectGenericVehicleProgress(progress, DEFAULT_PRESENTATION_MAX_BYTES) as unknown as JsonValue,
+});
 
 function createTool(
 	client: VehicleClient,
@@ -687,6 +809,9 @@ function createTool(
 	options: RegisterVehicleToolsOptions,
 ): ToolDefinition<TSchema, PiVehicleToolDetails> {
 	const overrides = options.renderers?.(descriptor);
+	const presentation = options.presentations?.(descriptor);
+	// A custom legacy renderResult with no paired projector keeps {vehicle, output}; every generic row uses the bounded v1 DTO.
+	const presentationProjector = presentation?.projector ?? (overrides?.renderResult ? undefined : GENERIC_PRESENTATION_PROJECTOR);
 	return {
 		name: toolName,
 		label: displayLabel(descriptor),
@@ -700,8 +825,10 @@ function createTool(
 		executionMode: options.executionMode?.(descriptor),
 		renderCall: overrides?.renderCall ?? ((args, theme, context) => renderVehicleCall(descriptor, args, theme, context)),
 		renderResult:
+			presentation?.renderResult ??
 			overrides?.renderResult ??
-			((result, resultOptions, theme, context) => renderVehicleResult(descriptor, result, resultOptions, theme, context)),
+			((result, resultOptions, theme, context) =>
+				renderVehicleResult(descriptor, result, resultOptions, theme, context, options.progressBarGlyphs)),
 		async execute(toolCallId, input, signal, onUpdate, context) {
 			const result = await invokeVehicleOperation({
 				client,
@@ -714,6 +841,7 @@ function createTool(
 				signal,
 				onUpdate,
 				options,
+				presentationProjector,
 			});
 			return { content: [...result.content], details: result.details };
 		},

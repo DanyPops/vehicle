@@ -167,6 +167,42 @@ any `VehicleClient` a fixture supplies. Caught a real bug live:
 exactly the kind of drift a shared suite catches and two separate test files
 wouldn't.
 
+### Tool Shell rendering boundaries
+
+Vehicle keeps five contracts separate so changing a terminal view cannot alter
+what the model reads or cause an application response to be persisted forever:
+
+1. **Application DTO** -- the provider's validated operation output. Its
+   `maxResponseBytes` is a transport limit, not a transcript or session budget.
+2. **Model content** -- semantic, ANSI-free `VehicleContentBlock` text selected
+   from `output.content` (or bounded JSON fallback). The Pi adapter defaults to
+   a 16 KiB UTF-8 budget, configurable with `modelContentMaxBytes`; truncation
+   reports omitted bytes and `complete=false`.
+3. **Persisted presentation details** -- a JSON-safe, versioned, independently
+   bounded human DTO. The generic `vehicle.tool-details/v1` projection caps
+   total bytes, rows, columns, field text, and previews before Pi persists it;
+   it never stores the raw application DTO or credential-shaped output fields.
+4. **Interactive component** -- `renderResult` strictly parses persisted
+   details and may collapse/expand only that already-bounded DTO. Malformed or
+   unknown details fail closed to model content. Historical `{vehicle, output}`
+   rows remain readable during the compatibility window.
+5. **CLI presenters** -- host-specific stdout/stderr formatting over the
+   application DTO. It is neither Pi model content nor persisted TUI state and
+   owns its own output bounds.
+
+A custom Pi presentation uses `presentations(descriptor)` to return a paired
+`projector` (required `maxBytes`, `project`, optional transient
+`projectProgress`) and `renderResult`. Projection runs after a successful
+invocation and any interactive follow-up but before the result is returned to
+Pi. A projection exception fails closed without persisting raw output; the
+application mutation, if any, has already happened and is not rolled back.
+Expanded/collapsed rendering never changes `content` or `details`.
+
+Input call rows are schema-aware: standard `writeOnly` and password format plus
+`x-vehicle-presentation: "omit" | "summarize"` control human display
+recursively. The shared credential-name vocabulary is defense in depth, never
+the only contract.
+
 ## Use a Vehicle from a Pi extension
 
 ```ts

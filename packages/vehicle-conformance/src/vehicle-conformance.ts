@@ -418,3 +418,116 @@ export function runVehicleClientConformance(fixture: VehicleConformanceFixture):
 		});
 	});
 }
+
+export interface ToolShellConformanceSnapshot {
+	readonly content: string;
+	readonly details: unknown;
+}
+
+export interface ToolShellRenderOptions {
+	readonly width: 40 | 80 | 120;
+	readonly expanded: boolean;
+	readonly partial?: boolean;
+}
+
+/**
+ * Host adapter for the Tool Shell's two independent persisted channels. The
+ * conformance package stays Pi-free: a Pi adapter supplies component output,
+ * while a CLI or another host can supply its own renderer through this same API.
+ */
+export interface ToolShellDualChannelSubject {
+	readonly bounds: { readonly modelContentBytes: number; readonly presentationDetailsBytes: number };
+	execute(): Promise<ToolShellConformanceSnapshot>;
+	render(snapshot: ToolShellConformanceSnapshot, options: ToolShellRenderOptions): readonly string[];
+	replay(details: unknown, fallbackContent: string, options: ToolShellRenderOptions): readonly string[];
+	renderCall(args: unknown, width: 40 | 80 | 120): readonly string[];
+	invalidProjection(): Promise<unknown>;
+}
+
+export interface ToolShellDualChannelFixture {
+	readonly label: string;
+	create(): Promise<{ readonly subject: ToolShellDualChannelSubject; readonly cleanup: () => Promise<void> }>;
+}
+
+function utf8Length(value: string): number {
+	return new TextEncoder().encode(value).byteLength;
+}
+
+// biome-ignore lint/complexity/useRegexLiterals: a constructor avoids control-character lint on the equivalent literal.
+const ANSI_CSI_PATTERN = new RegExp("\\u001B\\[[0-?]*[ -/]*[@-~]", "g");
+
+function assertPhysicalLines(lines: readonly string[], width: number): void {
+	expect(lines.length).toBeGreaterThan(0);
+	for (const line of lines) {
+		expect(line).not.toContain("\n");
+		// ANSI is forbidden in model content, but permitted in host rendering.
+		const visible = line.replace(ANSI_CSI_PATTERN, "");
+		expect([...visible].length).toBeLessThanOrEqual(width);
+	}
+}
+
+/** Reusable provider-facing dual-channel contract matrix. */
+export function runToolShellDualChannelConformance(fixture: ToolShellDualChannelFixture): void {
+	describe(`Vehicle Tool Shell dual-channel conformance: ${fixture.label}`, () => {
+		it("keeps model and persisted-presentation sentinels isolated under independent named bounds", async () => {
+			const { subject, cleanup } = await fixture.create();
+			try {
+				const snapshot = await subject.execute();
+				expect(snapshot.content).toContain("MODEL_ONLY");
+				expect(snapshot.content).not.toContain("PRESENTATION_ONLY");
+				const details = JSON.stringify(snapshot.details);
+				expect(details).toContain("PRESENTATION_ONLY");
+				expect(details).not.toContain("MODEL_ONLY");
+				expect(details).not.toContain("RAW_SECRET");
+				expect(utf8Length(snapshot.content)).toBeLessThanOrEqual(subject.bounds.modelContentBytes);
+				expect(utf8Length(details)).toBeLessThanOrEqual(subject.bounds.presentationDetailsBytes);
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("keeps model content semantic, ANSI-free, and useful when replay details reject", async () => {
+			const { subject, cleanup } = await fixture.create();
+			try {
+				const snapshot = await subject.execute();
+				expect(snapshot.content).not.toContain("\u001b[");
+				for (const details of [{ schema: "unknown/v99" }, { malformed: true }, { output: { legacy: true } }, undefined]) {
+					const lines = subject.replay(details, snapshot.content, { width: 80, expanded: false });
+					expect(lines.join("\n")).toContain("MODEL_ONLY");
+				}
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("changes only human rendering across collapsed/expanded and 40/80/120 layouts", async () => {
+			const { subject, cleanup } = await fixture.create();
+			try {
+				const snapshot = await subject.execute();
+				const before = JSON.stringify(snapshot);
+				for (const width of [40, 80, 120] as const) {
+					assertPhysicalLines(subject.render(snapshot, { width, expanded: false }), width);
+					assertPhysicalLines(subject.render(snapshot, { width, expanded: true }), width);
+					assertPhysicalLines(subject.render(snapshot, { width, expanded: false, partial: true }), width);
+				}
+				expect(JSON.stringify(snapshot)).toBe(before);
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("never echoes schema-sensitive call input and follows the documented projector exception policy", async () => {
+			const { subject, cleanup } = await fixture.create();
+			try {
+				for (const width of [40, 80, 120] as const) {
+					const call = subject.renderCall({ name: "safe-task", token: "RAW_SECRET" }, width).join("\n");
+					expect(call).toContain("safe-task");
+					expect(call).not.toContain("RAW_SECRET");
+				}
+				await expect(subject.invalidProjection()).rejects.toBeTruthy();
+			} finally {
+				await cleanup();
+			}
+		});
+	});
+}

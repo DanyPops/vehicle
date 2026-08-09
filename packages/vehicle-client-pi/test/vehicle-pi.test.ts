@@ -13,8 +13,10 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
 import { Check } from "typebox/value";
 import { registerActivityBroker, unregisterActivityBroker, type VehicleActivityEvent } from "../src/activity-broker.ts";
 import {
+	boundVehicleModelContent,
 	invokeVehicleOperation,
 	PiVehicleInvocationError,
+	PiVehiclePresentationProjectionError,
 	type PiVehicleToolDetails,
 	refreshVehicleToolAvailability,
 	registerVehicleTools,
@@ -409,7 +411,9 @@ describe("registerVehicleTools", () => {
 		expect(updates).toEqual([
 			{
 				content: [{ type: "text", text: '{\n  "phase": "half"\n}' }],
-				details: expect.objectContaining({ progress: { phase: "half" } }),
+				details: expect.objectContaining({
+					presentation: expect.objectContaining({ schema: "vehicle.tool-details/v1" }),
+				}),
 			},
 		]);
 	});
@@ -699,7 +703,7 @@ describe("registerVehicleTools", () => {
 	});
 
 	describe("interactiveFollowUps", () => {
-		it("a follow-up returning a result overrides both content and details.output", async () => {
+		it("a follow-up returning a result overrides both content and projected presentation", async () => {
 			const client = new FakeClient(manifest([operation("discuss.open")]));
 			client.result = { discussion: { id: "d-1" }, rounds: [{ content: "question?" }] };
 			const { pi, tools } = fakePi();
@@ -714,7 +718,8 @@ describe("registerVehicleTools", () => {
 			});
 			const result = await execute(tools[0]!, { value: "go" });
 			expect(result.content[0]).toMatchObject({ text: "answered: question?" });
-			expect((result.details as PiVehicleToolDetails).output).toEqual({ answered: true });
+			expect(JSON.stringify((result.details as PiVehicleToolDetails).presentation)).toContain("true");
+			expect((result.details as PiVehicleToolDetails).output).toBeUndefined();
 			expect((result.details as PiVehicleToolDetails).vehicle.operation).toBe("discuss.open");
 		});
 
@@ -725,7 +730,8 @@ describe("registerVehicleTools", () => {
 			await registerVehicleTools(pi, client, { interactiveFollowUps: () => async () => undefined });
 			const result = await execute(tools[0]!, { value: "go" });
 			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("discussions") });
-			expect((result.details as PiVehicleToolDetails).output).toEqual({ discussions: [] });
+			expect((result.details as PiVehicleToolDetails).presentation).toBeDefined();
+			expect((result.details as PiVehicleToolDetails).output).toBeUndefined();
 		});
 
 		// Every other operation is unaffected by a resolver targeting one specific operation.
@@ -737,7 +743,8 @@ describe("registerVehicleTools", () => {
 				interactiveFollowUps: (descriptor) => (descriptor.name === "discuss.open" ? async () => ({ content: [] }) : undefined),
 			});
 			const result = await execute(tools[0]!, { value: "go" });
-			expect((result.details as PiVehicleToolDetails).output).toEqual({ hits: 3 });
+			expect(JSON.stringify((result.details as PiVehicleToolDetails).presentation)).toContain("3");
+			expect((result.details as PiVehicleToolDetails).output).toBeUndefined();
 		});
 
 		it("omitting interactiveFollowUps entirely behaves exactly as before this option existed", async () => {
@@ -1103,7 +1110,7 @@ describe("registerVehicleTools", () => {
 		expect(result.content).toEqual([{ type: "text", text: JSON.stringify(client.result, null, 2) }]);
 	});
 
-	it("content blocks never replace details.output or the human renderCall/renderResult", async () => {
+	it("content blocks stay independent from bounded presentation details and human renderers", async () => {
 		const client = new FakeClient(manifest([operation("issues.search")]));
 		client.result = { total: 2, content: [{ type: "text", text: "Found 2 issues." }] };
 		const { pi, tools } = fakePi();
@@ -1111,9 +1118,98 @@ describe("registerVehicleTools", () => {
 		await registerVehicleTools(pi, client);
 		const result = await execute(tools[0]!, { value: "bug" });
 
-		expect((result.details as PiVehicleToolDetails).output).toEqual(client.result);
+		expect((result.details as PiVehicleToolDetails).output).toBeUndefined();
+		expect((result.details as PiVehicleToolDetails).presentation).toBeDefined();
 		expect(tools[0]?.renderCall).toBeDefined();
 		expect(tools[0]?.renderResult).toBeDefined();
+	});
+
+	it("persists a projected sentinel without retaining a raw-output-only sentinel", async () => {
+		const client = new FakeClient(manifest([operation("projection.test")]));
+		client.result = { content: [{ type: "text", text: "MODEL_ONLY" }], raw: "RAW_OUTPUT_ONLY" };
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {
+			presentations: () => ({
+				projector: { maxBytes: 512, project: () => ({ schema: "custom/v1", text: "PRESENTATION_ONLY" }) },
+				renderResult: () => ({ render: () => ["custom"], invalidate: () => {} }),
+			}),
+		});
+		const result = await execute(tools[0]!, { value: "go" });
+		const serializedDetails = JSON.stringify(result.details);
+		expect(serializedDetails).toContain("PRESENTATION_ONLY");
+		expect(serializedDetails).not.toContain("RAW_OUTPUT_ONLY");
+		expect(result.content).toEqual([{ type: "text", text: "MODEL_ONLY" }]);
+		expect(serializedDetails).not.toContain("MODEL_ONLY");
+	});
+
+	it("keeps model content and projected presentation independently selectable", async () => {
+		async function projected(model: string, presentation: string) {
+			const client = new FakeClient(manifest([operation("projection.independent")]));
+			client.result = { content: [{ type: "text", text: model }] };
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, client, {
+				presentations: () => ({
+					projector: { maxBytes: 256, project: () => ({ schema: "custom/v1", text: presentation }) },
+					renderResult: () => ({ render: () => ["custom"], invalidate: () => {} }),
+				}),
+			});
+			return execute(tools[0]!, { value: "go" });
+		}
+		const first = await projected("MODEL_A", "PRESENTATION_A");
+		const changedPresentation = await projected("MODEL_A", "PRESENTATION_B");
+		const changedModel = await projected("MODEL_B", "PRESENTATION_A");
+		const firstDetails = first.details as PiVehicleToolDetails;
+		const changedPresentationDetails = changedPresentation.details as PiVehicleToolDetails;
+		const changedModelDetails = changedModel.details as PiVehicleToolDetails;
+		expect(first.content).toEqual(changedPresentation.content);
+		expect(firstDetails.presentation).not.toEqual(changedPresentationDetails.presentation);
+		expect(first.content).not.toEqual(changedModel.content);
+		expect(firstDetails.presentation).toEqual(changedModelDetails.presentation);
+	});
+
+	it("fails closed for cyclic, non-serializable, and oversized custom projection details", async () => {
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = cyclic;
+		for (const projected of [cyclic, { fn: () => true }, { text: "x".repeat(200) }]) {
+			const client = new FakeClient(manifest([operation("projection.invalid")]));
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, client, {
+				presentations: () => ({
+					projector: { maxBytes: 64, project: () => projected as never },
+					renderResult: () => ({ render: () => ["custom"], invalidate: () => {} }),
+				}),
+			});
+			await expect(execute(tools[0]!, { value: "go" })).rejects.toBeInstanceOf(PiVehiclePresentationProjectionError);
+		}
+	});
+
+	it("keeps legacy raw details for a custom renderer that has not adopted the paired projector contract", async () => {
+		const client = new FakeClient(manifest([operation("legacy.render")]));
+		client.result = { legacy: true };
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {
+			renderers: () => ({ renderResult: () => ({ render: () => ["legacy"], invalidate: () => {} }) }),
+		});
+		const result = await execute(tools[0]!, { value: "go" });
+		expect((result.details as PiVehicleToolDetails).output).toEqual({ legacy: true });
+	});
+
+	it("bounds semantic and JSON-fallback model content independently, strips ANSI, and reports completeness", async () => {
+		const semantic = boundVehicleModelContent([{ type: "text", text: `useful-prefix \x1b[31m${"😀".repeat(200)}\x1b[0m` }], 128);
+		const semanticText = semantic.map((block) => block.text).join("");
+		expect(Buffer.byteLength(semanticText)).toBeLessThanOrEqual(128);
+		expect(semanticText).toContain("useful-prefix");
+		expect(semanticText).toContain("complete=false");
+		expect(semanticText).not.toContain("\x1b[");
+
+		const client = new FakeClient(manifest([operation("content.large", 1, { limits: { ...limits, maxResponseBytes: 1_000_000 } })]));
+		client.result = { value: "x".repeat(100_000) };
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, { modelContentMaxBytes: 256 });
+		const result = await execute(tools[0]!, { value: "go" });
+		const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(256);
+		expect(text).toContain("complete=false");
 	});
 });
 

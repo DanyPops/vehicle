@@ -1,4 +1,11 @@
-import { extractVehicleContent, type VehicleEffect, type VehicleOperationDescriptor } from "@danypops/vehicle-core";
+import {
+	extractVehicleContent,
+	isVehicleCredentialFieldName,
+	type JsonSchema,
+	VEHICLE_SCHEMA_PRESENTATION_EXTENSION,
+	type VehicleEffect,
+	type VehicleOperationDescriptor,
+} from "@danypops/vehicle-core";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { keyHint, type Theme, type ThemeColor, type ToolDefinition, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
@@ -11,12 +18,15 @@ import {
 	deriveTableColumns,
 	firstDistinctStyle,
 	ProgressBar,
+	type ProgressBarGlyphStyle,
+	type ProgressBarGlyphs,
 	renderBoundedTable,
 	renderTruncatedList,
 	statelessComponent,
 	Text,
 	type TextMeasure,
 } from "malevich-tui-components";
+import { type GenericVehiclePresentation, parseGenericVehiclePresentation, type VehiclePresentationField } from "./vehicle-render-model.js";
 
 // ToolRenderContext itself isn't part of the public export barrel; derive
 // its shape from the exported ToolDefinition so this stays in sync with
@@ -129,13 +139,62 @@ interface ArgsDisplay {
 	readonly rest?: string;
 }
 
-function splitArgsForDisplay(args: unknown, cwd: string | undefined, width: number): ArgsDisplay {
+type SchemaNode = Readonly<Record<string, unknown>>;
+
+function propertySchema(schema: SchemaNode | undefined, key: string): SchemaNode | undefined {
+	const properties = schema?.properties;
+	if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return undefined;
+	const child = (properties as Record<string, unknown>)[key];
+	return typeof child === "object" && child !== null && !Array.isArray(child) ? (child as SchemaNode) : undefined;
+}
+
+function presentationMode(schema: SchemaNode | undefined): "omit" | "summarize" | undefined {
+	const mode = schema?.[VEHICLE_SCHEMA_PRESENTATION_EXTENSION];
+	return mode === "omit" || mode === "summarize" ? mode : undefined;
+}
+
+function isSensitiveSchema(key: string, schema: SchemaNode | undefined): boolean {
+	return (
+		isVehicleCredentialFieldName(key) || schema?.writeOnly === true || schema?.format === "password" || presentationMode(schema) === "omit"
+	);
+}
+
+function summarizedValue(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? "" : "s"}]`;
+	if (typeof value === "object" && value !== null)
+		return `{${Object.keys(value).length} field${Object.keys(value).length === 1 ? "" : "s"}}`;
+	if (typeof value === "string") return `<${value.length} chars>`;
+	return `<${typeof value}>`;
+}
+
+function sanitizeCallValue(value: unknown, schema: SchemaNode | undefined): unknown {
+	if (presentationMode(schema) === "summarize") return summarizedValue(value);
+	if (Array.isArray(value)) {
+		const itemSchema =
+			typeof schema?.items === "object" && schema.items !== null && !Array.isArray(schema.items) ? (schema.items as SchemaNode) : undefined;
+		return value.map((item) => sanitizeCallValue(item, itemSchema));
+	}
+	if (typeof value !== "object" || value === null) return value;
+	return Object.fromEntries(
+		Object.entries(value as Record<string, unknown>)
+			.filter(([key]) => !isSensitiveSchema(key, propertySchema(schema, key)))
+			.map(([key, child]) => [key, sanitizeCallValue(child, propertySchema(schema, key))]),
+	);
+}
+
+function splitArgsForDisplay(args: unknown, cwd: string | undefined, width: number, inputSchema: JsonSchema): ArgsDisplay {
 	if (args === undefined || args === null) return {};
 	if (typeof args !== "object" || Array.isArray(args)) {
-		const text = truncateToWidth(formatArgValue(args), width);
+		const text = truncateToWidth(formatArgValue(sanitizeCallValue(args, inputSchema)), width);
 		return text ? { rest: text } : {};
 	}
-	const visible = dropCwdRedundantArgs(args as Record<string, unknown>, cwd);
+	const schema = inputSchema as SchemaNode;
+	const sanitized = Object.fromEntries(
+		Object.entries(args as Record<string, unknown>)
+			.filter(([key]) => !isSensitiveSchema(key, propertySchema(schema, key)))
+			.map(([key, value]) => [key, sanitizeCallValue(value, propertySchema(schema, key))]),
+	);
+	const visible = dropCwdRedundantArgs(sanitized, cwd);
 	const identityKey = DEFAULT_IDENTITY_ARG_KEYS.find((key) => typeof visible[key] === "string" && (visible[key] as string).trim());
 	const pairs = Object.entries(visible)
 		.filter(([key, value]) => value !== undefined && key !== identityKey)
@@ -167,7 +226,7 @@ export function renderVehicleCall(
 	theme: Theme,
 	context: RenderCallContext,
 ): Component {
-	const { identity, rest } = splitArgsForDisplay(args, context.cwd, 60);
+	const { identity, rest } = splitArgsForDisplay(args, context.cwd, 60, descriptor.inputSchema);
 	const segments = [
 		theme.bold(humanizeOperationName(descriptor.name)),
 		...(identity ? [theme.fg("accent", identity)] : []),
@@ -184,13 +243,13 @@ function moreRowsLine(theme: Theme, hiddenCount: number): string {
 }
 
 /** Best-effort duck-typing over an untyped Vehicle progress payload: {current,total} or {value,max} render as a bar, anything else falls back to a plain line. */
-function progressBarFor(progress: unknown, theme: Theme): Component {
+function progressBarFor(progress: unknown, theme: Theme, glyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle): Component {
 	if (progress && typeof progress === "object") {
 		const p = progress as Record<string, unknown>;
 		const value = typeof p.current === "number" ? p.current : typeof p.value === "number" ? p.value : undefined;
 		const max = typeof p.total === "number" ? p.total : typeof p.max === "number" ? p.max : undefined;
 		if (value !== undefined) {
-			return new ProgressBar({ value, max: max ?? 100, style: (s) => theme.fg("accent", s), measure });
+			return new ProgressBar({ value, max: max ?? 100, glyphs, style: (s) => theme.fg("accent", s), measure });
 		}
 	}
 	const text = typeof progress === "string" ? progress : JSON.stringify(progress);
@@ -353,17 +412,107 @@ function renderArrayOutput(items: readonly unknown[], options: ToolRenderResultO
 	return undefined;
 }
 
+function renderedFields(fields: readonly VehiclePresentationField[], theme: Theme): Component {
+	const detailFields: DetailField[] = fields.map((field) => ({ label: humanizeFieldKey(field.label), value: field.value }));
+	const fieldTheme = flatRecordTheme(theme);
+	return statelessComponent((width) =>
+		buildDetailLines(Math.max(1, width), { fields: detailFields, alignFields: true, theme: fieldTheme, measure }),
+	);
+}
+
+function appendPresentationAnnotations(
+	inner: Component,
+	fields: readonly VehiclePresentationField[],
+	omitted: number,
+	theme: Theme,
+): Component {
+	let result = inner;
+	if (fields.length > 0)
+		result = withTrailingLine(result, theme.fg("dim", fields.map((field) => `${field.label}: ${field.value}`).join(" · ")));
+	if (omitted > 0) result = withTrailingLine(result, theme.fg("dim", `… ${omitted} omitted before persistence`));
+	return result;
+}
+
+function renderProjectedPresentation(
+	presentation: GenericVehiclePresentation,
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle,
+): Component {
+	const view = presentation.view;
+	switch (view.kind) {
+		case "empty":
+			return new Text({ text: theme.fg("dim", "No results."), measure });
+		case "progress":
+			return view.value === undefined
+				? new Text({ text: theme.fg("dim", view.text), measure })
+				: progressBarFor({ value: view.value, max: view.max }, theme, progressBarGlyphs);
+		case "fields":
+			return appendPresentationAnnotations(renderedFields(view.fields, theme), [], view.completeness.omitted, theme);
+		case "narrative": {
+			const text = new CollapsibleText({ text: view.text, collapsedLines: options.expanded ? Number.MAX_SAFE_INTEGER : 5, measure });
+			return appendPresentationAnnotations(text, view.fields, view.completeness.omitted, theme);
+		}
+		case "json": {
+			const text = new CollapsibleText({ text: view.preview, collapsedLines: 5, headerStyle: (s) => theme.fg("dim", s), measure });
+			if (options.expanded) text.expand();
+			return appendPresentationAnnotations(text, [], view.completeness.omitted, theme);
+		}
+		case "list": {
+			const visibleCount = options.expanded ? view.items.length : Math.min(DEFAULT_VISIBLE_ROWS, view.items.length);
+			const lines = renderTruncatedList({
+				items: view.items,
+				expanded: options.expanded,
+				visibleCount,
+				formatItem: (item) => theme.fg("text", item),
+				moreLine: (hiddenCount) => moreRowsLine(theme, hiddenCount),
+			});
+			return appendPresentationAnnotations(new Text({ text: lines.join("\n"), measure }), view.fields, view.completeness.omitted, theme);
+		}
+		case "table": {
+			const objects = view.rows.map((row) => Object.fromEntries(view.columns.map((column, index) => [column, row[index] ?? ""])));
+			const table = deriveTableColumns(objects);
+			const rendered = table
+				? renderBoundedTable({
+						...table,
+						expanded: options.expanded,
+						visibleRowCount: DEFAULT_VISIBLE_ROWS,
+						moreLine: (hiddenCount) => moreRowsLine(theme, hiddenCount),
+						headerStyle: (s) => theme.fg("muted", theme.bold(s)),
+						measure,
+					})
+				: new Text({ text: theme.fg("dim", "No results."), measure });
+			const omitted = view.completeness.omitted;
+			const columnNote = view.columnsOmitted > 0 ? [{ label: "columns", value: `${view.columnsOmitted} omitted` }] : [];
+			return appendPresentationAnnotations(rendered, [...view.fields, ...columnNote], omitted, theme);
+		}
+	}
+}
+
+function renderModelContentFallback(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme): Component {
+	const text = result.content.map((block) => (block.type === "text" ? block.text : `[${block.type}]`)).join("\n");
+	return new CollapsibleText({
+		text: theme.fg("dim", text || "No presentation details."),
+		collapsedLines: options.expanded ? Number.MAX_SAFE_INTEGER : 5,
+		measure,
+	});
+}
+
 export function renderVehicleResult(
 	_descriptor: VehicleOperationDescriptor,
 	result: AgentToolResult<unknown>,
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	context: RenderResultContext,
+	progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle,
 ): Component {
-	const details = result.details as { output?: unknown; progress?: unknown } | undefined;
+	const details = result.details as { output?: unknown; progress?: unknown; presentation?: unknown } | undefined;
+	const projected = details && Object.hasOwn(details, "presentation") ? parseGenericVehiclePresentation(details.presentation) : undefined;
 
 	if (options.isPartial) {
-		return progressBarFor(details?.progress, theme);
+		return projected
+			? renderProjectedPresentation(projected, options, theme, progressBarGlyphs)
+			: progressBarFor(details?.progress, theme, progressBarGlyphs);
 	}
 
 	if (context.isError) {
@@ -375,7 +524,11 @@ export function renderVehicleResult(
 		});
 	}
 
-	const output = details?.output;
+	if (projected) return renderProjectedPresentation(projected, options, theme, progressBarGlyphs);
+	if (!details || !Object.hasOwn(details, "output")) return renderModelContentFallback(result, options, theme);
+
+	// Compatibility window for historical session rows persisted before vehicle.tool-details/v1.
+	const output = details.output;
 	if (Array.isArray(output)) {
 		const rendered = renderArrayOutput(output, options, theme);
 		if (rendered) return rendered;
@@ -393,22 +546,16 @@ export function renderVehicleResult(
 				return plain.siblings.length > 0 ? withTrailingLine(rendered, theme.fg("dim", formatSiblingLine(plain.siblings))) : rendered;
 			}
 			const fields = flatRecordEnvelope(output);
-			if (fields) {
-				const fieldTheme = flatRecordTheme(theme);
-				return statelessComponent((width) =>
-					buildDetailLines(Math.max(1, width), { fields, alignFields: true, theme: fieldTheme, measure }),
+			if (fields)
+				return renderedFields(
+					fields.map((field) => ({ label: field.label, value: String(field.value) })),
+					theme,
 				);
-			}
 		}
 	}
 
 	const text = JSON.stringify(output, null, 2) ?? "null";
-	const collapsible = new CollapsibleText({
-		text,
-		collapsedLines: 5,
-		headerStyle: (s) => theme.fg("dim", s),
-		measure,
-	});
+	const collapsible = new CollapsibleText({ text, collapsedLines: 5, headerStyle: (s) => theme.fg("dim", s), measure });
 	if (options.expanded) collapsible.expand();
 	return collapsible;
 }

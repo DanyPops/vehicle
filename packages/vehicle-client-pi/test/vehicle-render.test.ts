@@ -3,6 +3,7 @@ import type { VehicleEffect, VehicleOperationDescriptor } from "@danypops/vehicl
 import { initTheme, Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Box, visibleWidth } from "@earendil-works/pi-tui";
 import { humanizeOperationName, pickIdentityArgument, renderVehicleCall, renderVehicleResult } from "../src/vehicle-render.ts";
+import { projectGenericVehiclePresentation } from "../src/vehicle-render-model.ts";
 
 // A real Theme, not a fake -- fg()/bg() throw for a token missing here, unlike fakeTheme/flatTheme/ansiTheme.
 const REAL_FG_COLORS: Record<ThemeColor, string> = {
@@ -200,6 +201,56 @@ describe("renderVehicleCall", () => {
 		);
 		expect(component.render(80).join("\n")).toBe("<muted>Issue List <accent>abc-123");
 	});
+
+	it("recursively omits standard/schema-marked and credential-shaped secrets at 40/80/120 columns", () => {
+		const secured = descriptor("external-write", {
+			inputSchema: {
+				type: "object",
+				properties: {
+					name: { type: "string" },
+					token: { type: "string" },
+					opaque: { type: "string", writeOnly: true },
+					passwordField: { type: "string", format: "password" },
+					nested: { type: "object", properties: { authorization: { type: "string" }, safe: { type: "string" } } },
+					body: { type: "string", "x-vehicle-presentation": "summarize" },
+					metadata: { type: "object", "x-vehicle-presentation": "omit" },
+				},
+			},
+		});
+		const args = {
+			name: "lease-heartbeat",
+			token: "TOKEN_SECRET",
+			opaque: "OPAQUE_SECRET",
+			passwordField: "PASSWORD_SECRET",
+			nested: { authorization: "AUTH_SECRET", safe: "visible" },
+			body: "NOISY_BODY_SECRET",
+			metadata: { value: "METADATA_SECRET" },
+		};
+		for (const width of [40, 80, 120]) {
+			const text = renderVehicleCall(secured, args, fakeTheme, callContext()).render(width).join("\n");
+			expect(text).toContain("lease-heart");
+			for (const secret of ["TOKEN_SECRET", "OPAQUE_SECRET", "PASSWORD_SECRET", "AUTH_SECRET", "NOISY_BODY_SECRET", "METADATA_SECRET"]) {
+				expect(text).not.toContain(secret);
+			}
+		}
+	});
+
+	it("does not echo a lease capability token while retaining task identity and safe fields", () => {
+		const lease = descriptor("local-write", {
+			name: "tasks.heartbeat",
+			inputSchema: {
+				type: "object",
+				properties: { name: { type: "string" }, token: { type: "string", writeOnly: true }, extendMs: { type: "number" } },
+			},
+		});
+		const text = renderVehicleCall(lease, { name: "task-42", token: "capability-secret", extendMs: 5000 }, fakeTheme, callContext())
+			.render(120)
+			.join("\n");
+		expect(text).toContain("Tasks Heartbeat");
+		expect(text).toContain("task-42");
+		expect(text).toContain("extendMs=5000");
+		expect(text).not.toContain("capability-secret");
+	});
 });
 
 // Drives renderVehicleCall through the real Theme across every effect/arg shape --
@@ -279,6 +330,54 @@ describe("renderVehicleResult", () => {
 		);
 		const line = component.render(40).join("\n");
 		expect(line).toContain("30%");
+	});
+
+	it("renders the same progress geometry with a caller-selected block glyph strategy", () => {
+		const component = renderVehicleResult(
+			descriptor("read"),
+			{ content: [], details: { progress: { current: 7, total: 10 } } },
+			{ isPartial: true, expanded: false },
+			fakeTheme,
+			resultContext(),
+			"blocks",
+		);
+		const line = component.render(20).join("\n");
+		expect(line).toContain("|");
+		expect(line).toContain("■");
+		expect(line).toContain("70%");
+		expect(line).not.toContain("░");
+	});
+
+	it("expanded rendering shows every persisted row but never a row omitted by projection", () => {
+		const rows = Array.from({ length: 80 }, (_, index) => ({ id: `row-${index}` }));
+		const presentation = projectGenericVehiclePresentation(rows);
+		const component = renderVehicleResult(
+			descriptor("read"),
+			{ content: [{ type: "text", text: "fallback" }], details: { presentation } },
+			{ isPartial: false, expanded: true },
+			fakeTheme,
+			resultContext(),
+		);
+		const text = component.render(120).join("\n");
+		expect(text).toContain("row-0");
+		expect(text).toContain("omitted before persistence");
+		expect(text).not.toContain("row-79");
+	});
+
+	it("malformed and unknown presentation details fail closed to independently useful model content", () => {
+		for (const presentation of [
+			{ schema: "vehicle.tool-details/v2", view: {} },
+			{ schema: "vehicle.tool-details/v1", view: { kind: "table" } },
+		]) {
+			const component = renderVehicleResult(
+				descriptor("read"),
+				{ content: [{ type: "text", text: "MODEL_FALLBACK" }], details: { presentation } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+			);
+			expect(component.render(80).join("\n")).toContain("MODEL_FALLBACK");
+		}
 	});
 
 	it("renders a Table for an array-of-objects output", () => {
