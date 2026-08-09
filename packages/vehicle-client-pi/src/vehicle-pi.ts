@@ -29,6 +29,7 @@ import type {
 import type { ProgressBarGlyphStyle, ProgressBarGlyphs } from "malevich-tui-components";
 import type { TSchema } from "typebox";
 import { publishVehicleActivity } from "./activity-broker.js";
+import { reportClassificationFailure } from "./client-diagnostics.js";
 import { type PiApprovalAnswer, type PiHitlPresentation, requestPiApproval } from "./hitl-prompt.js";
 import { guardExtensionRuntimeInitialized, syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
 import { renderVehicleCall, renderVehicleResult } from "./vehicle-render.js";
@@ -509,18 +510,43 @@ function publishOperationActivity(
 	});
 }
 
-function sanitizedFailure(error: unknown): VehicleFailure {
-	if (error instanceof VehicleError) return error.toFailure();
-	if (error instanceof PiVehicleInvocationError) return error.failure;
-	if (error instanceof MutationOutcomeUnknownError || error instanceof PreDispatchConnectionError) {
-		const causeMessage = boundedCauseMessage(error.cause);
+/** vehicle-core, vehicle-client/daemon-client, and this module's own PiVehicleInvocationError are always real classes in a correctly resolved install -- but a real live incident (a broken/duplicated dependency resolution putting one of them at `undefined`) turned every classification below into an uncaught `TypeError: Right-hand side of 'instanceof' is not an object`, crashing every single Vehicle error response, not just the one that first hit it. Treating a non-function right-hand side as simply "doesn't match" instead of throwing is the actual fix; classifyKnownFailure's own outer try/catch below is defense-in-depth for anything else this narrow guard doesn't cover (e.g. a poisoned prototype chain on `error` itself). */
+function safeInstanceOf(value: unknown, ctor: unknown): boolean {
+	return typeof ctor === "function" && value instanceof ctor;
+}
+
+/** The code sanitizedFailure() itself falls back to only when its own classification logic threw internally -- distinguishable from GENERIC_TRANSPORT_FAILURE_CODE (a real transport failure) so a caller/log can tell "the vehicle client has an internal bug" apart from "the network/daemon failed". Always paired with reportClassificationFailure so the failure is actually diagnosable, not just silently downgraded. */
+const CLASSIFICATION_FAILURE_CODE = "vehicle-client-classification-failed";
+
+function classifyKnownFailure(error: unknown): VehicleFailure | undefined {
+	if (safeInstanceOf(error, VehicleError)) return (error as VehicleError).toFailure();
+	if (safeInstanceOf(error, PiVehicleInvocationError)) return (error as PiVehicleInvocationError).failure;
+	if (safeInstanceOf(error, MutationOutcomeUnknownError) || safeInstanceOf(error, PreDispatchConnectionError)) {
+		const typed = error as MutationOutcomeUnknownError | PreDispatchConnectionError;
+		const causeMessage = boundedCauseMessage(typed.cause);
 		return {
-			code: error.code,
+			code: typed.code,
 			category: "unavailable",
-			message: error.message,
-			retryable: error instanceof PreDispatchConnectionError,
-			...(error.operationId ? { details: { operationId: error.operationId } } : {}),
+			message: typed.message,
+			retryable: safeInstanceOf(error, PreDispatchConnectionError),
+			...(typed.operationId ? { details: { operationId: typed.operationId } } : {}),
 			...(causeMessage ? { causeMessage } : {}),
+		};
+	}
+	return undefined;
+}
+
+function sanitizedFailure(error: unknown): VehicleFailure {
+	try {
+		const known = classifyKnownFailure(error);
+		if (known) return known;
+	} catch (internalFailure) {
+		reportClassificationFailure(error, internalFailure);
+		return {
+			code: CLASSIFICATION_FAILURE_CODE,
+			category: "unavailable",
+			message: "Vehicle client failed to classify an invocation error (see vehicle-client-pi diagnostics)",
+			retryable: false,
 		};
 	}
 	// This branch only ever sees a raw transport-level throw (a stale/dead connection, a fetch()

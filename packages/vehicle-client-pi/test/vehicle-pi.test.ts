@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import diagnosticsChannel from "node:diagnostics_channel";
 import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import { MutationOutcomeUnknownError, PreDispatchConnectionError } from "@danypops/vehicle-client/daemon-client";
 import type {
@@ -12,6 +13,7 @@ import { VehicleError } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { registerActivityBroker, unregisterActivityBroker, type VehicleActivityEvent } from "../src/activity-broker.ts";
+import { CLASSIFICATION_FAILURE_CHANNEL_NAME } from "../src/client-diagnostics.ts";
 import {
 	boundVehicleModelContent,
 	invokeVehicleOperation,
@@ -602,6 +604,48 @@ describe("registerVehicleTools", () => {
 				retryable: true,
 				details: { operationId: "call-456" },
 			});
+		}
+	});
+
+	it("never lets an unexpected internal classification failure escape as an uncaught throw", async () => {
+		// Regression guard for a real live incident: a broken/duplicated dependency resolution made
+		// one of sanitizedFailure()'s own instanceof checks throw "Right-hand side of 'instanceof' is
+		// not an object", crashing every single Vehicle error response in that session, not just the
+		// one that first hit it. A poisoned prototype chain reproduces the same class of internal
+		// failure (instanceof itself throwing) without needing to break a real import binding.
+		const poisoned = new Proxy(new Error("boom"), {
+			getPrototypeOf() {
+				throw new Error("getPrototypeOf trap exploded");
+			},
+		});
+		const events: unknown[] = [];
+		const channel = diagnosticsChannel.channel(CLASSIFICATION_FAILURE_CHANNEL_NAME);
+		const subscriber = (event: unknown) => events.push(event);
+		channel.subscribe(subscriber);
+		const client = new FakeClient(manifest([operation("fail.test")]));
+		client.error = poisoned;
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {});
+		try {
+			try {
+				await execute(tools[0]!, { value: "go" });
+				throw new Error("expected invocation failure");
+			} catch (error) {
+				expect(error).toBeInstanceOf(PiVehicleInvocationError);
+				const failure = (error as PiVehicleInvocationError).failure;
+				expect(failure).toMatchObject({ code: "vehicle-client-classification-failed", retryable: false });
+			}
+			expect(events).toHaveLength(1);
+			// originalErrorKind is "unknown", not "Error": `poisoned` is the exact same broken-prototype-chain
+			// object throughout, so even the diagnostic's own safeErrorKind() can't safely inspect it either --
+			// it degrades to "unknown" instead of repeating the crash, which is the behavior under test.
+			expect(events[0]).toMatchObject({
+				originalErrorKind: "unknown",
+				internalFailureKind: "Error",
+				internalFailureMessage: "getPrototypeOf trap exploded",
+			});
+		} finally {
+			channel.unsubscribe(subscriber);
 		}
 	});
 

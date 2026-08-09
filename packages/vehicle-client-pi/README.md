@@ -64,6 +64,19 @@ no such bus), and never aborts the tool call: an error thrown from
 `onInvoked` is swallowed, the same "best-effort broadcast" contract a
 direct `pi.events.emit()` call would carry on its own.
 
+Every invocation failure is sanitized into a structured `VehicleFailure` before it
+reaches Pi (`sanitizedFailure()`), classifying `VehicleError`, a Vehicle-client
+transport error, or a raw transport-level throw. That classification is itself
+instrumented (`./client-diagnostics`): if it ever fails internally (its own
+name for this: `vehicle-client-classification-failed`), the failure is
+reported on the `vehicle-client-pi:classification-failure`
+[`node:diagnostics_channel`](https://nodejs.org/api/diagnostics_channel.html)
+(subscribe directly for a real observability pipeline; zero cost with no
+subscriber) and, when `VEHICLE_CLIENT_DIAG=1`, appended as a JSONL line to
+`~/.cache/vehicle/client-diag.log` (override with `VEHICLE_CLIENT_DIAG_PATH`)
+for interactive debugging of one live session -- never the original error's
+own message/stack, only its constructor name.
+
 The same package carries the rest of this house's Pi-extension-facing
 surface: `./pi-load-harness` (jiti-load-safety verification for any
 Pi-loaded module), `./multi-select-list` (Malevich's bounded multi-select
