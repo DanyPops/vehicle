@@ -10,8 +10,8 @@ import {
 import { bridgeVehicleEventsToPushChannel, VehicleRegistry } from "@danypops/vehicle-server";
 import { createVehicleHttpApp } from "@danypops/vehicle-server/http";
 import { PushChannel } from "@danypops/vehicle-server/push-channel";
-import { LocalVehicleClient } from "../src/vehicle-local-client.ts";
 import { RemoteVehicleClient } from "../src/vehicle-http-client.ts";
+import { LocalVehicleClient } from "../src/vehicle-local-client.ts";
 
 const objectSchema = <T extends Record<string, unknown>>(properties: Record<string, JsonValue>, parse: (value: unknown) => T | undefined) =>
 	defineVehicleSchema<T>({
@@ -47,7 +47,9 @@ const Announce = defineVehicleOperation({
 	description: "Emits test.announced with the given message.",
 	input: announcementSchema,
 	output: objectSchema<{ ok: boolean }>({ ok: { type: "boolean" } }, (value) =>
-		typeof value === "object" && value !== null && typeof (value as { ok?: unknown }).ok === "boolean" ? { ok: (value as { ok: boolean }).ok } : undefined,
+		typeof value === "object" && value !== null && typeof (value as { ok?: unknown }).ok === "boolean"
+			? { ok: (value as { ok: boolean }).ok }
+			: undefined,
 	),
 	permissions: [],
 	effect: "local-write",
@@ -83,7 +85,13 @@ describe("Vehicle Events: registerEvent/emit/subscribe walking skeleton", () => 
 		const registry = new VehicleRegistry({ name: "test-vehicle", version: "1.0.0", description: "Test Vehicle" });
 		registry.registerEvent(
 			"test-owner",
-			defineVehicleEvent({ name: "test.tiny", version: 1, description: "A tiny-budget event.", payload: announcementSchema, maxPayloadBytes: 8 }),
+			defineVehicleEvent({
+				name: "test.tiny",
+				version: 1,
+				description: "A tiny-budget event.",
+				payload: announcementSchema,
+				maxPayloadBytes: 8,
+			}),
 		);
 		expect(() => registry.emit("test.tiny", 1, { message: "this message is definitely too long for 8 bytes" })).toThrow(
 			/exceeds its 8-byte limit/,

@@ -230,8 +230,7 @@ function readLockInfo(lockPath: string): { pid: number; provenance: LockLaunchPr
 		const pid = Number.parseInt((lines[0] ?? "").trim(), 10);
 		if (!Number.isInteger(pid)) return null;
 		const rawProvenance = (lines[1] ?? "").trim();
-		const provenance =
-			rawProvenance === "auto-spawn" || rawProvenance === "service" || rawProvenance === "unknown" ? rawProvenance : null;
+		const provenance = rawProvenance === "auto-spawn" || rawProvenance === "service" || rawProvenance === "unknown" ? rawProvenance : null;
 		return { pid, provenance };
 	} catch {
 		return null;

@@ -19,11 +19,7 @@ describe("createArmadaTestHarness", () => {
 		try {
 			const outcome = await harness.registrar.register(vehicle);
 			expect(outcome).toMatchObject({ ok: true, applied: [{ kind: "install", name: "mock-vehicle" }] });
-			expect(harness.events()).toEqual([
-				"replace:armada-mock-vehicle.service",
-				"start:armada-mock-vehicle.service",
-				"ready:mock-vehicle",
-			]);
+			expect(harness.events()).toEqual(["replace:armada-mock-vehicle.service", "start:armada-mock-vehicle.service", "ready:mock-vehicle"]);
 			expect(harness.application("mock-vehicle").state()).toBe("ready");
 			expect(await harness.status()).toMatchObject({
 				vehicles: [{ name: "mock-vehicle", nativeStatus: "running", ready: true, descriptorDrift: false }],

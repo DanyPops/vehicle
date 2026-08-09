@@ -317,7 +317,10 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 	// Any other provenance (auto-spawn/unknown) keeps today's plain behavior unchanged: losing
 	// the race there is a normal join between equally-unprivileged callers, not something to
 	// escalate over.
-	const lock = provenance === "service" ? await acquireDaemonLockAsService(lockPath, reclaimDepsWithLogging(options, logger)) : acquireDaemonLock(lockPath, undefined, provenance);
+	const lock =
+		provenance === "service"
+			? await acquireDaemonLockAsService(lockPath, reclaimDepsWithLogging(options, logger))
+			: acquireDaemonLock(lockPath, undefined, provenance);
 	if (!lock.acquired) throw new DaemonAlreadyRunningError(lock.holderPid);
 
 	if (options.pushChannel && !isBun) {

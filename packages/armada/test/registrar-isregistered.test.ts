@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createVehicleRegistrar, type NativeOperationOutcome, type NativeServiceController, type ReadinessProbe, systemdStrategy } from "../src/index.js";
+import {
+	createVehicleRegistrar,
+	type NativeOperationOutcome,
+	type NativeServiceController,
+	type ReadinessProbe,
+	systemdStrategy,
+} from "../src/index.js";
 
 function success(): NativeOperationOutcome {
 	return { ok: true, diagnostics: [] };

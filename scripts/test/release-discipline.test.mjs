@@ -74,7 +74,12 @@ describe("release discipline", () => {
 	it("requires a major bump after 1.0", () => {
 		const candidates = { removedDeclarations: ["OldPort"], removedProperties: [], addedRequiredProperties: [] };
 		expect(() =>
-			enforceReleaseDiscipline({ previousVersion: "1.4.0", currentVersion: "1.5.0", candidates, releaseMessage: "BREAKING CHANGE: removed" }),
+			enforceReleaseDiscipline({
+				previousVersion: "1.4.0",
+				currentVersion: "1.5.0",
+				candidates,
+				releaseMessage: "BREAKING CHANGE: removed",
+			}),
 		).toThrow("major version bump");
 	});
 });

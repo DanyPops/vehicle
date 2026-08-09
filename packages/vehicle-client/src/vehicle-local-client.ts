@@ -8,7 +8,13 @@
  * than folded into a shared barrel.
  */
 
-import type { VehicleClient, VehicleEventHandler, VehicleInvocationOptions, VehicleManifest, VehicleSubscription } from "@danypops/vehicle-core";
+import type {
+	VehicleClient,
+	VehicleEventHandler,
+	VehicleInvocationOptions,
+	VehicleManifest,
+	VehicleSubscription,
+} from "@danypops/vehicle-core";
 import { VehicleError } from "@danypops/vehicle-core";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
 

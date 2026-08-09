@@ -82,7 +82,8 @@ const unwatchOutputSchema = defineVehicleSchema<VehicleUnwatchOutput>({
 	jsonSchema: { type: "object", properties: { unwatched: { type: "boolean" } }, required: ["unwatched"], additionalProperties: false },
 	safeParse(value) {
 		const unwatched = (value as { unwatched?: unknown })?.unwatched;
-		if (typeof unwatched !== "boolean") return { success: false, issues: [{ path: ["unwatched"], message: "unwatched must be a boolean" }] };
+		if (typeof unwatched !== "boolean")
+			return { success: false, issues: [{ path: ["unwatched"], message: "unwatched must be a boolean" }] };
 		return { success: true, value: { unwatched } };
 	},
 });

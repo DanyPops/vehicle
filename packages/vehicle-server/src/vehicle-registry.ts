@@ -167,7 +167,9 @@ function abortError(signal: AbortSignal, deadline: number, operationId: string, 
 	const timedOut = Date.now() >= deadline || (signal.reason instanceof Error && signal.reason.name === "TimeoutError");
 	return new VehicleError(
 		timedOut ? "deadline-exceeded" : "cancelled",
-		timedOut ? `${key} exceeded its ${timeoutMs}ms deadline -- the operation was still running when the timeout elapsed` : "Vehicle operation cancelled",
+		timedOut
+			? `${key} exceeded its ${timeoutMs}ms deadline -- the operation was still running when the timeout elapsed`
+			: "Vehicle operation cancelled",
 		{
 			category: timedOut ? "timeout" : "cancelled",
 			retryable: false,

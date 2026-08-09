@@ -12,7 +12,9 @@ function git(args) {
 
 function declarationNames(lines, prefix) {
 	const names = new Set();
-	const pattern = new RegExp(`^\\${prefix}export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:class|function|interface|type|const|enum)\\s+([A-Za-z_$][\\w$]*)`);
+	const pattern = new RegExp(
+		`^\\${prefix}export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:class|function|interface|type|const|enum)\\s+([A-Za-z_$][\\w$]*)`,
+	);
 	for (const line of lines) {
 		const match = line.match(pattern);
 		if (match?.[1]) names.add(match[1]);

@@ -78,11 +78,10 @@ describe("registerVehicleToolsWhenReady", () => {
 	it("logs client-resolution-failed instead of silently swallowing a thrown resolveClient()", async () => {
 		const { pi, emit } = fakePi();
 		const events: VehicleReadyEvent[] = [];
-		const ready = registerVehicleToolsWhenReady(
-			pi,
-			() => Promise.reject(new Error("handle file unreadable")),
-			{ retry: { attempts: 1 }, log: (event) => events.push(event) },
-		);
+		const ready = registerVehicleToolsWhenReady(pi, () => Promise.reject(new Error("handle file unreadable")), {
+			retry: { attempts: 1 },
+			log: (event) => events.push(event),
+		});
 
 		await emit("session_start");
 		await ready;

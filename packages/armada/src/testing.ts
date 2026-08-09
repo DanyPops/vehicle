@@ -5,7 +5,6 @@ import { diagnostic } from "./fleet/diagnostic.js";
 import type { VehicleSpec } from "./fleet/manifest.js";
 import { readManifestFile } from "./fleet/manifest-store.js";
 import { buildFleetStatus, type FleetStatusReport, type ObservedVehicleHandle } from "./fleet/status.js";
-import { createVehicleRegistrar, type VehicleRegistrar } from "./registrar.js";
 import type {
 	NativeOperationOutcome,
 	NativeServiceController,
@@ -14,6 +13,7 @@ import type {
 	ReadinessProbe,
 } from "./native/service-manager.js";
 import { systemdStrategy } from "./native/systemd.js";
+import { createVehicleRegistrar, type VehicleRegistrar } from "./registrar.js";
 
 export type MockVehicleApplicationState = "stopped" | "starting" | "ready" | "crashed" | "exited";
 export type MockVehicleReadiness = "auto" | "manual" | "timeout";
@@ -184,9 +184,7 @@ export async function createArmadaTestHarness(options: ArmadaTestHarnessOptions 
 				record(`ready-timeout:${vehicle.name}`);
 				return Promise.resolve({
 					ok: false,
-					diagnostics: [
-						diagnostic("VEHICLE_READINESS_TIMEOUT", "error", `/vehicles/${vehicle.name}`, "Mock Vehicle did not become ready"),
-					],
+					diagnostics: [diagnostic("VEHICLE_READINESS_TIMEOUT", "error", `/vehicles/${vehicle.name}`, "Mock Vehicle did not become ready")],
 				});
 			}
 			if (readinessMode === "auto") {

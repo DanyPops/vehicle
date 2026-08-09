@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { VehicleError, vehicleWatchTopic, WatchLimitExceeded, WatchRegistry } from "@danypops/vehicle-core";
-import { createVehicleWatchOperations } from "../src/vehicle-watchers.ts";
 import { VehicleRegistry } from "../src/vehicle-registry.ts";
+import { createVehicleWatchOperations } from "../src/vehicle-watchers.ts";
 
 const LIMITS = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 } as const;
 

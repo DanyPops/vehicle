@@ -204,7 +204,7 @@ describe("acquireDaemonLock / releaseDaemonLock", () => {
 });
 
 describe("acquireDaemonLockAsService", () => {
-	it("acquires directly when nothing else holds the lock, recording provenance \"service\"", async () => {
+	it('acquires directly when nothing else holds the lock, recording provenance "service"', async () => {
 		const dir = mkdtempSync(join(tmpdir(), "daemon-kit-lock-"));
 		const lockPath = join(dir, "daemon.lock");
 		try {

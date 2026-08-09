@@ -280,7 +280,9 @@ describe("VehicleRegistry", () => {
 			"echo-provider",
 			bindVehicleOperation(slowOperation, () => () => new Promise(() => {})), // never resolves
 		);
-		const rejection = await registry.invoke("test.slow-echo", 1, { value: "hello" }, { permissions: ["test:echo"] }).catch((error) => error);
+		const rejection = await registry
+			.invoke("test.slow-echo", 1, { value: "hello" }, { permissions: ["test:echo"] })
+			.catch((error) => error);
 		expect(rejection).toMatchObject({ code: "deadline-exceeded" });
 		expect((rejection as Error).message).toContain("test.slow-echo");
 		expect((rejection as Error).message).toContain("20ms");
