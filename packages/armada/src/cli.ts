@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, win32 } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { executeCleanup, planDuplicateCleanup } from "./fleet/cleanup.js";
 import { type Diagnostic, diagnostic } from "./fleet/diagnostic.js";
 import { inspectHostProcesses, readVehicleHandles } from "./fleet/host-inspection.js";
@@ -389,8 +389,16 @@ async function readStandardInput(): Promise<string> {
 	return Buffer.concat(chunks, bytes).toString("utf8");
 }
 
-const isEntrypoint = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isEntrypoint) {
+export function isCliEntrypoint(modulePath: string, argumentPath: string | undefined): boolean {
+	if (argumentPath === undefined) return false;
+	try {
+		return realpathSync(modulePath) === realpathSync(argumentPath);
+	} catch {
+		return false;
+	}
+}
+
+if (isCliEntrypoint(fileURLToPath(import.meta.url), process.argv[1])) {
 	const kind = managerKind(process.platform);
 	const controller = createNativeController({ kind, descriptorRoot: defaultDescriptorRoot(kind) });
 	process.exitCode = await runCli(process.argv.slice(2), {

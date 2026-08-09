@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CliIo, runCli } from "../src/cli.js";
+import { type CliIo, isCliEntrypoint, runCli } from "../src/cli.js";
 import { type NativeServiceController, type NativeServiceManager, systemdStrategy } from "../src/index.js";
 import { manifestJson } from "./fixtures.js";
 
@@ -28,6 +28,19 @@ const manager: NativeServiceManager = {
 	},
 	inspect: () => Promise.resolve({ ok: true, services: [], diagnostics: [] }),
 };
+
+describe("armada CLI entrypoint", () => {
+	it("recognizes an installed bin symlink", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "armada-cli-entrypoint-"));
+		const modulePath = join(directory, "dist", "cli.js");
+		const binPath = join(directory, "bin", "armada");
+		await mkdir(join(directory, "dist"));
+		await mkdir(join(directory, "bin"));
+		await Bun.write(modulePath, "");
+		await symlink(modulePath, binPath);
+		expect(isCliEntrypoint(modulePath, binPath)).toBe(true);
+	});
+});
 
 describe("armada plan", () => {
 	it("runs manifest to plan through the injected native strategy", async () => {
