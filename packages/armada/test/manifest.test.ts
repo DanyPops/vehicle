@@ -82,6 +82,70 @@ describe("decodeArmadaManifest", () => {
 		]);
 	});
 
+	it("accepts a Burstable percentage envelope", () => {
+		const base = JSON.parse(manifestJson()).vehicles[0];
+		const resources = {
+			memoryLowPercent: { value: 3, enforcement: "required" },
+			memoryHighPercent: { value: 30, enforcement: "required" },
+			maximumMemoryPercent: { value: 37.5, enforcement: "required" },
+			cpuWeight: { value: 100, enforcement: "required" },
+		} as const;
+		const outcome = decodeArmadaManifest(manifestJson([{ ...base, resources }]));
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.manifest.vehicles[0]?.resources).toEqual(resources);
+	});
+
+	it.each([
+		[
+			"mixed high units",
+			{
+				memoryHighBytes: { value: 1_024, enforcement: "required" },
+				memoryHighPercent: { value: 30, enforcement: "required" },
+			},
+			"/vehicles/0/resources/memoryHighPercent",
+		],
+		[
+			"mixed maximum units",
+			{
+				maximumMemoryBytes: { value: 1_024, enforcement: "required" },
+				maximumMemoryPercent: { value: 37.5, enforcement: "required" },
+			},
+			"/vehicles/0/resources/maximumMemoryPercent",
+		],
+		[
+			"low above high",
+			{
+				memoryLowPercent: { value: 31, enforcement: "required" },
+				memoryHighPercent: { value: 30, enforcement: "required" },
+			},
+			"/vehicles/0/resources/memoryLowPercent",
+		],
+		[
+			"high above maximum",
+			{
+				memoryHighPercent: { value: 38, enforcement: "required" },
+				maximumMemoryPercent: { value: 37.5, enforcement: "required" },
+			},
+			"/vehicles/0/resources/memoryHighPercent",
+		],
+	])("rejects %s", (_name, resources, path) => {
+		const base = JSON.parse(manifestJson()).vehicles[0];
+		const outcome = decodeArmadaManifest(manifestJson([{ ...base, resources }]));
+		expect(outcome.ok).toBe(false);
+		if (outcome.ok) return;
+		expect(outcome.diagnostics).toContainEqual(expect.objectContaining({ code: "MANIFEST_MEMORY_ENVELOPE_INVALID", path }));
+	});
+
+	it.each([0, 100.1])("rejects an invalid memory percentage %s", (value) => {
+		const base = JSON.parse(manifestJson()).vehicles[0];
+		const resources = { memoryHighPercent: { value, enforcement: "required" } };
+		const outcome = decodeArmadaManifest(manifestJson([{ ...base, resources }]));
+		expect(outcome.ok).toBe(false);
+		if (outcome.ok) return;
+		expect(outcome.diagnostics.map((item) => item.code)).toContain("MANIFEST_SCHEMA_INVALID");
+	});
+
 	it("rejects duplicate Vehicle names", () => {
 		const one = JSON.parse(manifestJson()).vehicles[0];
 		const outcome = decodeArmadaManifest(manifestJson([one, one]));

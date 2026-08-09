@@ -82,6 +82,44 @@ describe("native service strategies", () => {
 		expect(outcome.descriptor.content).toContain("MemoryMax=3221225472");
 	});
 
+	it("maps a Burstable percentage envelope to systemd", () => {
+		const outcome = systemdStrategy.generateDescriptor(
+			vehicle({
+				name: "lector",
+				resources: {
+					memoryLowPercent: { value: 3, enforcement: "required" },
+					memoryHighPercent: { value: 30, enforcement: "required" },
+					maximumMemoryPercent: { value: 37.5, enforcement: "required" },
+					cpuWeight: { value: 100, enforcement: "required" },
+				},
+			}),
+		);
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.descriptor.content).toContain("MemoryLow=3%");
+		expect(outcome.descriptor.content).toContain("MemoryHigh=30%");
+		expect(outcome.descriptor.content).toContain("MemoryMax=37.5%");
+		expect(outcome.descriptor.content).toContain("CPUWeight=100");
+		expect(outcome.descriptor.content).not.toContain("CPUQuota=");
+	});
+
+	it("reports percentage envelopes unsupported by launchd", () => {
+		const resources = {
+			memoryLowPercent: { value: 3, enforcement: "required" as const },
+			memoryHighPercent: { value: 30, enforcement: "required" as const },
+			maximumMemoryPercent: { value: 37.5, enforcement: "required" as const },
+		};
+		const outcome = launchdStrategy.generateDescriptor(vehicle({ restart: { policy: "never" }, resources }));
+		expect(outcome).toMatchObject({
+			ok: false,
+			diagnostics: [
+				{ code: "NATIVE_RESOURCE_UNSUPPORTED_REQUIRED", path: "/resources/memoryLowPercent" },
+				{ code: "NATIVE_RESOURCE_UNSUPPORTED_REQUIRED", path: "/resources/memoryHighPercent" },
+				{ code: "NATIVE_RESOURCE_UNSUPPORTED_REQUIRED", path: "/resources/maximumMemoryPercent" },
+			],
+		});
+	});
+
 	it("rejects descriptor control-character injection", () => {
 		const outcome = systemdStrategy.generateDescriptor(vehicle({ arguments: ["serve\n[Install]"] }));
 		expect(outcome).toMatchObject({ ok: false, diagnostics: [{ code: "NATIVE_DESCRIPTOR_TEXT_INVALID", severity: "error" }] });

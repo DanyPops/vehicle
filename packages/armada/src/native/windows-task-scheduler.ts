@@ -6,6 +6,10 @@ import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrateg
 const capabilities: NativeManagerCapabilities = Object.freeze({
 	memoryHighBytes: false,
 	maximumMemoryBytes: false,
+	memoryLowPercent: false,
+	memoryHighPercent: false,
+	maximumMemoryPercent: false,
+	cpuWeight: false,
 	maximumCpuPercent: false,
 	maximumTasks: false,
 	restartAlways: false,

@@ -35,12 +35,20 @@ The default manifest is `~/.config/armada/armada.json` on Linux, `~/Library/Appl
         "pollIntervalMs": 100
       },
       "resources": {
-        "memoryHighBytes": {
-          "value": 2147483648,
+        "memoryLowPercent": {
+          "value": 3,
           "enforcement": "required"
         },
-        "maximumMemoryBytes": {
-          "value": 3221225472,
+        "memoryHighPercent": {
+          "value": 30,
+          "enforcement": "required"
+        },
+        "maximumMemoryPercent": {
+          "value": 37.5,
+          "enforcement": "required"
+        },
+        "cpuWeight": {
+          "value": 100,
           "enforcement": "required"
         }
       }
@@ -51,7 +59,7 @@ The default manifest is `~/.config/armada/armada.json` on Linux, `~/Library/Appl
 
 Credentials and secret-like material are rejected. Executables, working directories, and handle paths must be absolute.
 
-On systemd, `memoryHighBytes` maps to `MemoryHigh=` as the pressure boundary and `maximumMemoryBytes` maps to `MemoryMax=` as the final defense. When both are present, the high boundary must not exceed the maximum. Other native managers reject required memory boundaries and warn for optional ones they cannot enforce.
+On systemd, `memoryHighBytes` maps to `MemoryHigh=` as the pressure boundary and `maximumMemoryBytes` maps to `MemoryMax=` as the final defense. Percentage envelopes use `memoryLowPercent`, `memoryHighPercent`, and `maximumMemoryPercent` for a protected baseline, pressure boundary, and hard ceiling relative to installed physical memory. `cpuWeight` controls relative CPU access under contention without preventing idle-capacity bursts. Byte and percentage memory boundaries cannot be mixed, and boundaries must be ordered. Percentages scale with host size; they do not track currently free memory or reserve aggregate fleet capacity. Other native managers reject required resource controls and warn for optional controls they cannot enforce.
 
 ## Commands
 

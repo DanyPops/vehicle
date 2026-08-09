@@ -21,6 +21,20 @@ const Requirement = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const PercentageRequirement = Type.Object(
+	{
+		value: Type.Number({ minimum: 0.1, maximum: 100 }),
+		enforcement: Enforcement,
+	},
+	{ additionalProperties: false },
+);
+const WeightRequirement = Type.Object(
+	{
+		value: Type.Integer({ minimum: 1, maximum: 10_000 }),
+		enforcement: Enforcement,
+	},
+	{ additionalProperties: false },
+);
 const CapabilityRequirement = Type.Object({ enforcement: Enforcement }, { additionalProperties: false });
 const RestartPolicy = Type.Union([
 	Type.Object({ policy: Type.Literal("never") }, { additionalProperties: false }),
@@ -56,6 +70,10 @@ const VehicleSchema = Type.Object(
 				{
 					memoryHighBytes: Type.Optional(Requirement),
 					maximumMemoryBytes: Type.Optional(Requirement),
+					memoryLowPercent: Type.Optional(PercentageRequirement),
+					memoryHighPercent: Type.Optional(PercentageRequirement),
+					maximumMemoryPercent: Type.Optional(PercentageRequirement),
+					cpuWeight: Type.Optional(WeightRequirement),
 					maximumCpuPercent: Type.Optional(Requirement),
 					maximumTasks: Type.Optional(Requirement),
 				},
@@ -95,6 +113,10 @@ export interface ResourceRequirement {
 export interface VehicleResources {
 	readonly memoryHighBytes?: ResourceRequirement;
 	readonly maximumMemoryBytes?: ResourceRequirement;
+	readonly memoryLowPercent?: ResourceRequirement;
+	readonly memoryHighPercent?: ResourceRequirement;
+	readonly maximumMemoryPercent?: ResourceRequirement;
+	readonly cpuWeight?: ResourceRequirement;
 	readonly maximumCpuPercent?: ResourceRequirement;
 	readonly maximumTasks?: ResourceRequirement;
 }
@@ -228,15 +250,61 @@ export function decodeArmadaManifest(text: string): ManifestDecodeOutcome {
 				diagnostic("MANIFEST_READINESS_INTERVAL_INVALID", "error", `/vehicles/${index}/readiness`, "pollIntervalMs exceeds timeoutMs"),
 			);
 		}
-		const memoryHigh = vehicle.resources?.memoryHighBytes?.value;
-		const memoryMaximum = vehicle.resources?.maximumMemoryBytes?.value;
-		if (memoryHigh !== undefined && memoryMaximum !== undefined && memoryHigh > memoryMaximum) {
+		const resources = vehicle.resources;
+		const memoryHigh = resources?.memoryHighBytes?.value;
+		const memoryMaximum = resources?.maximumMemoryBytes?.value;
+		const memoryLowPercent = resources?.memoryLowPercent?.value;
+		const memoryHighPercent = resources?.memoryHighPercent?.value;
+		const memoryMaximumPercent = resources?.maximumMemoryPercent?.value;
+		const hasByteBoundary = memoryHigh !== undefined || memoryMaximum !== undefined;
+		const firstPercentageBoundary = [
+			["memoryLowPercent", memoryLowPercent],
+			["memoryHighPercent", memoryHighPercent],
+			["maximumMemoryPercent", memoryMaximumPercent],
+		].find(([, boundary]) => boundary !== undefined)?.[0];
+		if (hasByteBoundary && firstPercentageBoundary !== undefined) {
+			diagnostics.push(
+				diagnostic(
+					"MANIFEST_MEMORY_ENVELOPE_INVALID",
+					"error",
+					`/vehicles/${index}/resources/${firstPercentageBoundary}`,
+					"percentage memory boundaries cannot be combined with byte boundaries",
+				),
+			);
+		} else if (memoryHigh !== undefined && memoryMaximum !== undefined && memoryHigh > memoryMaximum) {
 			diagnostics.push(
 				diagnostic(
 					"MANIFEST_MEMORY_ENVELOPE_INVALID",
 					"error",
 					`/vehicles/${index}/resources/memoryHighBytes`,
 					"memoryHighBytes exceeds maximumMemoryBytes",
+				),
+			);
+		} else if (memoryLowPercent !== undefined && memoryHighPercent !== undefined && memoryLowPercent > memoryHighPercent) {
+			diagnostics.push(
+				diagnostic(
+					"MANIFEST_MEMORY_ENVELOPE_INVALID",
+					"error",
+					`/vehicles/${index}/resources/memoryLowPercent`,
+					"memoryLowPercent exceeds memoryHighPercent",
+				),
+			);
+		} else if (memoryLowPercent !== undefined && memoryMaximumPercent !== undefined && memoryLowPercent > memoryMaximumPercent) {
+			diagnostics.push(
+				diagnostic(
+					"MANIFEST_MEMORY_ENVELOPE_INVALID",
+					"error",
+					`/vehicles/${index}/resources/memoryLowPercent`,
+					"memoryLowPercent exceeds maximumMemoryPercent",
+				),
+			);
+		} else if (memoryHighPercent !== undefined && memoryMaximumPercent !== undefined && memoryHighPercent > memoryMaximumPercent) {
+			diagnostics.push(
+				diagnostic(
+					"MANIFEST_MEMORY_ENVELOPE_INVALID",
+					"error",
+					`/vehicles/${index}/resources/memoryHighPercent`,
+					"memoryHighPercent exceeds maximumMemoryPercent",
 				),
 			);
 		}

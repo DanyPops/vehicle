@@ -6,6 +6,10 @@ import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrateg
 const capabilities: NativeManagerCapabilities = Object.freeze({
 	memoryHighBytes: true,
 	maximumMemoryBytes: true,
+	memoryLowPercent: true,
+	memoryHighPercent: true,
+	maximumMemoryPercent: true,
+	cpuWeight: true,
 	maximumCpuPercent: true,
 	maximumTasks: true,
 	restartAlways: true,
@@ -53,8 +57,12 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	if (vehicle.runtime?.preventPrivilegeEscalation) unit.push("NoNewPrivileges=true");
 	if (vehicle.runtime?.privateTemporaryDirectory) unit.push("PrivateTmp=true");
 	const resources = vehicle.resources;
+	if (resources?.memoryLowPercent) unit.push(`MemoryLow=${resources.memoryLowPercent.value}%`);
 	if (resources?.memoryHighBytes) unit.push(`MemoryHigh=${resources.memoryHighBytes.value}`);
+	if (resources?.memoryHighPercent) unit.push(`MemoryHigh=${resources.memoryHighPercent.value}%`);
 	if (resources?.maximumMemoryBytes) unit.push(`MemoryMax=${resources.maximumMemoryBytes.value}`);
+	if (resources?.maximumMemoryPercent) unit.push(`MemoryMax=${resources.maximumMemoryPercent.value}%`);
+	if (resources?.cpuWeight) unit.push(`CPUWeight=${resources.cpuWeight.value}`);
 	if (resources?.maximumCpuPercent) unit.push(`CPUQuota=${resources.maximumCpuPercent.value}%`);
 	if (resources?.maximumTasks) unit.push(`TasksMax=${resources.maximumTasks.value}`);
 	unit.push("", "[Install]", "WantedBy=armada.target", "");

@@ -8,6 +8,10 @@ export type NativeServiceStatus = "absent" | "stopped" | "running" | "failed";
 export interface NativeManagerCapabilities {
 	readonly memoryHighBytes?: boolean;
 	readonly maximumMemoryBytes: boolean;
+	readonly memoryLowPercent?: boolean;
+	readonly memoryHighPercent?: boolean;
+	readonly maximumMemoryPercent?: boolean;
+	readonly cpuWeight?: boolean;
 	readonly maximumCpuPercent: boolean;
 	readonly maximumTasks: boolean;
 	readonly restartAlways: boolean;
