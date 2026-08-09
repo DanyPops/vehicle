@@ -3,7 +3,7 @@ import { bindVehicleOperation, defineVehicleOperation, defineVehicleSchema, type
 import { VehicleRegistry } from "@danypops/vehicle-server";
 import { createVehicleHttpApp } from "@danypops/vehicle-server/http";
 import type { Logger } from "@danypops/vehicle-server/logging";
-import { createReconnectingVehicleClient } from "../src/daemon-client.ts";
+import { createReconnectingVehicleClient, daemonInstanceIdentity } from "../src/daemon-client.ts";
 import { RemoteVehicleClient } from "../src/vehicle-http-client.ts";
 
 interface CapturedLog {
@@ -485,6 +485,26 @@ describe("createReconnectingVehicleClient: survives a daemon restart onto a new 
 
 		// No visible failure to the caller -- call() retries transparently against the fresh port.
 		await expect(client.manifest()).resolves.toMatchObject({ name: "test-vehicle" });
+		expect(connectCount).toBe(2);
+	});
+
+	it("identity-aware invoke() invalidates before dispatch, so the first post-restart mutation reaches only the replacement daemon", async () => {
+		const token = "test-token";
+		let currentBaseUrl = startServer(buildRegistry(), token);
+		let connectCount = 0;
+		const client = createReconnectingVehicleClient(
+			async () => {
+				connectCount++;
+				return new RemoteVehicleClient({ baseUrl: currentBaseUrl, token });
+			},
+			{ resolveIdentity: () => daemonInstanceIdentity(currentBaseUrl) },
+		);
+
+		await expect(client.invoke("test.echo", 1, { value: "first" }, { permissions: ["test:echo"] })).resolves.toEqual({ echoed: "first" });
+		servers[0]?.stop(true);
+		currentBaseUrl = startServer(buildRegistry(), token);
+
+		await expect(client.invoke("test.echo", 1, { value: "second" }, { permissions: ["test:echo"] })).resolves.toEqual({ echoed: "second" });
 		expect(connectCount).toBe(2);
 	});
 

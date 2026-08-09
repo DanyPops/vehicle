@@ -34,6 +34,73 @@ import type { VehicleClient } from "@danypops/vehicle-core";
 
 export type StaleConnectionPredicate = (error: unknown) => boolean;
 
+/** Opaque identity for one daemon process instance. Never use a bearer token as this value. */
+export type DaemonInstanceIdentity = string & { readonly __daemonInstanceIdentity: unique symbol };
+
+export function daemonInstanceIdentity(value: string): DaemonInstanceIdentity {
+	if (!value) throw new Error("daemon instance identity must not be empty");
+	return value as DaemonInstanceIdentity;
+}
+
+export interface DaemonIdentityChange {
+	previous: DaemonInstanceIdentity;
+	current: DaemonInstanceIdentity;
+}
+
+export interface CallOnceOptions {
+	/** Stable request/tool-call identifier carried into typed transport-ambiguity failures. */
+	operationId?: string;
+}
+
+export class PreDispatchConnectionError extends Error {
+	readonly code = "vehicle-pre-dispatch-connection-failed";
+	constructor(
+		readonly operationId: string | undefined,
+		cause: unknown,
+	) {
+		super(
+			`connection failed before dispatch${operationId ? ` (${operationId})` : ""}: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{
+				cause,
+			},
+		);
+		this.name = "PreDispatchConnectionError";
+	}
+}
+
+export class MutationOutcomeUnknownError extends Error {
+	readonly code = "vehicle-mutation-outcome-unknown";
+	constructor(
+		readonly operationId: string | undefined,
+		cause: unknown,
+	) {
+		super(
+			`operation outcome is unknown${operationId ? ` (${operationId})` : ""}: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{
+				cause,
+			},
+		);
+		this.name = "MutationOutcomeUnknownError";
+	}
+}
+
+const DEFINITELY_PRE_DISPATCH_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"]);
+
+/**
+ * Conservative classifier for failures proving no request reached the daemon. A bare
+ * `fetch failed`, timeout, reset, or abort is deliberately excluded: those can happen
+ * after the server applied a mutation but before the response reached the caller.
+ */
+export function isDefinitelyPreDispatchConnectionError(error: unknown): boolean {
+	let current: unknown = error;
+	for (let depth = 0; depth < 5 && current instanceof Error; depth++) {
+		const code = (current as Error & { code?: unknown }).code;
+		if (typeof code === "string" && DEFINITELY_PRE_DISPATCH_CODES.has(code)) return true;
+		current = current.cause;
+	}
+	return false;
+}
+
 /**
  * True when `error` means the connection itself is bad (worth dropping the
  * cached client and retrying once against a fresh one) -- a dead port after
@@ -82,7 +149,7 @@ export interface RetryingClient<Client> {
 	 * side effect (e.g. Vehicle's own invoke()); call() remains right for a
 	 * read-only or genuinely idempotent operation.
 	 */
-	callOnce<T>(operation: (client: Client) => Promise<T>): Promise<T>;
+	callOnce<T>(operation: (client: Client) => Promise<T>, options?: CallOnceOptions): Promise<T>;
 	/** Drops any cached client and resets the circuit breaker, forcing the next call() to reconnect. */
 	reset(): void;
 	/** Current breaker state, readable without triggering a live connect attempt. */
@@ -92,6 +159,12 @@ export interface RetryingClient<Client> {
 export interface CreateRetryingClientOptions {
 	/** Defaults to isLikelyStaleConnectionError. */
 	isStaleConnectionError?: StaleConnectionPredicate;
+	/** Defaults to the deliberately conservative isDefinitelyPreDispatchConnectionError. */
+	isPreDispatchConnectionError?: StaleConnectionPredicate;
+	/** Re-resolved before every dispatch; a changed value invalidates the cached client before the operation runs. */
+	resolveIdentity?: () => DaemonInstanceIdentity | Promise<DaemonInstanceIdentity>;
+	/** Called after identity-triggered invalidation so consumers can clear process-local registrations. */
+	onIdentityChange?: (change: DaemonIdentityChange) => void | Promise<void>;
 	/** Used only in the retry-exhausted error message, e.g. "Lector". */
 	label?: string;
 	/**
@@ -171,39 +244,70 @@ export function createRetryingClient<Client>(
 	options: CreateRetryingClientOptions = {},
 ): RetryingClient<Client> {
 	const isStale = options.isStaleConnectionError ?? isLikelyStaleConnectionError;
+	const isPreDispatch = options.isPreDispatchConnectionError ?? isDefinitelyPreDispatchConnectionError;
 	const label = options.label ?? "daemon";
 	const breaker =
 		options.circuitBreaker === false
 			? NULL_BREAKER
 			: new CircuitBreaker(options.circuitBreaker?.failureThreshold ?? 3, options.circuitBreaker?.cooldownMs ?? 10_000);
-	let cached: Promise<Client> | undefined;
+	let generation = 0;
+	let cached: { promise: Promise<Client>; generation: number } | undefined;
+	let currentIdentity: DaemonInstanceIdentity | undefined;
 
-	function resolveClient(): Promise<Client> {
+	function invalidateGeneration(usedGeneration: number): void {
+		if (cached?.generation === usedGeneration) {
+			cached = undefined;
+			generation++;
+		}
+	}
+
+	async function prepareIdentity(): Promise<void> {
+		if (!options.resolveIdentity) return;
+		const resolved = await options.resolveIdentity();
+		if (currentIdentity === undefined) {
+			currentIdentity = resolved;
+			return;
+		}
+		if (resolved === currentIdentity) return;
+		const previous = currentIdentity;
+		currentIdentity = resolved;
+		cached = undefined;
+		generation++;
+		breaker.reset();
+		await options.onIdentityChange?.({ previous, current: resolved });
+	}
+
+	function resolveClient(): { promise: Promise<Client>; generation: number } {
 		if (!cached) {
-			cached = connect()
+			const createdGeneration = generation;
+			const promise = connect()
 				.then((client) => {
 					breaker.recordSuccess();
 					return client;
 				})
 				.catch((error: unknown) => {
-					cached = undefined;
+					invalidateGeneration(createdGeneration);
 					breaker.recordFailure(error);
 					throw error;
 				});
+			cached = { promise, generation: createdGeneration };
 		}
 		return cached;
 	}
 
 	return {
 		async call(operation) {
-			if (breaker.isOpen()) throw breaker.lastFailure();
 			for (let attempt = 0; attempt < 2; attempt++) {
-				const client = await resolveClient();
+				await prepareIdentity();
+				if (breaker.isOpen()) throw breaker.lastFailure();
+				const resolved = resolveClient();
+				const client = await resolved.promise;
 				try {
 					return await operation(client);
 				} catch (error) {
-					cached = undefined;
-					if (attempt === 1 || !isStale(error)) throw error;
+					if (!isStale(error)) throw error;
+					invalidateGeneration(resolved.generation);
+					if (attempt === 1) throw error;
 				}
 			}
 			// Unreachable with the current fixed 2-attempt bound -- attempt 1's
@@ -212,18 +316,30 @@ export function createRetryingClient<Client>(
 			// ever becomes configurable.
 			throw new Error(`${label} client retry exhausted`);
 		},
-		async callOnce(operation) {
-			if (breaker.isOpen()) throw breaker.lastFailure();
-			const client = await resolveClient();
-			try {
-				return await operation(client);
-			} catch (error) {
-				if (isStale(error)) cached = undefined;
-				throw error;
+		async callOnce(operation, callOptions = {}) {
+			for (let attempt = 0; attempt < 2; attempt++) {
+				await prepareIdentity();
+				if (breaker.isOpen()) throw breaker.lastFailure();
+				const resolved = resolveClient();
+				const client = await resolved.promise;
+				try {
+					return await operation(client);
+				} catch (error) {
+					if (!isStale(error)) throw error;
+					invalidateGeneration(resolved.generation);
+					if (isPreDispatch(error)) {
+						if (attempt === 0) continue;
+						throw new PreDispatchConnectionError(callOptions.operationId, error);
+					}
+					if (error instanceof Error && error.name === "AbortError") throw error;
+					throw new MutationOutcomeUnknownError(callOptions.operationId, error);
+				}
 			}
+			throw new Error(`${label} client retry exhausted`);
 		},
 		reset() {
 			cached = undefined;
+			generation++;
 			breaker.reset();
 		},
 		breakerState() {
@@ -868,7 +984,9 @@ export function createReconnectingVehicleClient(
 		},
 		async invoke(name, version, input, invocationOptions) {
 			assertNotClosed();
-			return retrying.callOnce((client) => client.invoke(name, version, input, invocationOptions));
+			return retrying.callOnce((client) => client.invoke(name, version, input, invocationOptions), {
+				operationId: invocationOptions?.operationId,
+			});
 		},
 		async close() {
 			if (closed) return;

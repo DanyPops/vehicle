@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createExtensionHarness } from "@danypops/pi-extension-harness";
+import { MutationOutcomeUnknownError, PreDispatchConnectionError } from "@danypops/vehicle-client/daemon-client";
 import type {
 	AtomicJsonFsAdapter,
 	VehicleClient,
@@ -561,6 +562,42 @@ describe("registerVehicleTools", () => {
 			// generic "vehicle-client-failed" code, which carries zero information a user doesn't
 			// already have (every failure here is "a vehicle client failed").
 			expect((error as Error).message).toBe("test-vehicle: fetch failed (connect ECONNREFUSED 127.0.0.1:41203)");
+		}
+	});
+
+	it("preserves a typed mutation-outcome-unknown classification and operation ID", async () => {
+		const client = new FakeClient(manifest([operation("focus.test")]));
+		client.error = new MutationOutcomeUnknownError("call-123", new TypeError("fetch failed"));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {});
+		try {
+			await execute(tools[0]!, { value: "go" });
+			throw new Error("expected invocation failure");
+		} catch (error) {
+			const failure = (error as PiVehicleInvocationError).failure;
+			expect(failure).toMatchObject({
+				code: "vehicle-mutation-outcome-unknown",
+				retryable: false,
+				details: { operationId: "call-123" },
+			});
+		}
+	});
+
+	it("preserves a typed pre-dispatch exhaustion as retryable because the mutation never reached the daemon", async () => {
+		const client = new FakeClient(manifest([operation("focus.test")]));
+		client.error = new PreDispatchConnectionError("call-456", new TypeError("fetch failed"));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {});
+		try {
+			await execute(tools[0]!, { value: "go" });
+			throw new Error("expected invocation failure");
+		} catch (error) {
+			const failure = (error as PiVehicleInvocationError).failure;
+			expect(failure).toMatchObject({
+				code: "vehicle-pre-dispatch-connection-failed",
+				retryable: true,
+				details: { operationId: "call-456" },
+			});
 		}
 	});
 

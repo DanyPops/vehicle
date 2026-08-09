@@ -7,8 +7,11 @@ import {
 	connectWithVersionCheck,
 	createRetryingClient,
 	type DaemonHandleLike,
+	daemonInstanceIdentity,
 	daemonStatus,
+	isDefinitelyPreDispatchConnectionError,
 	isLikelyStaleConnectionError,
+	MutationOutcomeUnknownError,
 	type SpawnPlatformOptions,
 	spawnDetachedDaemon,
 } from "../src/daemon-client.ts";
@@ -43,6 +46,25 @@ describe("isLikelyStaleConnectionError", () => {
 	it("does not treat a non-Error value as stale", () => {
 		expect(isLikelyStaleConnectionError("boom")).toBe(false);
 		expect(isLikelyStaleConnectionError(undefined)).toBe(false);
+	});
+});
+
+describe("isDefinitelyPreDispatchConnectionError", () => {
+	it("recognizes Node fetch's nested ECONNREFUSED cause, where no request could have reached the daemon", () => {
+		const error = new TypeError("fetch failed", {
+			cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:41053"), { code: "ECONNREFUSED" }),
+		});
+		expect(isDefinitelyPreDispatchConnectionError(error)).toBe(true);
+	});
+
+	it("does not guess for a bare fetch failure, reset socket, abort, or timeout after dispatch may have begun", () => {
+		expect(isDefinitelyPreDispatchConnectionError(new TypeError("fetch failed"))).toBe(false);
+		expect(isDefinitelyPreDispatchConnectionError(Object.assign(new Error("socket reset"), { code: "ECONNRESET" }))).toBe(false);
+		for (const name of ["AbortError", "TimeoutError"]) {
+			const error = new Error(name);
+			error.name = name;
+			expect(isDefinitelyPreDispatchConnectionError(error)).toBe(false);
+		}
 	});
 });
 
@@ -262,6 +284,63 @@ describe("createRetryingClient", () => {
 		expect(connectCount).toBe(1); // no retry -- custom predicate said this isn't stale
 	});
 
+	describe("identity-aware invalidation", () => {
+		it("reconnects before dispatch when the resolved daemon identity changed, and notifies the consumer once", async () => {
+			let identity = daemonInstanceIdentity("pid=1;port=41053");
+			let connectCount = 0;
+			const changes: string[] = [];
+			const client = createRetryingClient(async () => new FakeClient(++connectCount), {
+				resolveIdentity: async () => identity,
+				onIdentityChange: ({ previous, current }) => {
+					changes.push(`${previous}->${current}`);
+				},
+			});
+
+			expect(await client.callOnce(async (resolved) => resolved.id)).toBe(1);
+			identity = daemonInstanceIdentity("pid=2;port=37225");
+			expect(await client.callOnce(async (resolved) => resolved.id)).toBe(2);
+			expect(changes).toEqual(["pid=1;port=41053->pid=2;port=37225"]);
+		});
+
+		it("a new daemon identity clears a breaker opened against the old instance before dispatch", async () => {
+			let identity = daemonInstanceIdentity("old");
+			let connectCount = 0;
+			const client = createRetryingClient<FakeClient>(
+				async () => {
+					connectCount++;
+					if (identity === "old") throw new Error("old daemon unavailable");
+					return new FakeClient(connectCount);
+				},
+				{ resolveIdentity: async () => identity, circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000 } },
+			);
+
+			await expect(client.call(async (resolved) => resolved.id)).rejects.toThrow("old daemon unavailable");
+			expect(client.breakerState().open).toBe(true);
+			identity = daemonInstanceIdentity("new");
+			expect(await client.call(async (resolved) => resolved.id)).toBe(2);
+			expect(client.breakerState().open).toBe(false);
+		});
+
+		it("an older in-flight stale failure cannot discard a newer generation's healthy client", async () => {
+			let identity = daemonInstanceIdentity("old");
+			let connectCount = 0;
+			let rejectOld!: (error: Error) => void;
+			const oldFailure = new Promise<never>((_, reject) => {
+				rejectOld = reject;
+			});
+			const client = createRetryingClient(async () => new FakeClient(++connectCount), { resolveIdentity: async () => identity });
+
+			const oldCall = client.callOnce(async () => oldFailure, { operationId: "old-call" });
+			await Promise.resolve();
+			identity = daemonInstanceIdentity("new");
+			expect(await client.call(async (resolved) => resolved.id)).toBe(2);
+			rejectOld(new TypeError("fetch failed"));
+			await expect(oldCall).rejects.toBeInstanceOf(MutationOutcomeUnknownError);
+			expect(await client.call(async (resolved) => resolved.id)).toBe(2);
+			expect(connectCount).toBe(2);
+		});
+	});
+
 	describe("callOnce", () => {
 		it("runs the operation once against a freshly connected client, same as call() on first attempt", async () => {
 			let connectCount = 0;
@@ -273,20 +352,37 @@ describe("createRetryingClient", () => {
 			expect(connectCount).toBe(1);
 		});
 
-		it("never retries the operation itself on a stale-connection error -- surfaces it immediately", async () => {
+		it("reconnects and retries transparently when ECONNREFUSED proves dispatch never began", async () => {
 			let connectCount = 0;
 			let operationCalls = 0;
-			const client = createRetryingClient(async () => {
-				connectCount++;
-				return new FakeClient(connectCount);
+			const client = createRetryingClient(async () => new FakeClient(++connectCount));
+			const result = await client.callOnce(async (resolved) => {
+				operationCalls++;
+				if (operationCalls === 1) {
+					throw new TypeError("fetch failed", {
+						cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:41053"), { code: "ECONNREFUSED" }),
+					});
+				}
+				return resolved.id;
 			});
-			await expect(
-				client.callOnce(async () => {
+			expect(result).toBe(2);
+			expect(operationCalls).toBe(2);
+			expect(connectCount).toBe(2);
+		});
+
+		it("never retries an ambiguous transport failure after dispatch may have begun; surfaces typed outcome-unknown with the operation id", async () => {
+			let operationCalls = 0;
+			const client = createRetryingClient(async () => new FakeClient(1));
+			const promise = client.callOnce(
+				async () => {
 					operationCalls++;
 					throw new TypeError("fetch failed");
-				}),
-			).rejects.toThrow("fetch failed");
-			expect(operationCalls).toBe(1); // never re-run, unlike call()'s own retry-once behavior
+				},
+				{ operationId: "call-123" },
+			);
+			await expect(promise).rejects.toBeInstanceOf(MutationOutcomeUnknownError);
+			await expect(promise).rejects.toMatchObject({ operationId: "call-123", cause: expect.any(TypeError) });
+			expect(operationCalls).toBe(1);
 		});
 
 		it("drops the cached client on a stale-connection failure, so the NEXT callOnce()/call() reconnects", async () => {

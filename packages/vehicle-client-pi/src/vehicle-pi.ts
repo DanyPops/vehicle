@@ -1,3 +1,4 @@
+import { MutationOutcomeUnknownError, PreDispatchConnectionError } from "@danypops/vehicle-client/daemon-client";
 import type {
 	AtomicJsonFsAdapter,
 	VehicleClient,
@@ -406,6 +407,17 @@ function publishOperationActivity(
 function sanitizedFailure(error: unknown): VehicleFailure {
 	if (error instanceof VehicleError) return error.toFailure();
 	if (error instanceof PiVehicleInvocationError) return error.failure;
+	if (error instanceof MutationOutcomeUnknownError || error instanceof PreDispatchConnectionError) {
+		const causeMessage = boundedCauseMessage(error.cause);
+		return {
+			code: error.code,
+			category: "unavailable",
+			message: error.message,
+			retryable: error instanceof PreDispatchConnectionError,
+			...(error.operationId ? { details: { operationId: error.operationId } } : {}),
+			...(causeMessage ? { causeMessage } : {}),
+		};
+	}
 	// This branch only ever sees a raw transport-level throw (a stale/dead connection, a fetch()
 	// failure, a stream read error) -- never a domain rejection, which VehicleError already carries
 	// its own opt-in exposeCause for. Node's fetch() populates a TypeError's .cause with the real
