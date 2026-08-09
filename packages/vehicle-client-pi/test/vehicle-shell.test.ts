@@ -80,6 +80,37 @@ describe("formatOperationManPage", () => {
 		const page = formatOperationManPage(descriptor({ inputSchema: { type: "object" } }), "tasks_depend");
 		expect(page).toContain("(none)");
 	});
+
+	it("documents a patternProperties-shaped free-form map the same way as additionalProperties-as-schema", () => {
+		// A free-form string-keyed map (e.g. Papyrus's tasks.create checklist) uses patternProperties
+		// rather than additionalProperties-as-schema so a client-side JSON-Schema validator (TypeBox's
+		// own Value.Errors()) can descend into the real nested violation instead of only reporting a
+		// generic top-level "must not have additional properties" -- tools_man's own documentation of
+		// that shape must stay unchanged either way.
+		const page = formatOperationManPage(
+			descriptor({
+				inputSchema: {
+					type: "object",
+					properties: {
+						checklist: {
+							type: "object",
+							patternProperties: {
+								"^.*$": {
+									type: "object",
+									properties: { proof: { type: "array", minItems: 1 } },
+									required: ["proof"],
+								},
+							},
+						},
+					},
+				},
+			}),
+			"tasks_create",
+		);
+		expect(page).toContain("checklist (object, optional)");
+		expect(page).toContain("values (object)");
+		expect(page).toContain("proof (array, required; minItems: 1)");
+	});
 });
 
 describe("VehicleShellTtlTracker", () => {

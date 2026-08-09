@@ -142,6 +142,20 @@ function formatSchemaChildren(schema: Record<string, unknown>, indent: string, d
 		lines.push(`${indent}values (${type})`);
 		formatSchemaChildren(values, `${indent}  `, depth + 1, lines);
 	}
+	// A free-form string-keyed map (e.g. Papyrus's tasks.create checklist) uses patternProperties
+	// rather than additionalProperties-as-schema: TypeBox's own Value.Errors() reports the latter
+	// only as a generic top-level "must not have additional properties", with no descent into the
+	// real nested violation, while patternProperties gives the same per-field precision an array's
+	// items already has. Rendered the same way additionalProperties-as-schema was: one "values"
+	// line per distinct pattern schema (usually exactly one, a catch-all "^.*$").
+	const patternProperties = schemaRecord(schema.patternProperties);
+	for (const raw of Object.values(patternProperties)) {
+		if (lines.length >= MAX_SCHEMA_LINES) return;
+		const values = schemaRecord(raw);
+		const type = typeof values.type === "string" ? values.type : "any";
+		lines.push(`${indent}values (${type})`);
+		formatSchemaChildren(values, `${indent}  `, depth + 1, lines);
+	}
 	if (Array.isArray(schema.examples)) {
 		for (const example of schema.examples.slice(0, 4)) lines.push(`${indent}example: ${boundedExample(example)}`);
 	}
