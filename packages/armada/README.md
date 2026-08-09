@@ -33,6 +33,16 @@ The default manifest is `~/.config/armada/armada.json` on Linux, `~/Library/Appl
       "readiness": {
         "timeoutMs": 5000,
         "pollIntervalMs": 100
+      },
+      "resources": {
+        "memoryHighBytes": {
+          "value": 2147483648,
+          "enforcement": "required"
+        },
+        "maximumMemoryBytes": {
+          "value": 3221225472,
+          "enforcement": "required"
+        }
       }
     }
   ]
@@ -40,6 +50,8 @@ The default manifest is `~/.config/armada/armada.json` on Linux, `~/Library/Appl
 ```
 
 Credentials and secret-like material are rejected. Executables, working directories, and handle paths must be absolute.
+
+On systemd, `memoryHighBytes` maps to `MemoryHigh=` as the pressure boundary and `maximumMemoryBytes` maps to `MemoryMax=` as the final defense. When both are present, the high boundary must not exceed the maximum. Other native managers reject required memory boundaries and warn for optional ones they cannot enforce.
 
 ## Commands
 

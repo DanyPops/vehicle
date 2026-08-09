@@ -4,6 +4,7 @@ import { capabilityDiagnostics, hasError, nativeServiceIdentity, seconds, sorted
 import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrategy } from "./service-manager.js";
 
 const capabilities: NativeManagerCapabilities = Object.freeze({
+	memoryHighBytes: true,
 	maximumMemoryBytes: true,
 	maximumCpuPercent: true,
 	maximumTasks: true,
@@ -52,6 +53,7 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	if (vehicle.runtime?.preventPrivilegeEscalation) unit.push("NoNewPrivileges=true");
 	if (vehicle.runtime?.privateTemporaryDirectory) unit.push("PrivateTmp=true");
 	const resources = vehicle.resources;
+	if (resources?.memoryHighBytes) unit.push(`MemoryHigh=${resources.memoryHighBytes.value}`);
 	if (resources?.maximumMemoryBytes) unit.push(`MemoryMax=${resources.maximumMemoryBytes.value}`);
 	if (resources?.maximumCpuPercent) unit.push(`CPUQuota=${resources.maximumCpuPercent.value}%`);
 	if (resources?.maximumTasks) unit.push(`TasksMax=${resources.maximumTasks.value}`);

@@ -6,6 +6,7 @@ export type NativeManagerKind = "systemd" | "launchd" | "windows-task-scheduler"
 export type NativeServiceStatus = "absent" | "stopped" | "running" | "failed";
 
 export interface NativeManagerCapabilities {
+	readonly memoryHighBytes?: boolean;
 	readonly maximumMemoryBytes: boolean;
 	readonly maximumCpuPercent: boolean;
 	readonly maximumTasks: boolean;

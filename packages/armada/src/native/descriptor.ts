@@ -3,7 +3,7 @@ import { createNativeServiceIdentity, type NativeServiceIdentity } from "../flee
 import type { VehicleResources, VehicleSpec } from "../fleet/manifest.js";
 import type { NativeManagerCapabilities } from "./service-manager.js";
 
-const RESOURCE_KEYS = ["maximumMemoryBytes", "maximumCpuPercent", "maximumTasks"] as const;
+const RESOURCE_KEYS = ["memoryHighBytes", "maximumMemoryBytes", "maximumCpuPercent", "maximumTasks"] as const;
 const RUNTIME_KEYS = ["preventPrivilegeEscalation", "privateTemporaryDirectory", "networkReadiness"] as const;
 
 export function nativeServiceIdentity(value: string): NativeServiceIdentity {

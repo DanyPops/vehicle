@@ -26,6 +26,7 @@ describe("native service strategies", () => {
 				arguments: ["serve", "a value"],
 				workingDirectory: "/var/lib/papyrus",
 				resources: {
+					memoryHighBytes: { value: 201_326_592, enforcement: "required" },
 					maximumMemoryBytes: { value: 268_435_456, enforcement: "required" },
 					maximumCpuPercent: { value: 75, enforcement: "required" },
 					maximumTasks: { value: 32, enforcement: "required" },
@@ -46,6 +47,7 @@ describe("native service strategies", () => {
 		expect(outcome.descriptor.content).toContain("Restart=on-failure");
 		expect(outcome.descriptor.content).toContain("StartLimitIntervalSec=60");
 		expect(outcome.descriptor.content).toContain("StartLimitBurst=4");
+		expect(outcome.descriptor.content).toContain("MemoryHigh=201326592");
 		expect(outcome.descriptor.content).toContain("MemoryMax=268435456");
 		expect(outcome.descriptor.content).toContain("CPUQuota=75%");
 		expect(outcome.descriptor.content).toContain("TasksMax=32");
@@ -54,6 +56,30 @@ describe("native service strategies", () => {
 		expect(outcome.descriptor.content).toContain("After=network-online.target");
 		expect(outcome.descriptor.content).toContain("Wants=network-online.target");
 		expect(outcome.diagnostics).toEqual([]);
+	});
+
+	it("omits memory boundaries when the manifest does not request them", () => {
+		const outcome = systemdStrategy.generateDescriptor(vehicle());
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.descriptor.content).not.toContain("MemoryHigh=");
+		expect(outcome.descriptor.content).not.toContain("MemoryMax=");
+	});
+
+	it("generates a finite adaptive-daemon memory envelope", () => {
+		const outcome = systemdStrategy.generateDescriptor(
+			vehicle({
+				name: "indexer",
+				resources: {
+					memoryHighBytes: { value: 2_147_483_648, enforcement: "required" },
+					maximumMemoryBytes: { value: 3_221_225_472, enforcement: "required" },
+				},
+			}),
+		);
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.descriptor.content).toContain("MemoryHigh=2147483648");
+		expect(outcome.descriptor.content).toContain("MemoryMax=3221225472");
 	});
 
 	it("rejects descriptor control-character injection", () => {
@@ -156,6 +182,14 @@ describe("native service strategies", () => {
 	});
 
 	it("rejects unsupported required resources and restart modes", () => {
+		const memoryHigh = launchdStrategy.generateDescriptor(
+			vehicle({
+				restart: { policy: "never" },
+				resources: { memoryHighBytes: { value: 1_024, enforcement: "required" } },
+			}),
+		);
+		expect(memoryHigh).toMatchObject({ ok: false, diagnostics: [{ code: "NATIVE_RESOURCE_UNSUPPORTED_REQUIRED" }] });
+
 		const resource = windowsTaskSchedulerStrategy.generateDescriptor(
 			vehicle({
 				restart: { policy: "never" },

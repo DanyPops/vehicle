@@ -4,6 +4,7 @@ import { capabilityDiagnostics, hasError, nativeServiceIdentity, seconds, sorted
 import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrategy } from "./service-manager.js";
 
 const capabilities: NativeManagerCapabilities = Object.freeze({
+	memoryHighBytes: false,
 	maximumMemoryBytes: false,
 	maximumCpuPercent: false,
 	maximumTasks: false,

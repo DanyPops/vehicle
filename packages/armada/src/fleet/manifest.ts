@@ -54,6 +54,7 @@ const VehicleSchema = Type.Object(
 		resources: Type.Optional(
 			Type.Object(
 				{
+					memoryHighBytes: Type.Optional(Requirement),
 					maximumMemoryBytes: Type.Optional(Requirement),
 					maximumCpuPercent: Type.Optional(Requirement),
 					maximumTasks: Type.Optional(Requirement),
@@ -92,6 +93,7 @@ export interface ResourceRequirement {
 }
 
 export interface VehicleResources {
+	readonly memoryHighBytes?: ResourceRequirement;
 	readonly maximumMemoryBytes?: ResourceRequirement;
 	readonly maximumCpuPercent?: ResourceRequirement;
 	readonly maximumTasks?: ResourceRequirement;
@@ -224,6 +226,18 @@ export function decodeArmadaManifest(text: string): ManifestDecodeOutcome {
 		if (vehicle.readiness.pollIntervalMs > vehicle.readiness.timeoutMs) {
 			diagnostics.push(
 				diagnostic("MANIFEST_READINESS_INTERVAL_INVALID", "error", `/vehicles/${index}/readiness`, "pollIntervalMs exceeds timeoutMs"),
+			);
+		}
+		const memoryHigh = vehicle.resources?.memoryHighBytes?.value;
+		const memoryMaximum = vehicle.resources?.maximumMemoryBytes?.value;
+		if (memoryHigh !== undefined && memoryMaximum !== undefined && memoryHigh > memoryMaximum) {
+			diagnostics.push(
+				diagnostic(
+					"MANIFEST_MEMORY_ENVELOPE_INVALID",
+					"error",
+					`/vehicles/${index}/resources/memoryHighBytes`,
+					"memoryHighBytes exceeds maximumMemoryBytes",
+				),
 			);
 		}
 	}

@@ -44,6 +44,44 @@ describe("decodeArmadaManifest", () => {
 		expect(outcome.diagnostics.map((item) => item.code)).toContain(code);
 	});
 
+	it("accepts either memory boundary independently and together", () => {
+		const base = JSON.parse(manifestJson()).vehicles[0];
+		for (const resources of [
+			{ memoryHighBytes: { value: 536_870_912, enforcement: "required" } },
+			{ maximumMemoryBytes: { value: 805_306_368, enforcement: "required" } },
+			{
+				memoryHighBytes: { value: 536_870_912, enforcement: "required" },
+				maximumMemoryBytes: { value: 805_306_368, enforcement: "required" },
+			},
+		]) {
+			const outcome = decodeArmadaManifest(manifestJson([{ ...base, resources }]));
+			expect(outcome.ok).toBe(true);
+		}
+	});
+
+	it("rejects a memory high boundary above its maximum", () => {
+		const base = JSON.parse(manifestJson()).vehicles[0];
+		const outcome = decodeArmadaManifest(
+			manifestJson([
+				{
+					...base,
+					resources: {
+						memoryHighBytes: { value: 805_306_368, enforcement: "required" },
+						maximumMemoryBytes: { value: 536_870_912, enforcement: "required" },
+					},
+				},
+			]),
+		);
+		expect(outcome.ok).toBe(false);
+		if (outcome.ok) return;
+		expect(outcome.diagnostics).toEqual([
+			expect.objectContaining({
+				code: "MANIFEST_MEMORY_ENVELOPE_INVALID",
+				path: "/vehicles/0/resources/memoryHighBytes",
+			}),
+		]);
+	});
+
 	it("rejects duplicate Vehicle names", () => {
 		const one = JSON.parse(manifestJson()).vehicles[0];
 		const outcome = decodeArmadaManifest(manifestJson([one, one]));
