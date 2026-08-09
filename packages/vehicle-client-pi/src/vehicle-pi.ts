@@ -29,6 +29,7 @@ import type {
 import type { ProgressBarGlyphStyle, ProgressBarGlyphs } from "malevich-tui-components";
 import type { TSchema } from "typebox";
 import { publishVehicleActivity } from "./activity-broker.js";
+import { type PiApprovalAnswer, type PiHitlPresentation, requestPiApproval } from "./hitl-prompt.js";
 import { guardExtensionRuntimeInitialized, syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
 import { renderVehicleCall, renderVehicleResult } from "./vehicle-render.js";
 import {
@@ -119,7 +120,7 @@ export interface PiVehicleFollowUpResult {
  * succeeded and is not rolled back, matching this same contract on any other
  * mutating operation whose follow-up step fails.
  *
- * Deliberately distinct from the Approval Gate's own local-confirm fast path
+ * Deliberately distinct from the Approval Gate's own shared local-approval fast path
  * (baked directly into execute() itself, since every gated operation needs
  * the identical approval-required/resolve dance): this hook is for a
  * per-operation, per-consumer interactive shape nothing else shares, the way
@@ -209,6 +210,12 @@ export interface RegisterVehicleToolsOptions {
 	 * option existed, a zero-behavior-change default.
 	 */
 	readonly safetyPolicyStore?: VehicleSafetyPolicyStore;
+	/**
+	 * Host used for local approval HITL. `overlay` (default) blocks in a popup over
+	 * scrollback; `integrated` replaces Pi's editor while preserving its draft,
+	 * scrollback, and footer. RPC/headless contexts retain the native confirm fallback.
+	 */
+	readonly approvalPresentation?: PiHitlPresentation;
 	/**
 	 * Survives a restart/reload while the daemon is unreachable: a successful
 	 * manifest() fetch is persisted here (atomic write, best-effort -- a failed
@@ -330,7 +337,7 @@ export class PiVehiclePresentationProjectionError extends Error {
 	}
 }
 
-/** How long a local ctx.ui.confirm() prompt stays open before auto-denying (confirm()'s own documented timeout behavior) -- deliberately shorter than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses server-side while still mid-prompt locally. */
+/** How long a local HITL prompt stays open before auto-denying -- deliberately shorter than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses server-side while still mid-prompt locally. */
 const LOCAL_APPROVAL_PROMPT_TIMEOUT_MS = 2 * 60_000;
 
 function defaultToolName(descriptor: VehicleOperationDescriptor, versioned: boolean): string {
@@ -550,17 +557,15 @@ async function requestLocalApproval(
 	descriptor: VehicleOperationDescriptor,
 	input: unknown,
 	signal: AbortSignal | undefined,
-): Promise<boolean> {
-	if (!context.hasUI) return false;
-	try {
-		return await context.ui.confirm(
-			`Approve ${displayLabel(descriptor)}?`,
-			`${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
-			{ signal, timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS },
-		);
-	} catch {
-		return false;
-	}
+	presentation: PiHitlPresentation | undefined,
+): Promise<PiApprovalAnswer | null> {
+	return requestPiApproval(context, {
+		title: `Approve ${displayLabel(descriptor)}?`,
+		message: `${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
+		presentation,
+		signal,
+		timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS,
+	});
 }
 
 /**
@@ -699,8 +704,8 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 	// server capability is needed for an effect the server itself never
 	// gates.
 	if (options.safetyPolicyStore?.get(manifest.name, descriptor.name) === "ask") {
-		const approved = await requestLocalApproval(context, descriptor, input, signal);
-		if (!approved) {
+		const answer = await requestLocalApproval(context, descriptor, input, signal, options.approvalPresentation);
+		if (!answer?.approved) {
 			const failure: VehicleFailure = {
 				code: "vehicle-safety-denied",
 				category: "authorization",
@@ -734,13 +739,14 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 
-		const approved = await requestLocalApproval(context, descriptor, input, signal);
+		const answer = await requestLocalApproval(context, descriptor, input, signal, options.approvalPresentation);
+		const approved = answer?.approved === true;
 		let capability: string | undefined;
 		try {
 			const resolveOutput = (await client.invoke(
 				VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
 				1,
-				{ requestId, decision: approved ? "granted" : "denied" },
+				{ requestId, decision: approved ? "granted" : "denied", ...(answer?.comment ? { comment: answer.comment } : {}) },
 				{ permissions: options.permissions, principal: options.principal, signal },
 			)) as { capability?: string };
 			capability = resolveOutput.capability;

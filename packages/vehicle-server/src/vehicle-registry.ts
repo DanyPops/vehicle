@@ -275,6 +275,7 @@ interface ApprovalResolveInput {
 	readonly requestId: string;
 	readonly decision: "granted" | "denied";
 	readonly decidedBy?: string;
+	readonly comment?: string;
 }
 
 interface ApprovalResolveOutput {
@@ -361,6 +362,7 @@ export class VehicleRegistry {
 					requestId: { type: "string" },
 					decision: { type: "string", enum: ["granted", "denied"] },
 					decidedBy: { type: "string" },
+					comment: { type: "string", maxLength: 2_000 },
 				},
 				required: ["requestId", "decision"],
 				additionalProperties: false,
@@ -379,9 +381,17 @@ export class VehicleRegistry {
 				if (row.decidedBy !== undefined && typeof row.decidedBy !== "string") {
 					return { success: false, issues: [{ path: ["decidedBy"], message: "decidedBy must be a string" }] };
 				}
+				if (row.comment !== undefined && (typeof row.comment !== "string" || row.comment.length > 2_000)) {
+					return { success: false, issues: [{ path: ["comment"], message: "comment must be a string of at most 2000 characters" }] };
+				}
 				return {
 					success: true,
-					value: { requestId: row.requestId, decision: row.decision, ...(row.decidedBy !== undefined ? { decidedBy: row.decidedBy } : {}) },
+					value: {
+						requestId: row.requestId,
+						decision: row.decision,
+						...(row.decidedBy !== undefined ? { decidedBy: row.decidedBy } : {}),
+						...(row.comment !== undefined ? { comment: row.comment } : {}),
+					},
 				};
 			},
 		});
@@ -439,7 +449,8 @@ export class VehicleRegistry {
 			requestId: input.requestId,
 			decision: input.decision,
 			decidedAt: Date.now(),
-			decidedBy: input.decidedBy,
+			...(input.decidedBy ? { decidedBy: input.decidedBy } : {}),
+			...(input.comment ? { comment: input.comment } : {}),
 		});
 		return { requestId: input.requestId, decision: input.decision, ...(capability ? { capability } : {}) };
 	}

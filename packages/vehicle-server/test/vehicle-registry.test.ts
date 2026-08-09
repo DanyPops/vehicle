@@ -530,6 +530,25 @@ describe("VehicleRegistry approval gate", () => {
 		).resolves.toEqual({ echoed: "go" });
 	});
 
+	it("persists an optional human approval comment on the resolved event", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals();
+		const resolvedEvents: unknown[] = [];
+		registry.subscribeLocal("vehicle.approval.resolved", 1, (payload) => resolvedEvents.push(payload));
+		const requestId = await requestApprovalGate(registry);
+
+		await registry.invoke(
+			"vehicle.approval.resolve",
+			1,
+			{ requestId, decision: "denied", comment: "Input targets the wrong environment." },
+			{ permissions: ["vehicle:approvals:resolve"] },
+		);
+
+		expect(resolvedEvents).toEqual([
+			expect.objectContaining({ requestId, decision: "denied", comment: "Input targets the wrong environment." }),
+		]);
+	});
+
 	it("a denied decision mints no capability, and the request cannot be resolved twice", async () => {
 		const registry = destructiveEchoRegistry();
 		registry.configureApprovals();

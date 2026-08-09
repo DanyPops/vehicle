@@ -394,12 +394,16 @@ where any truthy string used to satisfy the check.
 
 `registerVehicleTools()` wires the interactive half of this automatically:
 when a Pi tool call gets back `approval-required` and `ctx.hasUI` is true, it
-shows a `ctx.ui.confirm()` prompt (2-minute default timeout, denies on
-timeout/abort/any UI error -- fails closed, never silently grants) and
-retries the original call with whatever capability `vehicle.approval.resolve`
-returns. No UI, or no requestId in the failure -- the request stays durably
-pending for an async/remote resolution instead of this call eagerly denying
-it on the caller's behalf.
+opens Vehicle's shared rich approval presenter (effect and formatted input,
+approve/deny choices, optional comment, and explicit cancellation). The default
+`approvalPresentation: "overlay"` is a blocking popup over scrollback;
+`"integrated"` replaces the editor while preserving its exact draft, scrollback,
+and footer. RPC/headless or partial UI implementations retain Pi's native
+confirm fallback. The 2-minute timeout, abort, cancellation, and every UI error
+all deny -- fail closed, never silently grant -- before retrying with whatever
+capability `vehicle.approval.resolve` returns. No UI, or no requestId in the
+failure, leaves the request durably pending for async/remote resolution instead
+of eagerly denying it on the caller's behalf.
 
 ### Scheduler
 
@@ -481,9 +485,9 @@ Gate's own set), then a missing permission blocks. An override winning over
 a permission-based block only changes local visibility/gating -- it never
 bypasses what the server actually authorizes; invoking a permission-blocked
 operation a human overrode to `allow` still fails server-side with
-`permission-denied`. An override of `ask` also gates `execute()` itself with
-a local `ctx.ui.confirm()` before ever calling `invoke()`, for an effect the
-effect-level default wouldn't otherwise catch.
+`permission-denied`. An override of `ask` also gates `execute()` itself with the same shared local
+approval presenter before ever calling `invoke()`, for an effect the effect-level
+default wouldn't otherwise catch.
 
 `/safety` Tab-cycles three views (All, Allowed, By effect) over every known
 operation, built on Malevich's `TabbedContainer`/`Table`; editing closes the
@@ -497,7 +501,7 @@ A `registerVehicleTools()` option for the rare operation whose real UX needs
 more than "call it, show the output" -- e.g. an operation that durably
 records something and separately wants to offer a synchronous human
 round-trip when `ctx.hasUI` allows one. Distinct from the Approval Gate's own
-local-confirm fast path (baked into every gated operation identically):
+local-approval fast path (baked into every gated operation identically):
 this is a per-operation, per-consumer escape hatch for a shape nothing else
 shares.
 

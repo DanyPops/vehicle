@@ -30,6 +30,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import { requestPiApproval } from "./hitl-prompt.js";
 import {
 	findServicesUsingSecret,
 	type SecretRecord,
@@ -223,10 +224,11 @@ export async function performRotate(ctx: ExtensionCommandContext, backend: Secre
 
 /** Resolves true if the credential was actually revoked (confirmed and no error), false if declined or failed. */
 export async function performRevoke(ctx: ExtensionCommandContext, backend: SecretsBackend, name: string): Promise<boolean> {
-	const confirmed = ctx.hasUI
-		? await ctx.ui.confirm(`Revoke ${name}?`, "This deletes the stored credential. Re-authenticate to restore it.")
-		: false;
-	if (!confirmed) return false;
+	const answer = await requestPiApproval(ctx, {
+		title: `Revoke ${name}?`,
+		message: "This deletes the stored credential. Re-authenticate to restore it.",
+	});
+	if (!answer?.approved) return false;
 	try {
 		await backend.revoke(name);
 		ctx.ui.notify(`${name}: revoked.`, "info");

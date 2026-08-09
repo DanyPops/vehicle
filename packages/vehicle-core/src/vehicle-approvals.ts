@@ -48,6 +48,8 @@ export interface VehicleApprovalOutcome {
 	readonly decision: VehicleApprovalDecision;
 	readonly decidedAt: number;
 	readonly decidedBy?: string;
+	/** Optional human rationale captured by a rich HITL presenter. */
+	readonly comment?: string;
 }
 
 /**
@@ -106,6 +108,7 @@ const resolvedPayloadSchema = defineVehicleSchema<VehicleApprovalOutcome>({
 			decision: { type: "string", enum: ["granted", "denied"] },
 			decidedAt: { type: "number" },
 			decidedBy: { type: "string" },
+			comment: { type: "string" },
 		},
 		required: ["requestId", "decision", "decidedAt"],
 		additionalProperties: true,
