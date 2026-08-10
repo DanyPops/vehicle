@@ -28,12 +28,13 @@
  * otherwise read as every tracked row having vanished at once -- skip the tick entirely instead
  * (see AgentPollTicker's own class doc).
  *
- * createAgentNotifier()/reportAgentPollTick() are the other half: the actual pi.sendUserMessage
- * delivery, plus the one footgun worth centralizing once instead of every caller re-discovering it
- * -- pi.sendUserMessage() throws if called with no `deliverAs` while the agent is mid-turn
- * (confirmed against Pi's own agent-session.js `prompt()` dispatch: the "not streaming" branch
- * ignores `deliverAs` entirely and always sends+triggers immediately, so passing "steer"
- * unconditionally is correct and safe in both states, not just a streaming-only default).
+ * createAgentNotifier()/reportAgentPollTick() are the other half: the actual delivery, via
+ * pi.sendMessage() (a custom message, distinct from pi.sendUserMessage() -- see
+ * AgentNotifier's own doc comment for why). Defaults to deliverAs: "followUp" -- gentle by
+ * design: unlike pi.sendUserMessage() (which always triggers a turn, immediately when idle, no
+ * way to opt out), pi.sendMessage()'s own deliverAs modes only force an immediate turn when
+ * triggerTurn is explicitly set true, which this never does -- a background poll's own nudge
+ * waits for the agent to naturally have no more pending tool calls instead of interrupting one.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -88,17 +89,29 @@ export class AgentPollTicker<Row> {
 	}
 }
 
-/** Narrow seam over pi.sendUserMessage -- real callers pass createAgentNotifier(pi); tests pass a
+/** Narrow seam over pi.sendMessage() -- real callers pass createAgentNotifier(pi); tests pass a
  * plain recording fake. Kept separate from the full ExtensionAPI type the same way other modules
- * in this package narrow ExtensionUIContext/ExtensionContext down to just what they use. */
+ * in this package narrow ExtensionUIContext/ExtensionContext down to just what they use.
+ *
+ * Named sendUserMessage (and shaped as a plain string + deliverAs, not sendMessage's own
+ * {customType, content, display} object) for source stability across the rename underneath it --
+ * every existing caller/test double constructing a plain {sendUserMessage} fake keeps working
+ * unchanged. What actually changed is createAgentNotifier()'s own real implementation below: it
+ * now forwards to pi.sendMessage(), not pi.sendUserMessage() -- a background poll's own nudge is
+ * not "as if typed by the user", and sendMessage is the gentler, non-turn-forcing API (see this
+ * file's own top doc comment). */
 export interface AgentNotifier {
 	sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
 }
 
-/** Binds a real ExtensionAPI as an AgentNotifier. A thin, literal forward -- reportAgentPollTick()
- * is what actually decides the delivery mode; this makes no policy choice of its own. */
+/** Binds a real ExtensionAPI as an AgentNotifier, via pi.sendMessage() -- see AgentNotifier's own
+ * doc comment for why this isn't pi.sendUserMessage(). reportAgentPollTick() is what actually
+ * decides the delivery mode; this makes no policy choice of its own beyond the API it forwards to. */
 export function createAgentNotifier(pi: ExtensionAPI): AgentNotifier {
-	return { sendUserMessage: (content, options) => pi.sendUserMessage(content, options) };
+	return {
+		sendUserMessage: (content, options) =>
+			void pi.sendMessage({ customType: "vehicle-client-pi:agent-poll-ticker", content, display: true }, options),
+	};
 }
 
 /**
@@ -107,9 +120,10 @@ export function createAgentNotifier(pi: ExtensionAPI): AgentNotifier {
  * swallowed, matching every confirmed caller's own best-effort widget/background-poll contract --
  * a background nudge must never crash the extension host it's running inside.
  *
- * Defaults to `deliverAs: "steer"`: always safe (delivered immediately when idle, queued for right
- * after the current turn's tool calls when streaming), unlike omitting `deliverAs` entirely, which
- * throws while streaming.
+ * Defaults to `deliverAs: "followUp"`: gentle by design, since createAgentNotifier() now forwards
+ * to pi.sendMessage() rather than pi.sendUserMessage() -- see this file's own top doc comment for
+ * why that default no longer needs to be "steer" (sendUserMessage's own always-triggers-a-turn
+ * footgun this default used to work around).
  */
 export function reportAgentPollTick<Row>(
 	ticker: AgentPollTicker<Row>,
@@ -126,7 +140,7 @@ export function reportAgentPollTick<Row>(
 	}
 	if (!message) return;
 	try {
-		notifier.sendUserMessage(message, { deliverAs: options.deliverAs ?? "steer" });
+		notifier.sendUserMessage(message, { deliverAs: options.deliverAs ?? "followUp" });
 	} catch {
 		// Best-effort -- see this function's own doc comment.
 	}

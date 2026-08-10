@@ -172,14 +172,14 @@ describe("reportAgentPollTick", () => {
 		expect(() => reportAgentPollTick(ticker, [row("a")], undefined)).not.toThrow();
 	});
 
-	it("delivers the ticker's message through the notifier with deliverAs: steer by default", () => {
+	it("delivers the ticker's message through the notifier with deliverAs: followUp by default -- gentle, never forces an immediate turn", () => {
 		const ticker = new AgentPollTicker<Row>({ key: (r) => r.id, buildVanishedMessage: (keys) => `gone: ${keys.join(",")}`, now: () => 0 });
 		const notifier = fakeNotifier();
 
 		reportAgentPollTick(ticker, [row("a")], notifier); // baseline
 		reportAgentPollTick(ticker, [], notifier); // vanished
 
-		expect(notifier.calls).toEqual([{ content: "gone: a", options: { deliverAs: "steer" } }]);
+		expect(notifier.calls).toEqual([{ content: "gone: a", options: { deliverAs: "followUp" } }]);
 	});
 
 	it("honors a caller-supplied deliverAs override", () => {
@@ -214,12 +214,19 @@ describe("reportAgentPollTick", () => {
 });
 
 describe("createAgentNotifier", () => {
-	it("forwards to the real pi.sendUserMessage -- verified through a real ExtensionAPI stub, not a hand-rolled fake", async () => {
+	it("forwards to the real pi.sendMessage -- verified through a real ExtensionAPI stub, not a hand-rolled fake", async () => {
+		// pi.sendMessage(), not pi.sendUserMessage(): a background poll's own notification is not
+		// "as if typed by the user", and (unlike sendUserMessage, which always triggers a turn)
+		// sendMessage is gentle by default -- deliverAs "followUp"/"nextTurn" only force an immediate
+		// turn when triggerTurn is explicitly true, which this never sets.
 		const h = createExtensionHarness(() => {});
 		const notifier = createAgentNotifier(h.api);
 
 		notifier.sendUserMessage("hello", { deliverAs: "steer" });
 
-		expect(h.userMessages).toEqual([{ content: "hello", options: { deliverAs: "steer" } }]);
+		expect(h.sentMessages).toEqual([
+			{ message: { customType: "vehicle-client-pi:agent-poll-ticker", content: "hello", display: true }, options: { deliverAs: "steer" } },
+		]);
+		expect(h.userMessages).toEqual([]); // never the always-turn-triggering sendUserMessage channel
 	});
 });
