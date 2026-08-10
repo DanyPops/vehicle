@@ -2,7 +2,7 @@ import type { JsonSchema, VehicleManifest, VehicleManifestOperation, VehicleOper
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
-import { type DiscoveredVehicle, discoverForeignVehicles } from "./vehicle-shell-broker.js";
+import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
 
 /**
  * A decaying-TTL cache over Pi's active-tool set, turn-scoped. Every tracked tool name carries a
@@ -321,10 +321,23 @@ function namespacedDescriptor(vehicleName: string, descriptor: VehicleOperationD
 	return { ...descriptor, name: `${vehicleName}:${descriptor.name}` };
 }
 
+// A dynamic import, deliberately -- vehicle-shell-broker.ts pulls in @danypops/vehicle-server/paths
+// and @danypops/vehicle-client/http, both real runtime dependencies a consumer that never opts into
+// broker mode should never have to load at all. A static top-level import here would defeat that:
+// ES module imports are evaluated eagerly for the whole graph, so EVERY registerVehicleTools()
+// caller would transitively load vehicle-server's module the moment vehicle-shell.ts loads, whether
+// or not options.broker was ever set -- confirmed as a real regression live, breaking Node's native
+// (--experimental-strip-types) ESM loader for any consumer whose own load-path test exercises it,
+// since Node unconditionally refuses to strip types for a .ts file under node_modules.
 async function discoverBrokerVehicles(broker: VehicleShellBrokerOptions | undefined): Promise<readonly DiscoveredVehicle[]> {
 	if (!broker) return [];
 	try {
-		const discover = broker.discover ?? (() => discoverForeignVehicles(broker.ownVehicleName));
+		const discover =
+			broker.discover ??
+			(async () => {
+				const { discoverForeignVehicles } = await import("./vehicle-shell-broker.js");
+				return discoverForeignVehicles(broker.ownVehicleName);
+			});
 		return await discover();
 	} catch {
 		// Broker discovery must never break this Vehicle's own base tools_list/tools_man behavior.
