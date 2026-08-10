@@ -651,6 +651,64 @@ describe("registerVehicleTools", () => {
 		}
 	});
 
+	it("recognizes a VehicleError constructed by a duplicate @danypops/vehicle-core install, not just the exact class reference this module imported", async () => {
+		// Regression guard for a real live incident: web-spider's own dependency tree ended up with
+		// two distinct @danypops/vehicle-core copies (a realistic outcome of ordinary semver-range
+		// drift across sibling packages, not a broken install) -- RemoteVehicleClient constructed its
+		// VehicleError using one copy while this module's own `instanceof VehicleError` checked
+		// against the other. Both copies use vehicle-core's own Symbol.for(...)-branded
+		// isVehicleError() specifically so this recognizes correctly across duplicated installs; a
+		// plain `instanceof` check does not, and silently downgraded a real "fetch-transport-failed"
+		// failure (with its own code/category/details) into the generic, detail-free
+		// "vehicle-client-failed" fallback -- the exact class of bug this test reproduces without
+		// needing a second real npm install, by defining a second class that brands itself the same
+		// way vehicle-core's own VehicleError does but is not `instanceof` the imported one.
+		const VEHICLE_ERROR_BRAND = Symbol.for("@danypops/vehicle-core/VehicleError");
+		class DuplicateCopyVehicleError extends Error {
+			readonly code: string;
+			readonly category: string;
+			readonly retryable: boolean;
+			readonly details?: unknown;
+			constructor(code: string, message: string, options: { category: string; retryable?: boolean; details?: unknown }) {
+				super(message);
+				this.code = code;
+				this.category = options.category;
+				this.retryable = options.retryable ?? false;
+				this.details = options.details;
+				Object.defineProperty(this, VEHICLE_ERROR_BRAND, { value: true });
+			}
+			toFailure() {
+				return {
+					code: this.code,
+					category: this.category,
+					message: this.message,
+					retryable: this.retryable,
+					...(this.details === undefined ? {} : { details: this.details }),
+				};
+			}
+		}
+		expect(DuplicateCopyVehicleError.prototype instanceof VehicleError).toBe(false);
+
+		const client = new FakeClient(manifest([operation("focus.test")]));
+		client.error = new DuplicateCopyVehicleError("fetch-transport-failed", "Fetch transport failed: Remote endpoint unavailable", {
+			category: "unavailable",
+			retryable: false,
+			details: { kind: "connection", diagnostic: "Remote endpoint unavailable" },
+		});
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {});
+		try {
+			await execute(tools[0]!, { value: "go" });
+			throw new Error("expected invocation failure");
+		} catch (error) {
+			const failure = (error as PiVehicleInvocationError).failure;
+			expect(failure.code).toBe("fetch-transport-failed");
+			expect(failure.details).toEqual({ kind: "connection", diagnostic: "Remote endpoint unavailable" });
+			expect((error as Error).message).toContain("kind=connection");
+			expect((error as Error).message).toContain("diagnostic=Remote endpoint unavailable");
+		}
+	});
+
 	it("never lets an unexpected internal classification failure escape as an uncaught throw", async () => {
 		// Regression guard for a real live incident: a broken/duplicated dependency resolution made
 		// one of sanitizedFailure()'s own instanceof checks throw "Right-hand side of 'instanceof' is

@@ -16,8 +16,9 @@ import {
 	boundedCauseMessage,
 	createAtomicJsonWriter,
 	extractVehicleContent,
+	isVehicleError,
 	VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
-	VehicleError,
+	type VehicleError,
 } from "@danypops/vehicle-core";
 import type {
 	AgentToolUpdateCallback,
@@ -535,7 +536,16 @@ function safeInstanceOf(value: unknown, ctor: unknown): boolean {
 const CLASSIFICATION_FAILURE_CODE = "vehicle-client-classification-failed";
 
 function classifyKnownFailure(error: unknown): VehicleFailure | undefined {
-	if (safeInstanceOf(error, VehicleError)) return (error as VehicleError).toFailure();
+	// isVehicleError(), not `safeInstanceOf(error, VehicleError)`: the latter is a plain `instanceof`
+	// check, which fails whenever the error was constructed against a *different* physical
+	// @danypops/vehicle-core copy than the one this module imported -- a realistic outcome of
+	// ordinary semver-range drift across sibling packages in a real dependency tree (confirmed
+	// live: web-spider's own RemoteVehicleClient and vehicle-client-pi ended up with two vehicle-core
+	// installs). isVehicleError() uses vehicle-core's own Symbol.for(...) global-registry brand
+	// specifically so this recognizes a real VehicleError across duplicated installs; `instanceof`
+	// silently fell through to the generic, detail-free "vehicle-client-failed" fallback instead,
+	// discarding a real failure's own code/category/details.
+	if (isVehicleError(error)) return (error as VehicleError).toFailure();
 	if (safeInstanceOf(error, PiVehicleInvocationError)) return (error as PiVehicleInvocationError).failure;
 	if (safeInstanceOf(error, MutationOutcomeUnknownError) || safeInstanceOf(error, PreDispatchConnectionError)) {
 		const typed = error as MutationOutcomeUnknownError | PreDispatchConnectionError;
