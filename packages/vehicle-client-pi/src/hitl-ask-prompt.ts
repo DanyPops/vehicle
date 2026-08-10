@@ -31,9 +31,9 @@ import {
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type PiAskPromptOption, renderSingleSelectRows } from "./hitl-ask-prompt-layout.ts";
-import { hostDualPresentationComponent, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.ts";
-import { createMultiSelectList, type MultiSelectListItem, type MultiSelectList as SharedMultiSelectList } from "./multi-select-list.ts";
+import { type PiAskPromptOption, renderSingleSelectRows } from "./hitl-ask-prompt-layout.js";
+import { hostDualPresentationComponent, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.js";
+import { createMultiSelectList, type MultiSelectListItem, type MultiSelectList as SharedMultiSelectList } from "./multi-select-list.js";
 
 /** See pi-ask-user's identical safeMarkdownTheme() comment: a broken theme Proxy throws only on
  * property access, not construction, so a bare try/catch around getMarkdownTheme() alone would

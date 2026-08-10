@@ -19,6 +19,7 @@
 		"src/vehicle-safety-registry.ts",
 		"src/vehicle-monolith.ts",
 		"src/multi-select-list.ts",
-		"src/vehicle-widget-state.ts"
+		"src/vehicle-widget-state.ts",
+		"src/hitl-ask-prompt.ts"
 	]
 }
