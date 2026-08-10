@@ -1,6 +1,6 @@
 {
 	"name": "@danypops/vehicle-client-pi",
-	"version": "0.26.0",
+	"version": "0.27.0",
 	"description": "Projects any VehicleClient's manifest into native Pi tools, plus the rest of this house's Pi-extension-facing surface: jiti-load-safety verification and the shared /secrets command (backend port, env/local implementations, cross-extension registry, TUI). Preserves operation versions, schemas, cancellation, Pi call/session identity, permissions, keyed idempotency, progress, and structured failures; curates tool visibility by live operation availability.",
 	"license": "MIT",
 	"type": "module",
@@ -23,6 +23,10 @@
 		"./hitl-prompt": {
 			"types": "./dist/hitl-prompt.d.ts",
 			"default": "./dist/hitl-prompt.js"
+		},
+		"./hitl-ask-prompt": {
+			"types": "./dist/hitl-ask-prompt.d.ts",
+			"default": "./dist/hitl-ask-prompt.js"
 		},
 		"./pi-load-harness": "./src/pi-load-harness.ts",
 		"./pi-status-refresh": "./src/pi-status-refresh.ts",
@@ -68,7 +72,7 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@danypops/pi-extension-harness": "^0.6.1",
+		"@danypops/pi-extension-harness": "^0.7.0",
 		"@danypops/vehicle-client": "workspace:*",
 		"@danypops/vehicle-core": "workspace:*",
 		"@danypops/vehicle-server": "workspace:*",
@@ -97,5 +101,5 @@
 		"directory": "packages/vehicle-client-pi"
 	},
 	"keywords": ["vehicle", "agent-tools", "pi-extension"],
-	"files": ["src", "dist", "README.md"]
+	"files": ["src", "dist", "README.md", "THIRD_PARTY_LICENSES.md"]
 }

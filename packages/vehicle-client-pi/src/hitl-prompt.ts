@@ -1,5 +1,6 @@
 import { DynamicBorder, type ExtensionContext, getSelectListTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
+	type Component,
 	Container,
 	type EditorComponent,
 	type EditorTheme,
@@ -13,6 +14,132 @@ import {
 export type PiHitlPresentation = "integrated" | "overlay";
 
 const MAX_APPROVAL_COMMENT_CHARS = 2_000;
+
+const DUAL_HOST_OVERLAY_OPTIONS = { anchor: "center", width: "80%", minWidth: 40, maxHeight: "80%", margin: 1 } as const;
+
+/** Hosts any component built from (tui, theme, keybindings, done) in Pi's input editor, preserving
+ * the human's outgoing draft verbatim -- the same wrapping both the approval prompt and the richer
+ * ask prompt need, extracted rather than duplicated. */
+class PreservedDraftEditorHost implements EditorComponent {
+	constructor(
+		private readonly inner: Component,
+		private readonly preservedText: string,
+	) {}
+	getText(): string {
+		return this.preservedText;
+	}
+	setText(_text: string): void {}
+	render(width: number): string[] {
+		return this.inner.render(width);
+	}
+	handleInput(data: string): void {
+		this.inner.handleInput?.(data);
+	}
+	invalidate(): void {
+		this.inner.invalidate?.();
+	}
+}
+
+type DualHostComponentFactory<TAnswer> = (
+	tui: TUI,
+	theme: Theme,
+	keybindings: KeybindingsManager,
+	done: (answer: TAnswer | null) => void,
+) => Component;
+
+/** Shared `overlay` host: a blocking popup over the transcript via `ctx.ui.custom`. */
+async function hostDualPresentationOverlay<TAnswer>(
+	context: PiHitlContext,
+	buildComponent: DualHostComponentFactory<TAnswer>,
+	signal: AbortSignal | undefined,
+	timeout: number | undefined,
+): Promise<TAnswer | null> {
+	let finishFromOutside: ((answer: TAnswer | null) => void) | undefined;
+	const answer = context.ui.custom<TAnswer | null>(
+		(tui, theme, keybindings, done) => {
+			let settled = false;
+			const finish = (result: TAnswer | null) => {
+				if (settled) return;
+				settled = true;
+				done(result);
+			};
+			finishFromOutside = finish;
+			return buildComponent(tui, theme, keybindings, finish);
+		},
+		{ overlay: true, overlayOptions: DUAL_HOST_OVERLAY_OPTIONS },
+	);
+	const abort = () => finishFromOutside?.(null);
+	signal?.addEventListener("abort", abort, { once: true });
+	const timer = timeout && timeout > 0 ? setTimeout(() => finishFromOutside?.(null), timeout) : undefined;
+	try {
+		return (await answer) ?? null;
+	} finally {
+		if (timer) clearTimeout(timer);
+		signal?.removeEventListener("abort", abort);
+	}
+}
+
+/** Shared `integrated` host: replaces Pi's input editor via `ctx.ui.setEditorComponent`, restoring
+ * the exact previous factory once answered. `ctx.ui.custom`'s factory only receives an
+ * `EditorTheme` (borderColor + selectList) -- nowhere near a component's real dependency on the
+ * full `Theme` surface -- so the real, rich `context.ui.theme` is captured here instead. */
+function hostDualPresentationIntegrated<TAnswer>(
+	context: PiHitlContext,
+	buildComponent: DualHostComponentFactory<TAnswer>,
+	signal: AbortSignal | undefined,
+	timeout: number | undefined,
+): Promise<TAnswer | null> {
+	const previousFactory = context.ui.getEditorComponent();
+	const preservedText = context.ui.getEditorText();
+	const theme = context.ui.theme;
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const abort = () => finish(null);
+		const finish = (answer: TAnswer | null) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+			context.ui.setEditorComponent(previousFactory);
+			resolve(answer);
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		if (timeout && timeout > 0) timer = setTimeout(() => finish(null), timeout);
+		context.ui.setEditorComponent((tui: TUI, _editorTheme: EditorTheme, keybindings: KeybindingsManager) => {
+			const component = buildComponent(tui, theme, keybindings, finish);
+			return new PreservedDraftEditorHost(component, preservedText);
+		});
+	});
+}
+
+/**
+ * Presents any component in whichever of Pi's two supported HITL hosts `presentation` requests --
+ * `overlay` needs `ctx.mode === "tui"` and `ctx.ui.custom`; `integrated` needs editor-replacement
+ * support. Returns `undefined` (not `null`) when neither host is available, so a caller can fall
+ * back to its own native prompt (e.g. `ctx.ui.confirm`) instead of treating a missing host the
+ * same as a real cancel.
+ */
+export async function hostDualPresentationComponent<TAnswer>(
+	context: PiHitlContext,
+	presentation: PiHitlPresentation,
+	buildComponent: DualHostComponentFactory<TAnswer>,
+	signal: AbortSignal | undefined,
+	timeout: number | undefined,
+): Promise<TAnswer | null | undefined> {
+	if (presentation === "overlay" && context.mode === "tui" && typeof context.ui.custom === "function") {
+		return hostDualPresentationOverlay(context, buildComponent, signal, timeout);
+	}
+	if (
+		presentation === "integrated" &&
+		typeof context.ui.setEditorComponent === "function" &&
+		typeof context.ui.getEditorComponent === "function" &&
+		typeof context.ui.getEditorText === "function"
+	) {
+		return hostDualPresentationIntegrated(context, buildComponent, signal, timeout);
+	}
+	return undefined;
+}
 
 export interface PiApprovalPromptOptions {
 	readonly title: string;
@@ -95,97 +222,22 @@ class ApprovalPromptComponent {
 	}
 }
 
-class ApprovalEditorHost implements EditorComponent {
-	constructor(
-		private readonly prompt: ApprovalPromptComponent,
-		private readonly preservedText: string,
-	) {}
-	getText(): string {
-		return this.preservedText;
-	}
-	setText(_text: string): void {}
-	render(width: number): string[] {
-		return this.prompt.render(width);
-	}
-	handleInput(data: string): void {
-		this.prompt.handleInput(data);
-	}
-	invalidate(): void {
-		this.prompt.invalidate();
-	}
-}
-
-async function hostOverlay(context: PiHitlContext, options: PiApprovalPromptOptions): Promise<PiApprovalAnswer | null> {
-	let finishFromOutside: ((answer: PiApprovalAnswer | null) => void) | undefined;
-	const answer = context.ui.custom<PiApprovalAnswer | null>(
-		(tui, theme, _keybindings, done) => {
-			let settled = false;
-			const finish = (result: PiApprovalAnswer | null) => {
-				if (settled) return;
-				settled = true;
-				done(result);
-			};
-			finishFromOutside = finish;
-			return new ApprovalPromptComponent(options.title, options.message, tui, theme, finish);
-		},
-		{
-			overlay: true,
-			overlayOptions: { anchor: "center", width: "80%", minWidth: 40, maxHeight: "80%", margin: 1 },
-		},
-	);
-	const abort = () => finishFromOutside?.(null);
-	options.signal?.addEventListener("abort", abort, { once: true });
-	const timeout = options.timeout && options.timeout > 0 ? setTimeout(() => finishFromOutside?.(null), options.timeout) : undefined;
-	try {
-		return await answer;
-	} finally {
-		if (timeout) clearTimeout(timeout);
-		options.signal?.removeEventListener("abort", abort);
-	}
-}
-
-function hostIntegrated(context: PiHitlContext, options: PiApprovalPromptOptions): Promise<PiApprovalAnswer | null> {
-	const previousFactory = context.ui.getEditorComponent();
-	const preservedText = context.ui.getEditorText();
-	return new Promise((resolve) => {
-		let settled = false;
-		let timeout: ReturnType<typeof setTimeout> | undefined;
-		const abort = () => finish(null);
-		const finish = (answer: PiApprovalAnswer | null) => {
-			if (settled) return;
-			settled = true;
-			if (timeout) clearTimeout(timeout);
-			options.signal?.removeEventListener("abort", abort);
-			context.ui.setEditorComponent(previousFactory);
-			resolve(answer);
-		};
-		options.signal?.addEventListener("abort", abort, { once: true });
-		if (options.timeout && options.timeout > 0) timeout = setTimeout(() => finish(null), options.timeout);
-		context.ui.setEditorComponent(
-			(tui: TUI, _editorTheme: EditorTheme, _keybindings: KeybindingsManager) =>
-				new ApprovalEditorHost(new ApprovalPromptComponent(options.title, options.message, tui, context.ui.theme, finish), preservedText),
-		);
-	});
-}
-
 /**
- * Presents one shared approval experience in either of Pi's supported HITL hosts.
- * RPC/headless or partial UI implementations retain the native confirm fallback.
+ * Presents one shared approval experience in either of Pi's supported HITL hosts, via the shared
+ * `hostDualPresentationComponent`. RPC/headless or partial UI implementations retain the native
+ * confirm fallback.
  */
 export async function requestPiApproval(context: PiHitlContext, options: PiApprovalPromptOptions): Promise<PiApprovalAnswer | null> {
 	if (!context.hasUI || options.signal?.aborted) return null;
 	const presentation = options.presentation ?? "overlay";
-	if (presentation === "overlay" && context.mode === "tui" && typeof context.ui.custom === "function") {
-		return hostOverlay(context, options);
-	}
-	if (
-		presentation === "integrated" &&
-		typeof context.ui.setEditorComponent === "function" &&
-		typeof context.ui.getEditorComponent === "function" &&
-		typeof context.ui.getEditorText === "function"
-	) {
-		return hostIntegrated(context, options);
-	}
+	const hosted = await hostDualPresentationComponent<PiApprovalAnswer>(
+		context,
+		presentation,
+		(tui, theme, _keybindings, done) => new ApprovalPromptComponent(options.title, options.message, tui, theme, done),
+		options.signal,
+		options.timeout,
+	);
+	if (hosted !== undefined) return hosted;
 	try {
 		const approved = await context.ui.confirm(options.title, options.message, { signal: options.signal, timeout: options.timeout });
 		return { approved };
