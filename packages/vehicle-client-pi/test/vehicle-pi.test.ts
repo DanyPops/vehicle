@@ -453,6 +453,50 @@ describe("registerVehicleTools", () => {
 		expect(result.content).toBeTruthy();
 	});
 
+	it("options.approvalPrompt overrides the local prompt's title/message during the approval-required retry dance", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {
+			approvalPrompt: (descriptor, input) =>
+				descriptor.name === "risk.destructive"
+					? { title: "Run the dangerous thing?", message: `About to run with ${JSON.stringify(input)}` }
+					: undefined,
+		});
+
+		const confirmCalls: Array<{ title: string; message: string }> = [];
+		await execute(tools[0]!, { value: "go" }, undefined, undefined, {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string, message: string) => {
+					confirmCalls.push({ title, message });
+					return true;
+				},
+			},
+		});
+
+		expect(confirmCalls).toEqual([{ title: "Run the dangerous thing?", message: 'About to run with {"value":"go"}' }]);
+	});
+
+	it("options.approvalPrompt returning undefined for a given descriptor falls back to the generic prompt, unchanged", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, { approvalPrompt: () => undefined });
+
+		const confirmCalls: Array<{ title: string; message: string }> = [];
+		await execute(tools[0]!, { value: "go" }, undefined, undefined, {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string, message: string) => {
+					confirmCalls.push({ title, message });
+					return true;
+				},
+			},
+		});
+
+		expect(confirmCalls[0]?.title).toBe("Approve Risk Destructive?");
+		expect(confirmCalls[0]?.message).toContain("destructive");
+	});
+
 	it("denies and never retries invoke() when the local prompt returns false", async () => {
 		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
 		const { pi, tools } = fakePi();

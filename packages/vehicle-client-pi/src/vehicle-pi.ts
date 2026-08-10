@@ -218,6 +218,21 @@ export interface RegisterVehicleToolsOptions {
 	 */
 	readonly approvalPresentation?: PiHitlPresentation;
 	/**
+	 * Per-operation override for the local approval prompt's own title/message, shown by the
+	 * approval-required retry dance's optional synchronous fast path (requestLocalApproval)
+	 * and by the local /safety "ask" gate. Returning undefined (or omitting this option
+	 * entirely, or the callback returning undefined for a given descriptor) falls back to
+	 * the generic `Approve ${displayLabel}?` / raw-JSON-input prompt, unchanged.
+	 *
+	 * Exists for the same reason `renderers` exists for tool call/result rendering: a
+	 * consumer with real UX investment in one operation's approval copy (e.g. a
+	 * human-readable command preview, or a specific warning that applies only to one
+	 * dangerous input shape) can supply it here instead of every caller seeing a raw JSON
+	 * dump of the input. Does not change the server-side approval-required/capability
+	 * protocol at all -- purely the local prompt's own copy.
+	 */
+	readonly approvalPrompt?: (descriptor: VehicleOperationDescriptor, input: unknown) => { title: string; message: string } | undefined;
+	/**
 	 * Survives a restart/reload while the daemon is unreachable: a successful
 	 * manifest() fetch is persisted here (atomic write, best-effort -- a failed
 	 * write never fails registration); a failed factory-time fetch falls back
@@ -585,14 +600,13 @@ async function requestLocalApproval(
 	input: unknown,
 	signal: AbortSignal | undefined,
 	presentation: PiHitlPresentation | undefined,
+	promptOverride: { title: string; message: string } | undefined,
 ): Promise<PiApprovalAnswer | null> {
-	return requestPiApproval(context, {
+	const { title, message } = promptOverride ?? {
 		title: `Approve ${displayLabel(descriptor)}?`,
 		message: `${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
-		presentation,
-		signal,
-		timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS,
-	});
+	};
+	return requestPiApproval(context, { title, message, presentation, signal, timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS });
 }
 
 /**
@@ -731,7 +745,14 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 	// server capability is needed for an effect the server itself never
 	// gates.
 	if (options.safetyPolicyStore?.get(manifest.name, descriptor.name) === "ask") {
-		const answer = await requestLocalApproval(context, descriptor, input, signal, options.approvalPresentation);
+		const answer = await requestLocalApproval(
+			context,
+			descriptor,
+			input,
+			signal,
+			options.approvalPresentation,
+			options.approvalPrompt?.(descriptor, input),
+		);
 		if (!answer?.approved) {
 			const failure: VehicleFailure = {
 				code: "vehicle-safety-denied",
@@ -766,7 +787,14 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 
-		const answer = await requestLocalApproval(context, descriptor, input, signal, options.approvalPresentation);
+		const answer = await requestLocalApproval(
+			context,
+			descriptor,
+			input,
+			signal,
+			options.approvalPresentation,
+			options.approvalPrompt?.(descriptor, input),
+		);
 		const approved = answer?.approved === true;
 		let capability: string | undefined;
 		try {
