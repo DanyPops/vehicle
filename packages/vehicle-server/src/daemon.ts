@@ -39,6 +39,7 @@ import {
 	type ReclaimDeps,
 	releaseDaemonLock,
 	removeDaemonHandle,
+	resolveSharedVehicleHandlePath,
 	writeDaemonHandle,
 } from "./paths.ts";
 import type { PushChannel } from "./push-channel.ts";
@@ -146,6 +147,15 @@ export interface StartDaemonOptions {
 	onShutdown?: () => void | Promise<void>;
 	/** Defaults to process.env. Injectable for tests. */
 	env?: Record<string, string | undefined>;
+	/**
+	 * Stable cross-daemon identity name (Armada's own VehicleName pattern: ^[a-z0-9][a-z0-9._-]{0,63}$),
+	 * e.g. "papyrus". When given, this daemon's handle is ALSO written into (and removed from) the
+	 * shared Vehicle Handle Directory (see resolveSharedVehicleHandlePath) for cross-daemon
+	 * discovery, alongside its own private handlePath -- unaffected either way. Omitted preserves
+	 * today's behavior exactly: no shared-directory write at all. An invalid name or a write/remove
+	 * failure is logged, never thrown -- must never be why a daemon fails to start or stop.
+	 */
+	vehicleName?: string;
 	/** Optional WebSocket push-invalidation channel (see push-channel.ts). Additive to the fetch-based RPC -- requests to `pushPath` are routed to it, everything else still goes to buildApp()'s fetch. */
 	pushChannel?: PushChannel;
 	/** Defaults to "/push". */
@@ -371,6 +381,17 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 		throw new Error(`${options.daemonLabel} daemon failed to bind a listener`);
 	}
 	writeDaemonHandle(options.handlePath, { host: LOOPBACK_HOST, port: listener.port, pid: process.pid }, options.handleMode);
+	if (options.vehicleName) {
+		try {
+			writeDaemonHandle(resolveSharedVehicleHandlePath(options.vehicleName, { env: options.env }), {
+				host: LOOPBACK_HOST,
+				port: listener.port,
+				pid: process.pid,
+			});
+		} catch (error) {
+			logger.error("shared vehicle handle write failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
 	await recordLifecycle("started");
 
 	const timers: ReturnType<typeof setInterval>[] = [];
@@ -420,6 +441,13 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 		for (const timer of timers) clearInterval(timer);
 		if (idleTimer) clearInterval(idleTimer);
 		removeDaemonHandle(options.handlePath);
+		if (options.vehicleName) {
+			try {
+				removeDaemonHandle(resolveSharedVehicleHandlePath(options.vehicleName, { env: options.env }));
+			} catch (error) {
+				logger.error("shared vehicle handle remove failed", { error: error instanceof Error ? error.message : String(error) });
+			}
+		}
 		releaseDaemonLock(lockPath);
 		await options.onShutdown?.();
 		await listener.stop();

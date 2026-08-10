@@ -15,7 +15,7 @@ import {
 } from "../src/daemon.ts";
 import { openDaemonLifecycleLog } from "../src/daemon-lifecycle.ts";
 import { createLogger, type Logger } from "../src/logging.ts";
-import { readDaemonHandle } from "../src/paths.ts";
+import { readDaemonHandle, resolveSharedVehicleHandlePath } from "../src/paths.ts";
 import { getCurrentRpcCallId } from "../src/rpc-correlation.ts";
 
 let daemon: RunningDaemon | undefined;
@@ -72,6 +72,36 @@ describe("startDaemon", () => {
 		await daemon.stop();
 		await daemon.stop(); // must not throw
 		expect(readDaemonHandle(handlePath)).toBeNull();
+	});
+
+	it("vehicleName given: also writes a shared cross-daemon handle entry alongside the private one", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		const env = { XDG_RUNTIME_DIR: dir };
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, vehicleName: "acme", env, buildApp: trivialApp });
+		const sharedPath = resolveSharedVehicleHandlePath("acme", { env });
+		expect(readDaemonHandle(sharedPath)?.port).toBe(daemon.port);
+		await daemon.stop();
+		expect(readDaemonHandle(sharedPath)).toBeNull();
+	});
+
+	it("vehicleName omitted: no shared handle entry is ever written", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		const env = { XDG_RUNTIME_DIR: dir };
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, env, buildApp: trivialApp });
+		expect(readDaemonHandle(resolveSharedVehicleHandlePath("acme", { env }))).toBeNull();
+	});
+
+	it("an invalid vehicleName never blocks daemon startup or the private handle write -- logged, not thrown", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		const errors: unknown[] = [];
+		const logger: Logger = { debug() {}, info() {}, warn() {}, error: (msg) => errors.push(msg) };
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, vehicleName: "Has Spaces", logger, buildApp: trivialApp });
+		expect(daemon.port).toBeGreaterThan(0);
+		expect(readDaemonHandle(handlePath)?.port).toBe(daemon.port);
+		expect(errors.length).toBeGreaterThan(0);
 	});
 
 	it("defaults the handle file to owner-only (0600)", async () => {

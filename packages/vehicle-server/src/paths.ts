@@ -174,6 +174,39 @@ export function removeDaemonHandle(handlePath: string): void {
 	rmSync(handlePath, { force: true });
 }
 
+/** Same pattern as Armada's own VehicleName (fleet/identity.ts) -- duplicated rather than
+ * imported, since this file stays dependency-free by design (see LockLaunchProvenance's own
+ * doc comment for the same rationale). A vehicle's own stable identity name becomes a bare
+ * filename here, so it is validated exactly as strictly as Armada validates it. */
+const VEHICLE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/**
+ * Well-known, cross-package location every Vehicle daemon's handle is ALSO written into
+ * (independent of its own private per-package `handle` path from resolveDaemonPaths) -- the
+ * seam a cross-daemon discovery broker scans without needing to already know each package's
+ * own stateDirectoryName/handleFilename convention in advance. Same platform-convention split
+ * as resolveDaemonPaths's own `handle` field (XDG_RUNTIME_DIR on Linux, OS temp directory
+ * elsewhere -- see that function's own doc comment for why the guarantee is weaker there).
+ */
+export function resolveSharedVehicleHandlePath(vehicleName: string, options: PathEnvironment = {}): string {
+	if (!VEHICLE_NAME.test(vehicleName)) {
+		throw new Error(`vehicleName must match ${VEHICLE_NAME.source}: ${JSON.stringify(vehicleName)}`);
+	}
+	const platform = options.platform ?? process.platform;
+	const home = options.home ?? homedir();
+	const filename = `${vehicleName}.json`;
+	if (platform === "darwin") return join(tmpdir(), "vehicle", "handles", filename);
+	if (platform === "win32") {
+		const env = options.env ?? process.env;
+		const localAppData = env.LOCALAPPDATA ?? win32.join(home, "AppData", "Local");
+		return win32.join(localAppData, "Temp", "vehicle", "handles", filename);
+	}
+	const env = options.env ?? process.env;
+	const uid = options.uid ?? process.getuid?.() ?? 0;
+	const runtimeHome = env.XDG_RUNTIME_DIR ?? join("/run", "user", String(uid));
+	return join(runtimeHome, "vehicle", "handles", filename);
+}
+
 /**
  * Independently declared from daemon.ts's own LaunchProvenance (same three literals) rather
  * than imported -- this file stays dependency-free by design (see the module doc comment),

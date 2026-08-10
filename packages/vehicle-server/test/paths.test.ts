@@ -13,6 +13,7 @@ import {
 	releaseDaemonLock,
 	removeDaemonHandle,
 	resolveDaemonPaths,
+	resolveSharedVehicleHandlePath,
 	writeDaemonHandle,
 } from "../src/paths.ts";
 
@@ -93,6 +94,44 @@ describe("resolveDaemonPaths cross-check against env-paths (devDependency, test-
 			expect(ours.database).toContain(".local/share");
 			expect(real.data).toContain(".local/share");
 		}
+	});
+});
+
+describe("resolveSharedVehicleHandlePath", () => {
+	it("Linux: XDG_RUNTIME_DIR/vehicle/handles/<name>.json", () => {
+		const path = resolveSharedVehicleHandlePath("papyrus", { platform: "linux", env: { XDG_RUNTIME_DIR: "/run/u" } });
+		expect(path).toBe("/run/u/vehicle/handles/papyrus.json");
+	});
+
+	it("Linux: falls back to /run/user/<uid> when XDG_RUNTIME_DIR is unset", () => {
+		const path = resolveSharedVehicleHandlePath("papyrus", { platform: "linux", env: {}, uid: 1000 });
+		expect(path).toBe("/run/user/1000/vehicle/handles/papyrus.json");
+	});
+
+	it("macOS: under the OS temp directory, same weaker guarantee as a per-package handle", () => {
+		const path = resolveSharedVehicleHandlePath("papyrus", { platform: "darwin" });
+		expect(path.endsWith("vehicle/handles/papyrus.json")).toBe(true);
+	});
+
+	it("Windows: %LOCALAPPDATA%/Temp/vehicle/handles/<name>.json", () => {
+		const path = resolveSharedVehicleHandlePath("papyrus", {
+			platform: "win32",
+			home: "C:\\Users\\x",
+			env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" },
+		});
+		expect(path).toBe("C:\\Users\\x\\AppData\\Local\\Temp\\vehicle\\handles\\papyrus.json");
+	});
+
+	it("different vehicle names resolve to different files under the same shared directory", () => {
+		const options = { platform: "linux" as const, env: { XDG_RUNTIME_DIR: "/run/u" } };
+		expect(resolveSharedVehicleHandlePath("papyrus", options)).toBe("/run/u/vehicle/handles/papyrus.json");
+		expect(resolveSharedVehicleHandlePath("pi-packed", options)).toBe("/run/u/vehicle/handles/pi-packed.json");
+	});
+
+	it("rejects a vehicle name that doesn't match Armada's own VehicleName pattern -- it becomes a filename, never accepted unsanitized", () => {
+		expect(() => resolveSharedVehicleHandlePath("../escape", { platform: "linux" })).toThrow();
+		expect(() => resolveSharedVehicleHandlePath("", { platform: "linux" })).toThrow();
+		expect(() => resolveSharedVehicleHandlePath("Has Spaces", { platform: "linux" })).toThrow();
 	});
 });
 
