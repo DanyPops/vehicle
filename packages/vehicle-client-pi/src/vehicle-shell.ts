@@ -188,9 +188,13 @@ export function formatOperationManPage(descriptor: VehicleOperationDescriptor, t
 const DEFAULT_LIST_TOOL_NAME = "tools_list";
 const DEFAULT_MAN_TOOL_NAME = "tools_man";
 /** Illustrative starting points, not load-bearing constants -- tune from real usage (see the
- * Vehicle Shell design discussion this implements). */
-const DEFAULT_CORE_TTL_TURNS = 10;
-const DEFAULT_DISCOVERED_TTL_TURNS = 3;
+ * Vehicle Shell design discussion this implements). Tuned up from an initial 10/3: a discovered
+ * tool decaying in 3 unused turns proved too aggressive in practice -- a normal multi-step
+ * investigation (read something, reason about it, call something else, come back) routinely
+ * spans more than 3 turns between two calls to the same tool, forcing a needless repeat
+ * tools_man round-trip on a tool the agent had already activated moments earlier. */
+const DEFAULT_CORE_TTL_TURNS = 20;
+const DEFAULT_DISCOVERED_TTL_TURNS = 8;
 
 /** The subset of a registered Pi tool's own bookkeeping the shell needs to decide what's
  * activatable -- deliberately narrower than vehicle-pi.ts's own RegisteredPiVehicleTool so this
