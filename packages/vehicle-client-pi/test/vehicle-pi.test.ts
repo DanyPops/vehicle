@@ -538,6 +538,77 @@ describe("registerVehicleTools", () => {
 		expect(client.calls.map((call) => call.name)).toEqual(["risk.destructive"]);
 	});
 
+	it("options.requestApproval overrides the local approval UI mechanism itself during the approval-required retry dance", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		const requestApprovalCalls: unknown[] = [];
+		await registerVehicleTools(pi, client, {
+			requestApproval: async (_context, requestParams) => {
+				requestApprovalCalls.push(requestParams);
+				return { approved: true, comment: "looks fine" };
+			},
+		});
+
+		const result = await execute(tools[0]!, { value: "go" }, undefined, undefined, {
+			hasUI: true,
+			ui: {
+				confirm: async () => {
+					throw new Error("the default requestPiApproval-based prompt must not run");
+				},
+			},
+		});
+
+		expect(requestApprovalCalls).toEqual([
+			expect.objectContaining({
+				presentation: undefined,
+				prompt: { title: "Approve Risk Destructive?", message: expect.stringContaining("destructive") },
+			}),
+		]);
+		expect(client.calls[1]?.input).toMatchObject({ requestId: "req-1", decision: "granted", comment: "looks fine" });
+		expect(client.calls[2]?.options?.approvalCapability).toBe("real-capability");
+		expect(result.content).toBeTruthy();
+	});
+
+	it("options.requestApproval denying means never retrying invoke(), same as the default prompt", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, { requestApproval: async () => null });
+
+		await expect(execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: {} })).rejects.toMatchObject({
+			failure: { code: "approval-required" },
+		});
+		expect(client.calls.map((call) => call.name)).toEqual(["risk.destructive", "vehicle.approval.resolve"]);
+		expect(client.calls[1]?.input).toMatchObject({ decision: "denied" });
+	});
+
+	it("options.requestApproval also overrides the local /safety 'ask' gate's own prompt", async () => {
+		const descriptor = operation("category.remove");
+		const client = new FakeClient(manifest([descriptor]));
+		const safetyPolicyStore = await VehicleSafetyPolicyStore.restore();
+		await safetyPolicyStore.set("test-vehicle", "category.remove", "ask");
+		const requestApprovalCalls: unknown[] = [];
+
+		await invokeVehicleOperation({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: true }),
+			options: {
+				safetyPolicyStore,
+				requestApproval: async (_context, requestParams) => {
+					requestApprovalCalls.push(requestParams);
+					return { approved: true };
+				},
+			},
+		});
+
+		expect(requestApprovalCalls).toHaveLength(1);
+		expect(client.calls[0]?.name).toBe("category.remove");
+	});
+
 	// vehicle.approval.resolve is invoked only by this package's own retry dance, never by the model.
 	it("never projects vehicle.approval.resolve as a callable Pi tool, even fully permissioned", async () => {
 		const client = new FakeClient(

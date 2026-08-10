@@ -28,6 +28,10 @@
 			"types": "./dist/hitl-ask-prompt.d.ts",
 			"default": "./dist/hitl-ask-prompt.js"
 		},
+		"./hitl-approval-ask-prompt": {
+			"types": "./dist/hitl-approval-ask-prompt.d.ts",
+			"default": "./dist/hitl-approval-ask-prompt.js"
+		},
 		"./pi-load-harness": "./src/pi-load-harness.ts",
 		"./pi-status-refresh": "./src/pi-status-refresh.ts",
 		"./secrets-backend": "./src/secrets-backend.ts",

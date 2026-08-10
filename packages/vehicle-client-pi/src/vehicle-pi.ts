@@ -234,6 +234,13 @@ export interface RegisterVehicleToolsOptions {
 	 */
 	readonly approvalPrompt?: (descriptor: VehicleOperationDescriptor, input: unknown) => { title: string; message: string } | undefined;
 	/**
+	 * Overrides the actual local-approval HITL mechanism itself -- distinct from approvalPrompt
+	 * above, which only ever customizes the plain yes/no prompt's title/message text. See
+	 * LocalApprovalRequester's own doc comment. Omitted (the default) preserves today's
+	 * requestPiApproval-based prompt exactly.
+	 */
+	readonly requestApproval?: LocalApprovalRequester;
+	/**
 	 * Survives a restart/reload while the daemon is unreachable: a successful
 	 * manifest() fetch is persisted here (atomic write, best-effort -- a failed
 	 * write never fails registration); a failed factory-time fetch falls back
@@ -598,6 +605,36 @@ function approvalRequestId(failure: VehicleFailure): string | undefined {
 }
 
 /**
+ * The resolved title/message a local approval prompt is about to show -- either options.approvalPrompt's
+ * own override, or the generic `Approve ${displayLabel}?` / raw-JSON-input default. Always fully resolved
+ * by the time a LocalApprovalRequester sees it, unlike RegisterVehicleToolsOptions.approvalPrompt's own
+ * return type, which is allowed to say undefined for "use the default".
+ */
+export interface LocalApprovalPrompt {
+	readonly title: string;
+	readonly message: string;
+}
+
+export interface LocalApprovalRequestParams {
+	readonly descriptor: VehicleOperationDescriptor;
+	readonly input: unknown;
+	readonly signal?: AbortSignal;
+	readonly presentation?: PiHitlPresentation;
+	readonly prompt: LocalApprovalPrompt;
+}
+
+/**
+ * Overrides the actual local-approval HITL mechanism itself -- distinct from options.approvalPrompt,
+ * which only ever customizes the plain yes/no prompt's title/message text. A consumer wanting a
+ * genuinely richer interaction (e.g. Approve/Deny presented via requestPiAskPrompt instead of
+ * requestPiApproval's fixed two-item select, so a searchable/multi-option/freeform-reason shape is
+ * possible) supplies this instead. Same contract as requestPiApproval itself: null (or a resolved
+ * `{ approved: false }`) means denied; requestLocalApproval's own callers already treat any
+ * non-approved answer, including null, identically.
+ */
+export type LocalApprovalRequester = (context: ExtensionContext, params: LocalApprovalRequestParams) => Promise<PiApprovalAnswer | null>;
+
+/**
  * The local, fast-path half of the Approval Gate: VehicleRegistry always
  * records an approval.requested event first (durable, works even with no
  * UI at all); this is the optional synchronous prompt layered on top when
@@ -611,11 +648,13 @@ async function requestLocalApproval(
 	signal: AbortSignal | undefined,
 	presentation: PiHitlPresentation | undefined,
 	promptOverride: { title: string; message: string } | undefined,
+	requester: LocalApprovalRequester | undefined,
 ): Promise<PiApprovalAnswer | null> {
 	const { title, message } = promptOverride ?? {
 		title: `Approve ${displayLabel(descriptor)}?`,
 		message: `${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
 	};
+	if (requester) return requester(context, { descriptor, input, signal, presentation, prompt: { title, message } });
 	return requestPiApproval(context, { title, message, presentation, signal, timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS });
 }
 
@@ -768,6 +807,7 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			signal,
 			options.approvalPresentation,
 			options.approvalPrompt?.(descriptor, input),
+			options.requestApproval,
 		);
 		if (!answer?.approved) {
 			const failure: VehicleFailure = {
@@ -810,6 +850,7 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			signal,
 			options.approvalPresentation,
 			options.approvalPrompt?.(descriptor, input),
+			options.requestApproval,
 		);
 		const approved = answer?.approved === true;
 		let capability: string | undefined;

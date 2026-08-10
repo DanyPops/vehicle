@@ -17,6 +17,7 @@
 			"src/daemon-client.ts",
 			"src/daemon-lifecycle.ts",
 			"src/daemon.ts",
+			"src/hitl-approval-ask-prompt.ts",
 			"src/hitl-prompt.ts",
 			"src/http.ts",
 			"src/index.ts",
