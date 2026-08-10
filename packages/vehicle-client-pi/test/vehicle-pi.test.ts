@@ -323,6 +323,25 @@ describe("invokeVehicleOperation (standalone, no Pi tool registration)", () => {
 		expect(client.calls[0]?.options?.idempotencyKey).toBe("call-7");
 		expect(client.calls[0]?.options?.correlationId).toBe("session-1");
 	});
+
+	it("auto-derives callerSessionId/callerProjectRoot from this call's own real session/cwd, same as correlationId", async () => {
+		const descriptor = operation("category.list");
+		const client = new FakeClient(manifest([descriptor]));
+
+		await invokeVehicleOperation({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: {},
+			context: fakeContext({ cwd: "/home/x/pipes" }),
+			options: {},
+		});
+
+		expect(client.calls[0]?.options?.callerSessionId).toBe("session-1");
+		expect(client.calls[0]?.options?.callerProjectRoot).toBe("/home/x/pipes");
+	});
 });
 
 describe("registerVehicleTools", () => {

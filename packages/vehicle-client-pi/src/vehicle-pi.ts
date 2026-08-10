@@ -742,6 +742,12 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 		...resolved,
 		operationId: toolCallId,
 		correlationId: resolved?.correlationId ?? context.sessionManager.getSessionId(),
+		// See VehicleInvocationOptions's own doc comment (vehicle-core) -- a generic ownership hook
+		// distinct from correlationId/principal above, auto-derived from this real call's own
+		// session/cwd so a handler (e.g. a background subscription) can attribute itself to the
+		// exact Pi session/project that created it, without every consumer re-deriving this itself.
+		callerSessionId: resolved?.callerSessionId ?? context.sessionManager.getSessionId(),
+		callerProjectRoot: resolved?.callerProjectRoot ?? context.cwd,
 		signal,
 		onProgress: reportProgress,
 		...(descriptor.idempotency.mode === "keyed" && !resolved?.idempotencyKey ? { idempotencyKey: toolCallId } : {}),

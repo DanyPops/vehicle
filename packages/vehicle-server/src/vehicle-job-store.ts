@@ -30,6 +30,8 @@ export interface VehicleJobSubmitOptions {
 	readonly expectedRevision?: string | number;
 	readonly approvalCapability?: string;
 	readonly correlationId?: string;
+	readonly callerSessionId?: string;
+	readonly callerProjectRoot?: string;
 	/** Defaults to "transition". */
 	readonly notifyMode?: VehicleJobNotifyMode;
 	/** Defaults to background.defaultWakeBudget; clamped to background.maxWakeBudget either way. */
@@ -195,6 +197,8 @@ export class VehicleJobStore {
 		const resolution = this.registry.resolveForBackground(name, version, input, {
 			operationId: jobId,
 			correlationId: options.correlationId,
+			callerSessionId: options.callerSessionId,
+			callerProjectRoot: options.callerProjectRoot,
 			permissions: options.permissions,
 			principal: options.principal,
 			idempotencyKey: options.idempotencyKey,
@@ -243,6 +247,8 @@ export class VehicleJobStore {
 			input: resolution.parsedInput,
 			operationId: jobId,
 			correlationId: options.correlationId,
+			callerSessionId: options.callerSessionId,
+			callerProjectRoot: options.callerProjectRoot,
 			signal: controller.signal,
 			deadline: Number.POSITIVE_INFINITY,
 			permissions: Object.freeze([...(options.permissions ?? [])]),

@@ -46,6 +46,8 @@ export interface VehicleExecutionRequest {
 	readonly input: unknown;
 	readonly operationId: string;
 	readonly correlationId?: string;
+	readonly callerSessionId?: string;
+	readonly callerProjectRoot?: string;
 	readonly signal: AbortSignal;
 	readonly deadline: number;
 	readonly permissions: readonly string[];
@@ -62,6 +64,8 @@ export interface VehicleExecutionPolicy {
 interface InvocationContext {
 	readonly operationId: string;
 	readonly correlationId?: string;
+	readonly callerSessionId?: string;
+	readonly callerProjectRoot?: string;
 	readonly signal: AbortSignal;
 	readonly deadline: number;
 	readonly permissions: readonly string[];
@@ -240,6 +244,8 @@ interface AvailabilityState {
 export interface VehicleBackgroundResolutionOptions {
 	readonly operationId?: string;
 	readonly correlationId?: string;
+	readonly callerSessionId?: string;
+	readonly callerProjectRoot?: string;
 	readonly permissions?: readonly string[];
 	readonly principal?: VehiclePrincipal;
 	readonly idempotencyKey?: string;
@@ -778,6 +784,8 @@ export class VehicleRegistry {
 		const context: InvocationContext = {
 			operationId,
 			correlationId: options.correlationId,
+			callerSessionId: options.callerSessionId,
+			callerProjectRoot: options.callerProjectRoot,
 			signal,
 			deadline,
 			permissions: Object.freeze([...(options.permissions ?? [])]),
@@ -810,6 +818,8 @@ export class VehicleRegistry {
 			input: parsedInput,
 			operationId,
 			correlationId: context.correlationId,
+			callerSessionId: context.callerSessionId,
+			callerProjectRoot: context.callerProjectRoot,
 			signal,
 			deadline,
 			permissions: context.permissions,

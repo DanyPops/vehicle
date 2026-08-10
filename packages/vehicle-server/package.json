@@ -26,6 +26,7 @@
 		"./logging": "./src/logging.ts",
 		"./rpc-correlation": "./src/rpc-correlation.ts",
 		"./session-identity": "./src/session-identity.ts",
+		"./project-scope": "./src/project-scope.ts",
 		"./version": "./src/version.ts",
 		"./vault": "./src/vault.ts",
 		"./supervisor": "./src/supervisor.ts",

@@ -341,6 +341,43 @@ describe("VehicleRegistry", () => {
 		expect(observed).toEqual(["test.echo@1:operation-1:turn-1"]);
 	});
 
+	it("threads callerSessionId/callerProjectRoot through to both the handler's own context and the execution policy's request, same as correlationId", async () => {
+		const observedContext: unknown[] = [];
+		const binding = echoBinding(() => async (context) => {
+			observedContext.push({
+				callerSessionId: (context as { callerSessionId?: string }).callerSessionId,
+				callerProjectRoot: (context as { callerProjectRoot?: string }).callerProjectRoot,
+			});
+			return { echoed: context.input.value };
+		});
+		const observedPolicyRequest: unknown[] = [];
+		const policy: VehicleExecutionPolicy = {
+			async execute(request, invoke) {
+				observedPolicyRequest.push({ callerSessionId: request.callerSessionId, callerProjectRoot: request.callerProjectRoot });
+				return invoke(request.input);
+			},
+		};
+		await registryWith(binding, policy).invoke(
+			"test.echo",
+			1,
+			{ value: "x" },
+			{ permissions: ["test:echo"], callerSessionId: "session-42", callerProjectRoot: "/home/x/pipes" },
+		);
+
+		expect(observedContext).toEqual([{ callerSessionId: "session-42", callerProjectRoot: "/home/x/pipes" }]);
+		expect(observedPolicyRequest).toEqual([{ callerSessionId: "session-42", callerProjectRoot: "/home/x/pipes" }]);
+	});
+
+	it("leaves callerSessionId/callerProjectRoot undefined when the caller never supplies them", async () => {
+		const observed: unknown[] = [];
+		const binding = echoBinding(() => async (context) => {
+			observed.push((context as { callerSessionId?: string }).callerSessionId);
+			return { echoed: context.input.value };
+		});
+		await registryWith(binding).invoke("test.echo", 1, { value: "x" }, { permissions: ["test:echo"] });
+		expect(observed).toEqual([undefined]);
+	});
+
 	it("normalizes unexpected policy failures", async () => {
 		const policy: VehicleExecutionPolicy = {
 			execute() {
