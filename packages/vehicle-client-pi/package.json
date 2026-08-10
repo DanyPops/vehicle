@@ -11,6 +11,7 @@
 			"types": "./dist/vehicle-pi.d.ts",
 			"default": "./dist/vehicle-pi.js"
 		},
+		"./agent-poll-ticker": "./src/agent-poll-ticker.ts",
 		"./activity-broker": {
 			"types": "./dist/activity-broker.d.ts",
 			"default": "./dist/activity-broker.js"
