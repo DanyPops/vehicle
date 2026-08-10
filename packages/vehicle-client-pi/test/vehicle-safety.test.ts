@@ -51,6 +51,35 @@ describe("classifyVehicleOperationSafety", () => {
 		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "destructive", override: "allow" })).toBe("allow");
 		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "read", override: "blocked" })).toBe("blocked");
 	});
+
+	test("a manifest-supplied approvalRequired short-circuits the effect-derived default entirely, in both directions", () => {
+		// effect says "ask" by default (destructive), but the manifest's own live answer says no.
+		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "destructive", approvalRequired: false })).toBe("allow");
+		// effect says "allow" by default (read), but the manifest's own live answer (an owner
+		// override, or a live-toggled policy) says yes.
+		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "read", approvalRequired: true })).toBe("ask");
+	});
+
+	test("approvalRequired takes precedence over requireApprovalForEffects when both are given", () => {
+		expect(
+			classifyVehicleOperationSafety({
+				permissionsSatisfied: true,
+				effect: "destructive",
+				requireApprovalForEffects: new Set(["destructive"]),
+				approvalRequired: false,
+			}),
+		).toBe("allow");
+	});
+
+	test("an explicit override still wins over approvalRequired, same as it wins over the effect-level default", () => {
+		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "read", approvalRequired: true, override: "allow" })).toBe(
+			"allow",
+		);
+	});
+
+	test("a permission block still wins over approvalRequired: false", () => {
+		expect(classifyVehicleOperationSafety({ permissionsSatisfied: false, effect: "read", approvalRequired: false })).toBe("blocked");
+	});
 });
 
 describe("VehicleSafetyPolicyStore", () => {

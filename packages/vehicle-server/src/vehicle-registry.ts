@@ -260,6 +260,8 @@ interface ApprovalPolicy {
 	readonly requireApprovalForEffects: ReadonlySet<VehicleEffect>;
 	readonly authority: VehicleApprovalAuthority;
 	readonly timeoutMs: number;
+	/** See {@link VehicleApprovalPolicyOptions.enabled}. */
+	readonly enabled: boolean;
 }
 
 export interface VehicleApprovalPolicyOptions {
@@ -269,6 +271,22 @@ export interface VehicleApprovalPolicyOptions {
 	readonly authority?: VehicleApprovalAuthority;
 	/** How long a request stays resolvable before it lapses and must be re-requested. Defaults to DEFAULT_APPROVAL_TIMEOUT_MS. */
 	readonly timeoutMs?: number;
+	/**
+	 * Whether the gate is actually active right now. Defaults to true (today's exact
+	 * behavior: configuring approvals means gating is on). Set false to register the
+	 * approval machinery (events, vehicle.approval.resolve) without enabling it yet, then
+	 * flip it live later with updateApprovalPolicy({ enabled }) -- e.g. a consumer whose own
+	 * approval preference is itself a live, user-toggleable setting (not a fixed
+	 * per-deployment constant decided at process-start time) can mirror that setting here
+	 * without recreating the registry.
+	 */
+	readonly enabled?: boolean;
+}
+
+/** Patch accepted by {@link VehicleRegistry.updateApprovalPolicy} -- every field optional, only what's provided changes. */
+export interface VehicleApprovalPolicyUpdate {
+	readonly requireApprovalForEffects?: readonly VehicleEffect[];
+	readonly enabled?: boolean;
 }
 
 interface ApprovalResolveInput {
@@ -363,10 +381,29 @@ export class VehicleRegistry {
 			requireApprovalForEffects: new Set(options.requireApprovalForEffects ?? DEFAULT_APPROVAL_EFFECTS),
 			authority: options.authority ?? new HmacApprovalAuthority(),
 			timeoutMs: options.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
+			enabled: options.enabled ?? true,
 		};
 		this.registerEvent("vehicle-registry", vehicleApprovalRequestedEvent);
 		this.registerEvent("vehicle-registry", vehicleApprovalResolvedEvent);
 		this.registerApprovalResolveOperation();
+	}
+
+	/**
+	 * Live update to an already-configured approval policy -- unlike configureApprovals()
+	 * itself (a one-shot: it also registers events/the resolve operation, which can't be
+	 * registered twice), this only ever touches the mutable policy fields and can be called
+	 * any number of times. An already-pending approval request (recorded under whatever
+	 * policy existed when enforceApprovalGate() first saw it) is unaffected -- it resolves
+	 * or expires under the policy in effect at that time, the same way it already would if
+	 * nothing here ever changed.
+	 */
+	updateApprovalPolicy(patch: VehicleApprovalPolicyUpdate): void {
+		if (!this.approvalPolicy) throw new Error("Vehicle approval policy is not configured -- call configureApprovals() first");
+		this.approvalPolicy = {
+			...this.approvalPolicy,
+			...(patch.requireApprovalForEffects ? { requireApprovalForEffects: new Set(patch.requireApprovalForEffects) } : {}),
+			...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+		};
 	}
 
 	private registerApprovalResolveOperation(): void {
@@ -478,25 +515,40 @@ export class VehicleRegistry {
 	}
 
 	/**
-	 * No-op unless configureApprovals() has been called and this operation's
-	 * effect is in the gated set. A presented capability is verified for
-	 * real (operation+input+expiry+single-use) rather than merely checked
-	 * for non-emptiness; an absent one records a durable, retryable
-	 * approval.requested event before failing, so the caller always has a
-	 * path forward (see vehicle.approval.resolve) instead of a dead end.
+	 * The single source of truth for "does invoking this operation right now require
+	 * approval" -- consulted by both enforceApprovalGate() (to decide whether to actually
+	 * gate) and manifest() (to report the live answer as VehicleManifestOperation's own
+	 * approvalRequired field, so a client re-fetching the manifest sees a policy change
+	 * with no separate sync mechanism needed). False whenever the registry's approval
+	 * policy was never configured, or was configured but is currently disabled
+	 * (VehicleApprovalPolicyOptions.enabled / updateApprovalPolicy). Otherwise: the
+	 * operation's own requiresApproval override when it set one, else the effect-derived
+	 * default against the policy's requireApprovalForEffects set.
+	 */
+	private resolvesToApprovalRequired(descriptor: VehicleOperationDescriptor): boolean {
+		const policy = this.approvalPolicy;
+		if (!policy?.enabled) return false;
+		return descriptor.requiresApproval ?? policy.requireApprovalForEffects.has(descriptor.effect);
+	}
+
+	/**
+	 * No-op unless resolvesToApprovalRequired() says this operation is currently gated. A
+	 * presented capability is verified for real (operation+input+expiry+single-use) rather
+	 * than merely checked for non-emptiness; an absent one records a durable, retryable
+	 * approval.requested event before failing, so the caller always has a path forward (see
+	 * vehicle.approval.resolve) instead of a dead end.
 	 */
 	private enforceApprovalGate(
 		key: string,
-		name: string,
-		version: number,
-		effect: VehicleEffect,
+		descriptor: VehicleOperationDescriptor,
 		principal: VehiclePrincipal | undefined,
 		input: unknown,
 		operationId: string,
 		presentedCapability: string | undefined,
 	): void {
-		const policy = this.approvalPolicy;
-		if (!policy?.requireApprovalForEffects.has(effect)) return;
+		if (!this.resolvesToApprovalRequired(descriptor)) return;
+		const policy = this.approvalPolicy as ApprovalPolicy;
+		const { name, version, effect } = descriptor;
 		const inputHash = hashApprovalInput(input);
 
 		if (presentedCapability) {
@@ -666,6 +718,7 @@ export class VehicleRegistry {
 					...registration.descriptor,
 					available: state?.available ?? true,
 					...(state?.reason ? { unavailableReason: state.reason } : {}),
+					approvalRequired: this.resolvesToApprovalRequired(registration.descriptor),
 				};
 			}),
 			events: [...this.events.values()].map((registration) => registration.descriptor),
@@ -702,16 +755,7 @@ export class VehicleRegistry {
 			});
 		}
 
-		this.enforceApprovalGate(
-			key,
-			name,
-			version,
-			registration.descriptor.effect,
-			options.principal,
-			input,
-			operationId,
-			options.approvalCapability,
-		);
+		this.enforceApprovalGate(key, registration.descriptor, options.principal, input, operationId, options.approvalCapability);
 
 		if (registration.descriptor.idempotency.mode === "keyed" && !options.idempotencyKey?.trim()) {
 			throw new VehicleError("idempotency-key-required", `${key} requires an idempotency key`, {
@@ -830,16 +874,7 @@ export class VehicleRegistry {
 				details: { missing },
 			});
 		}
-		this.enforceApprovalGate(
-			key,
-			name,
-			version,
-			registration.descriptor.effect,
-			options.principal,
-			input,
-			operationId,
-			options.approvalCapability,
-		);
+		this.enforceApprovalGate(key, registration.descriptor, options.principal, input, operationId, options.approvalCapability);
 		if (registration.descriptor.idempotency.mode === "keyed" && !options.idempotencyKey?.trim()) {
 			throw new VehicleError("idempotency-key-required", `${key} requires an idempotency key`, {
 				category: "validation",

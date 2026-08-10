@@ -15,23 +15,44 @@ export const VEHICLE_SAFETY_STATES: readonly VehicleSafetyState[] = ["allow", "a
 export interface VehicleSafetyClassificationInput {
 	readonly permissionsSatisfied: boolean;
 	readonly effect: VehicleEffect;
-	/** Defaults to DEFAULT_APPROVAL_EFFECTS, mirroring VehicleRegistry's own default -- a caller whose Vehicle server was configured with a different requireApprovalForEffects set should pass the same set here so /safety's "ask" classification matches reality. */
+	/**
+	 * The manifest's own live, resolved answer (VehicleManifestOperation.approvalRequired)
+	 * for this exact operation, when known -- takes precedence over requireApprovalForEffects
+	 * below since it already accounts for the registry's current enabled/disabled state and
+	 * any operation-level requiresApproval override, neither of which a bare effect set can
+	 * express. Always prefer passing this over requireApprovalForEffects when a manifest is
+	 * on hand (see resolveSafetyState in vehicle-pi.ts); the two are never both consulted --
+	 * an explicit true/false here short-circuits before requireApprovalForEffects is read at
+	 * all.
+	 */
+	readonly approvalRequired?: boolean;
+	/**
+	 * Legacy fallback for a caller with no manifest-derived approvalRequired to pass (e.g. a
+	 * hand-built classification outside registerVehicleTools()'s own flow). Defaults to
+	 * DEFAULT_APPROVAL_EFFECTS, mirroring VehicleRegistry's own default -- a caller whose
+	 * Vehicle server was configured with a different requireApprovalForEffects set (and
+	 * whose operations never set their own requiresApproval override) should pass the same
+	 * set here so /safety's "ask" classification matches reality. Ignored when
+	 * approvalRequired is provided.
+	 */
 	readonly requireApprovalForEffects?: ReadonlySet<VehicleEffect>;
 	readonly override?: VehicleSafetyState;
 }
 
 /**
  * Resolves an operation's real state. Precedence: an explicit per-operation
- * override always wins (a human's own /safety decision), then the
- * effect-level default, then a missing permission blocks. An override
- * winning over a permission-based block is deliberate: it only changes
- * local visibility/gating, never what the server actually authorizes at
- * invoke time -- invoking a permission-blocked operation a human overrode
- * to "allow" still fails server-side with permission-denied.
+ * override always wins (a human's own /safety decision), then a missing
+ * permission blocks, then the manifest's own live approvalRequired answer
+ * when known, else the effect-level default. An override winning over a
+ * permission-based block is deliberate: it only changes local
+ * visibility/gating, never what the server actually authorizes at invoke
+ * time -- invoking a permission-blocked operation a human overrode to
+ * "allow" still fails server-side with permission-denied.
  */
 export function classifyVehicleOperationSafety(input: VehicleSafetyClassificationInput): VehicleSafetyState {
 	if (input.override) return input.override;
 	if (!input.permissionsSatisfied) return "blocked";
+	if (input.approvalRequired !== undefined) return input.approvalRequired ? "ask" : "allow";
 	const gated = input.requireApprovalForEffects ?? new Set(DEFAULT_APPROVAL_EFFECTS);
 	return gated.has(input.effect) ? "ask" : "allow";
 }

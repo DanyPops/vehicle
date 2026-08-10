@@ -1542,6 +1542,32 @@ describe("safety policy (VehicleSafetyPolicyStore + classification)", () => {
 		expect(registered.tools[0]?.safetyState).toBe("allow");
 	});
 
+	it("the manifest's own live approvalRequired (from a real VehicleRegistry) drives safetyState, overriding the effect-level default in both directions", async () => {
+		const client = new FakeClient(
+			manifest([
+				operation("reads.but.gated", 1, { effect: "read", approvalRequired: true }),
+				operation("writes.but.exempt", 1, { effect: "destructive", approvalRequired: false }),
+			]),
+		);
+		const { pi } = fakePi();
+
+		const registered = await registerVehicleTools(pi, client);
+
+		expect(registered.tools.map((tool) => [tool.operationName, tool.safetyState])).toEqual([
+			["reads.but.gated", "ask"],
+			["writes.but.exempt", "allow"],
+		]);
+	});
+
+	it("a manifest with no approvalRequired at all (a hand-built or pre-upgrade fixture) still falls back to the effect-level default, unchanged", async () => {
+		const client = new FakeClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi } = fakePi();
+
+		const registered = await registerVehicleTools(pi, client);
+
+		expect(registered.tools[0]?.safetyState).toBe("ask");
+	});
+
 	// Not just permissions/availability.
 	it("refreshVehicleToolAvailability re-evaluates the safety policy store too", async () => {
 		const client = new FakeClient(manifest([operation("issues.write")]));

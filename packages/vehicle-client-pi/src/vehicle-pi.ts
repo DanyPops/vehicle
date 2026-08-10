@@ -370,12 +370,13 @@ function permissionsSatisfied(required: readonly string[], granted: readonly str
 
 function resolveSafetyState(
 	manifestName: string,
-	descriptor: VehicleOperationDescriptor,
+	descriptor: VehicleManifestOperation,
 	options: RegisterVehicleToolsOptions,
 ): VehicleSafetyState {
 	return classifyVehicleOperationSafety({
 		permissionsSatisfied: permissionsSatisfied(descriptor.permissions, options.permissions),
 		effect: descriptor.effect,
+		approvalRequired: descriptor.approvalRequired,
 		requireApprovalForEffects: options.requireApprovalForEffects ? new Set(options.requireApprovalForEffects) : undefined,
 		override: options.safetyPolicyStore?.get(manifestName, descriptor.name),
 	});

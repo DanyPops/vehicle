@@ -95,7 +95,7 @@ describe("Vehicle operation contracts", () => {
 		expect("safeParse" in binding.operation.descriptor.inputSchema).toBe(false);
 
 		const manifest = registryWith(binding).manifest();
-		expect(manifest.operations).toEqual([{ ...binding.operation.descriptor, available: true }]);
+		expect(manifest.operations).toEqual([{ ...binding.operation.descriptor, available: true, approvalRequired: false }]);
 	});
 
 	it("rejects invalid operation metadata before registration", () => {
@@ -641,5 +641,116 @@ describe("VehicleRegistry approval gate", () => {
 		readOnly.register("echo-provider", echoBinding());
 		readOnly.configureApprovals({ requireApprovalForEffects: ["external-write"] });
 		await expect(readOnly.invoke("test.echo", 1, { value: "go" }, { permissions: ["test:echo"] })).resolves.toEqual({ echoed: "go" });
+	});
+
+	it("an operation's own requiresApproval overrides the effect-derived default -- gated even though its effect isn't in the configured set", async () => {
+		const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
+		const op = defineVehicleOperation({ ...ECHO_OPTIONS, name: "test.override-gated", effect: "external-write", requiresApproval: true });
+		registry.register(
+			"echo-provider",
+			bindVehicleOperation(op, () => async ({ input }) => ({ echoed: input.value })),
+		);
+		// external-write is deliberately left out of requireApprovalForEffects -- only the
+		// operation's own override should gate it.
+		registry.configureApprovals({ requireApprovalForEffects: ["destructive"] });
+
+		await expect(registry.invoke("test.override-gated", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
+			code: "approval-required",
+		});
+	});
+
+	it("an operation's own requiresApproval: false exempts it even though its effect is in the configured gated set", async () => {
+		const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
+		const op = defineVehicleOperation({ ...ECHO_OPTIONS, name: "test.override-exempt", effect: "destructive", requiresApproval: false });
+		registry.register(
+			"echo-provider",
+			bindVehicleOperation(op, () => async ({ input }) => ({ echoed: input.value })),
+		);
+		registry.configureApprovals();
+
+		await expect(registry.invoke("test.override-exempt", 1, { value: "go" }, { permissions: ["test:echo"] })).resolves.toEqual({
+			echoed: "go",
+		});
+	});
+
+	it("manifest().operations reports the live, resolved approvalRequired per operation", () => {
+		const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
+		registry.register("echo-provider", echoBinding());
+		const destructiveOp = defineVehicleOperation({ ...ECHO_OPTIONS, name: "test.destructive-echo", effect: "destructive" });
+		registry.register(
+			"echo-provider",
+			bindVehicleOperation(destructiveOp, () => async ({ input }) => ({ echoed: input.value })),
+		);
+
+		expect(registry.manifest().operations.map((op) => [op.name, op.approvalRequired])).toEqual([
+			["test.echo", false],
+			["test.destructive-echo", false],
+		]);
+
+		registry.configureApprovals();
+		expect(
+			registry
+				.manifest()
+				.operations.filter((op) => op.name !== "vehicle.approval.resolve")
+				.map((op) => [op.name, op.approvalRequired]),
+		).toEqual([
+			["test.echo", false],
+			["test.destructive-echo", true],
+		]);
+	});
+
+	it("updateApprovalPolicy throws before configureApprovals() has ever been called", () => {
+		const registry = destructiveEchoRegistry();
+		expect(() => registry.updateApprovalPolicy({ enabled: false })).toThrow("call configureApprovals() first");
+	});
+
+	it("updateApprovalPolicy({ enabled: false }) turns the gate off live, no restart, and updateApprovalPolicy({ enabled: true }) turns it back on", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals();
+		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
+			code: "approval-required",
+		});
+
+		registry.updateApprovalPolicy({ enabled: false });
+		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).resolves.toEqual({
+			echoed: "go",
+		});
+		expect(registry.manifest().operations.find((op) => op.name === "test.destructive-echo")?.approvalRequired).toBe(false);
+
+		registry.updateApprovalPolicy({ enabled: true });
+		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
+			code: "approval-required",
+		});
+	});
+
+	it("updateApprovalPolicy can also swap requireApprovalForEffects live, independent of enabled", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals({ requireApprovalForEffects: ["open-world"] });
+		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).resolves.toEqual({
+			echoed: "go",
+		});
+
+		registry.updateApprovalPolicy({ requireApprovalForEffects: ["destructive"] });
+		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
+			code: "approval-required",
+		});
+	});
+
+	it("a pending approval request recorded before a live policy change still resolves normally under the old decision", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals();
+		const requestId = await requestApprovalGate(registry);
+
+		// Disabling the gate entirely after the request was already recorded must not
+		// retroactively invalidate it -- vehicle.approval.resolve still works.
+		registry.updateApprovalPolicy({ enabled: false });
+
+		const resolved = (await registry.invoke(
+			"vehicle.approval.resolve",
+			1,
+			{ requestId, decision: "granted" },
+			{ permissions: ["vehicle:approvals:resolve"] },
+		)) as { capability?: string };
+		expect(typeof resolved.capability).toBe("string");
 	});
 });

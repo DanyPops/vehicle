@@ -208,6 +208,21 @@ export interface VehicleOperationDescriptor {
 	readonly limits: VehicleLimits;
 	readonly errors: readonly VehicleFailureDescriptor[];
 	readonly background?: VehicleBackgroundCapability;
+	/**
+	 * Owner-declared override for whether this specific operation is ever a candidate for
+	 * approval gating, independent of its `effect`. Undefined (the default) means "derive it
+	 * from `effect` against the registry's own requireApprovalForEffects set instead" --
+	 * VehicleRegistry.manifest()'s own resolution rule, unchanged for every existing
+	 * operation that never sets this.
+	 *
+	 * Exists because VehicleEffect's five values are coarse enough that two operations a
+	 * real owner classifies very differently (e.g. "restart an already-installed,
+	 * already-vetted service" vs. "sync a read-only catalog mirror") can land in the same
+	 * effect bucket (both external-write) -- no single requireApprovalForEffects set can
+	 * gate one without also gating the other. The owner who registers the operation knows
+	 * its real risk far better than a 5-value enum can; this lets them say so directly.
+	 */
+	readonly requiresApproval?: boolean;
 }
 
 export interface VehicleOperation<Input, Output> {
@@ -230,6 +245,8 @@ export interface DefineVehicleOperationOptions<Input, Output> {
 	readonly limits: VehicleLimits;
 	readonly errors?: readonly VehicleFailureDescriptor[];
 	readonly background?: VehicleBackgroundCapability;
+	/** See {@link VehicleOperationDescriptor.requiresApproval}. */
+	readonly requiresApproval?: boolean;
 }
 
 export interface VehiclePrincipal {
@@ -292,6 +309,24 @@ export interface VehicleManifestIdentity {
 export interface VehicleManifestOperation extends VehicleOperationDescriptor {
 	readonly available: boolean;
 	readonly unavailableReason?: string;
+	/**
+	 * The registry's own, live, fully-resolved answer to "does invoking this operation right
+	 * now require approval" -- accounts for the registry's current approval policy being
+	 * enabled/disabled, this operation's own `requiresApproval` override when set, and the
+	 * effect-derived default otherwise. A real VehicleRegistry.manifest() always sets this
+	 * (false when the registry never called configureApprovals() at all) -- unlike
+	 * `requiresApproval` (the static, author-declared override on the descriptor itself),
+	 * this always reflects the current instant, so a client re-fetching the manifest after a
+	 * live policy change (VehicleRegistry.updateApprovalPolicy) sees the new answer with no
+	 * separate sync mechanism needed.
+	 *
+	 * Optional purely for backward compatibility with every hand-authored VehicleManifest
+	 * test fixture across the ecosystem that predates this field (the same reason
+	 * VehicleManifest.events is optional) -- a consumer reading it should treat undefined the
+	 * same as a caller of classifyVehicleOperationSafety does: fall back to the effect-level
+	 * default, never assume false.
+	 */
+	readonly approvalRequired?: boolean;
 }
 
 /**
@@ -403,6 +438,7 @@ export function defineVehicleOperation<Input, Output>(
 		longRunning: options.longRunning ?? false,
 		limits: Object.freeze({ ...options.limits }),
 		errors: Object.freeze((options.errors ?? []).map((failure) => Object.freeze({ ...failure }))),
+		...(options.requiresApproval !== undefined ? { requiresApproval: options.requiresApproval } : {}),
 		...(options.background
 			? {
 					background: Object.freeze({
