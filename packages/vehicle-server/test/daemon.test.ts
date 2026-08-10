@@ -85,6 +85,18 @@ describe("startDaemon", () => {
 		expect(readDaemonHandle(sharedPath)).toBeNull();
 	});
 
+	it("vehicleName + tokenPath given: the shared entry also carries tokenPath (never the token value itself)", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		const tokenPath = join(dir, "auth-token");
+		const env = { XDG_RUNTIME_DIR: dir };
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, vehicleName: "acme", tokenPath, env, buildApp: trivialApp });
+		const sharedPath = resolveSharedVehicleHandlePath("acme", { env });
+		expect(readDaemonHandle(sharedPath)?.tokenPath).toBe(tokenPath);
+		// The private handle is unaffected either way -- tokenPath is a shared-directory-only concern.
+		expect(readDaemonHandle(handlePath)?.tokenPath).toBeUndefined();
+	});
+
 	it("vehicleName omitted: no shared handle entry is ever written", async () => {
 		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
 		const handlePath = join(dir, "handle.json");

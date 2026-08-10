@@ -13,6 +13,7 @@ import {
 	releaseDaemonLock,
 	removeDaemonHandle,
 	resolveDaemonPaths,
+	resolveSharedVehicleHandleDirectory,
 	resolveSharedVehicleHandlePath,
 	writeDaemonHandle,
 } from "../src/paths.ts";
@@ -132,6 +133,14 @@ describe("resolveSharedVehicleHandlePath", () => {
 		expect(() => resolveSharedVehicleHandlePath("../escape", { platform: "linux" })).toThrow();
 		expect(() => resolveSharedVehicleHandlePath("", { platform: "linux" })).toThrow();
 		expect(() => resolveSharedVehicleHandlePath("Has Spaces", { platform: "linux" })).toThrow();
+	});
+});
+
+describe("resolveSharedVehicleHandleDirectory", () => {
+	it("is the parent directory every resolveSharedVehicleHandlePath entry lives under", () => {
+		const options = { platform: "linux" as const, env: { XDG_RUNTIME_DIR: "/run/u" } };
+		expect(resolveSharedVehicleHandleDirectory(options)).toBe("/run/u/vehicle/handles");
+		expect(resolveSharedVehicleHandlePath("papyrus", options)).toBe("/run/u/vehicle/handles/papyrus.json");
 	});
 });
 

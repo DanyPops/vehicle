@@ -49,6 +49,18 @@ export interface DaemonHandle {
 	pid: number;
 }
 
+/**
+ * The shared Vehicle Handle Directory's own entry shape -- a DaemonHandle plus an optional
+ * pointer to this daemon's own auth token FILE (never the token itself, matching this file's
+ * own "handle content is never sensitive" invariant even when a caller opts into a
+ * world-readable handleMode). A discovering broker with read access to that path can
+ * authenticate; one without it (a different OS user, or the field simply omitted) can still
+ * see the vehicle exists and is live, just not fetch its manifest.
+ */
+export interface SharedVehicleHandleEntry extends DaemonHandle {
+	tokenPath?: string;
+}
+
 export interface PathEnvironment {
 	env?: Record<string, string | undefined>;
 	home?: string;
@@ -141,7 +153,7 @@ export function ensureAuthToken(tokenPath: string, errorLabel: string): string {
  * 0644: the handle's own content (host/port/pid) is never sensitive, unlike
  * the daemon's own auth token, which stays owner-only regardless.
  */
-export function writeDaemonHandle(handlePath: string, handle: DaemonHandle, mode = 0o600): void {
+export function writeDaemonHandle(handlePath: string, handle: DaemonHandle | SharedVehicleHandleEntry, mode = 0o600): void {
 	// A world-readable handle needs a traversable directory too, or the file mode alone
 	// is moot -- only matters when this call itself creates the directory; a systemd
 	// RuntimeDirectory=/RuntimeDirectoryMode= unit directive typically creates it first.
@@ -152,19 +164,20 @@ export function writeDaemonHandle(handlePath: string, handle: DaemonHandle, mode
 	renameSync(temporary, handlePath);
 }
 
-export function readDaemonHandle(handlePath: string): DaemonHandle | null {
+export function readDaemonHandle(handlePath: string): SharedVehicleHandleEntry | null {
 	try {
-		const value = JSON.parse(readFileSync(handlePath, "utf8")) as Partial<DaemonHandle>;
+		const value = JSON.parse(readFileSync(handlePath, "utf8")) as Partial<SharedVehicleHandleEntry>;
 		if (
 			value.host !== LOOPBACK_HOST ||
 			!Number.isInteger(value.port) ||
 			value.port! < 1 ||
 			value.port! > 65_535 ||
-			!Number.isInteger(value.pid)
+			!Number.isInteger(value.pid) ||
+			(value.tokenPath !== undefined && typeof value.tokenPath !== "string")
 		) {
 			return null;
 		}
-		return value as DaemonHandle;
+		return value as SharedVehicleHandleEntry;
 	} catch {
 		return null;
 	}
@@ -188,23 +201,28 @@ const VEHICLE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
  * as resolveDaemonPaths's own `handle` field (XDG_RUNTIME_DIR on Linux, OS temp directory
  * elsewhere -- see that function's own doc comment for why the guarantee is weaker there).
  */
+export function resolveSharedVehicleHandleDirectory(options: PathEnvironment = {}): string {
+	const platform = options.platform ?? process.platform;
+	const home = options.home ?? homedir();
+	if (platform === "darwin") return join(tmpdir(), "vehicle", "handles");
+	if (platform === "win32") {
+		const env = options.env ?? process.env;
+		const localAppData = env.LOCALAPPDATA ?? win32.join(home, "AppData", "Local");
+		return win32.join(localAppData, "Temp", "vehicle", "handles");
+	}
+	const env = options.env ?? process.env;
+	const uid = options.uid ?? process.getuid?.() ?? 0;
+	const runtimeHome = env.XDG_RUNTIME_DIR ?? join("/run", "user", String(uid));
+	return join(runtimeHome, "vehicle", "handles");
+}
+
 export function resolveSharedVehicleHandlePath(vehicleName: string, options: PathEnvironment = {}): string {
 	if (!VEHICLE_NAME.test(vehicleName)) {
 		throw new Error(`vehicleName must match ${VEHICLE_NAME.source}: ${JSON.stringify(vehicleName)}`);
 	}
 	const platform = options.platform ?? process.platform;
-	const home = options.home ?? homedir();
-	const filename = `${vehicleName}.json`;
-	if (platform === "darwin") return join(tmpdir(), "vehicle", "handles", filename);
-	if (platform === "win32") {
-		const env = options.env ?? process.env;
-		const localAppData = env.LOCALAPPDATA ?? win32.join(home, "AppData", "Local");
-		return win32.join(localAppData, "Temp", "vehicle", "handles", filename);
-	}
-	const env = options.env ?? process.env;
-	const uid = options.uid ?? process.getuid?.() ?? 0;
-	const runtimeHome = env.XDG_RUNTIME_DIR ?? join("/run", "user", String(uid));
-	return join(runtimeHome, "vehicle", "handles", filename);
+	if (platform === "win32") return win32.join(resolveSharedVehicleHandleDirectory(options), `${vehicleName}.json`);
+	return join(resolveSharedVehicleHandleDirectory(options), `${vehicleName}.json`);
 }
 
 /**

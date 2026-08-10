@@ -264,3 +264,99 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools).not.toContain("tools_man");
 	});
 });
+
+describe("registerVehicleTools with shell broker mode", () => {
+	it("without options.shell.broker, tools_list is unaffected -- today's exact single-vehicle behavior", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toBe("tasks.create -- Run tasks.create.");
+	});
+
+	it("tools_list merges a broker-discovered foreign vehicle's operations, namespaced by vehicle name", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: {
+				broker: {
+					ownVehicleName: "papyrus",
+					discover: async () => [{ name: "packed", manifest: manifest([operation("package.install")]) }],
+				},
+			},
+		});
+
+		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("tasks.create -- Run tasks.create.");
+		expect(result.content[0]?.text).toContain("packed:package.install -- Run package.install.");
+	});
+
+	it("tools_list's query filter matches a namespaced foreign operation's own name", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: {
+				broker: {
+					ownVehicleName: "papyrus",
+					discover: async () => [{ name: "packed", manifest: manifest([operation("package.install")]) }],
+				},
+			},
+		});
+
+		const result = (await callTool(tools, "tools_list", { query: "package" })) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toBe("packed:package.install -- Run package.install.");
+	});
+
+	it("broker discovery throwing never breaks tools_list's own base (local) listing", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: {
+				broker: {
+					ownVehicleName: "papyrus",
+					discover: async () => {
+						throw new Error("handle directory unreadable");
+					},
+				},
+			},
+		});
+
+		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toBe("tasks.create -- Run tasks.create.");
+	});
+
+	it("tools_man for a known local operation is unaffected by broker mode", async () => {
+		const { pi, tools, harness } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: { broker: { ownVehicleName: "papyrus", discover: async () => [] } },
+		});
+
+		const result = (await callTool(tools, "tools_man", { names: ["tasks.create"] })) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("now callable as tasks_create");
+		expect(harness.activeTools).toContain("tasks_create");
+	});
+
+	it("tools_man for a broker-discovered foreign operation reports it as known but not yet locally activatable", async () => {
+		const { pi, tools, harness } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: {
+				broker: {
+					ownVehicleName: "papyrus",
+					discover: async () => [{ name: "packed", manifest: manifest([operation("package.install")]) }],
+				},
+			},
+		});
+
+		const result = (await callTool(tools, "tools_man", { names: ["packed:package.install"] })) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain('known -- provided by Vehicle "packed"');
+		expect(result.content[0]?.text).toContain("not yet callable here");
+		expect(harness.activeTools).not.toContain("packed:package.install");
+	});
+
+	it("tools_man for a name that's neither local nor broker-discoverable keeps today's exact unknown-operation message", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: { broker: { ownVehicleName: "papyrus", discover: async () => [] } },
+		});
+
+		const result = (await callTool(tools, "tools_man", { names: ["nonexistent.operation"] })) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toBe("nonexistent.operation: no such operation. Use tools_list to browse available names.");
+	});
+});

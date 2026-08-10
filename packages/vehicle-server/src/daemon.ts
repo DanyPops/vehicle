@@ -156,6 +156,12 @@ export interface StartDaemonOptions {
 	 * failure is logged, never thrown -- must never be why a daemon fails to start or stop.
 	 */
 	vehicleName?: string;
+	/** Absolute path to this daemon's own auth token FILE (never the token value) -- carried into
+	 * the shared handle entry alongside vehicleName so a discovering broker with read access to it
+	 * can authenticate. Ignored when vehicleName is omitted. Omitting this while vehicleName is set
+	 * still writes a valid entry, just without tokenPath -- a broker can see the vehicle exists and
+	 * is live, but not fetch its manifest. */
+	tokenPath?: string;
 	/** Optional WebSocket push-invalidation channel (see push-channel.ts). Additive to the fetch-based RPC -- requests to `pushPath` are routed to it, everything else still goes to buildApp()'s fetch. */
 	pushChannel?: PushChannel;
 	/** Defaults to "/push". */
@@ -387,6 +393,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 				host: LOOPBACK_HOST,
 				port: listener.port,
 				pid: process.pid,
+				...(options.tokenPath ? { tokenPath: options.tokenPath } : {}),
 			});
 		} catch (error) {
 			logger.error("shared vehicle handle write failed", { error: error instanceof Error ? error.message : String(error) });
