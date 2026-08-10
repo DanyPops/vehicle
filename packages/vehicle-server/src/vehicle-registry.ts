@@ -299,6 +299,21 @@ function resolveManifestIdentity(identity: VehicleRegistryIdentity): VehicleMani
 	return identity;
 }
 
+/**
+ * The daemon-side execution engine at the root of `@danypops/vehicle-server`:
+ * operation registration, permission/deadline/payload enforcement, an
+ * injectable {@link VehicleExecutionPolicy} hook, and
+ * `setAvailability(name, version, available, reason?)`, which toggles a
+ * registered operation's usability at runtime (e.g. a credential got
+ * configured or removed) -- there's no unregister; an operation's shape is
+ * permanent once registered, only whether `manifest()` reports it available
+ * and whether `invoke()` accepts it.
+ *
+ * Kept separate from `./http`'s `createVehicleHttpApp()` (which exposes a
+ * registry over `GET /vehicle/manifest`, `POST /vehicle/invoke`, and
+ * `POST /vehicle/cancel`) on purpose: a consumer that only builds/tests a
+ * registry never pulls in HTTP request/response plumbing.
+ */
 export class VehicleRegistry {
 	private readonly registrations = new Map<string, Registration>();
 	private readonly availability = new Map<string, AvailabilityState>();

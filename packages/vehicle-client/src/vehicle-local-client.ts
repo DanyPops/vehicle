@@ -18,6 +18,13 @@ import type {
 import { VehicleError } from "@danypops/vehicle-core";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
 
+/**
+ * A `VehicleClient` that calls a same-process VehicleRegistry directly, no
+ * wire involved -- for a daemon calling its own registered operations, or
+ * a host embedding a provider and its consumer in one process. Depends on
+ * `@danypops/vehicle-server` only for `VehicleRegistry`'s type;
+ * `RemoteVehicleClient` (`./http`) has no such dependency.
+ */
 export class LocalVehicleClient implements VehicleClient {
 	private closed = false;
 

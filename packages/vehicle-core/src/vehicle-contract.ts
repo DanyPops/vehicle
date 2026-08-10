@@ -42,6 +42,14 @@ export type VehicleSchemaResult<T> =
 	| { readonly success: true; readonly value: T }
 	| { readonly success: false; readonly issues?: readonly VehicleSchemaIssue[] };
 
+/**
+ * A serializable, descriptive `jsonSchema` (surfaced to a client or Pi tool
+ * projection) paired with a real `safeParse` that actually enforces it at
+ * runtime -- a Vehicle registry's own `invoke()` only ever calls
+ * `safeParse`; `jsonSchema` alone is never itself enforced, so a codec that
+ * only sets `jsonSchema` without a matching `safeParse` is a documentation
+ * gesture, not an honest contract.
+ */
 export interface VehicleSchemaCodec<T> {
 	readonly jsonSchema: JsonSchema;
 	safeParse(value: unknown): VehicleSchemaResult<T>;
@@ -163,6 +171,7 @@ export interface VehicleLimits {
 	readonly maxResponseBytes: number;
 }
 
+/** One structured, documented failure mode a {@link VehicleOperationDescriptor} declares up front -- part of the operation's own serializable contract, not an ad hoc thrown Error a caller has to reverse-engineer from a message string. */
 export interface VehicleFailureDescriptor {
 	readonly code: string;
 	readonly description: string;
@@ -175,6 +184,16 @@ export interface VehicleBackgroundCapability {
 	readonly maxWakeBudget: VehicleJobWakeBudget;
 }
 
+/**
+ * The serializable half of a Vehicle operation -- name, version, schemas,
+ * ownership-implying permissions, effect classification, idempotency,
+ * streaming/long-running capability, request/response limits, and declared
+ * {@link VehicleFailureDescriptor} failure modes. Kept separate from the
+ * executable {@link VehicleOperationHandler} on purpose: a manifest, a Pi
+ * tool projection, or a client's own capability check can all inspect this
+ * shape without ever touching (or needing to trust) the implementation
+ * behind it.
+ */
 export interface VehicleOperationDescriptor {
 	readonly name: string;
 	readonly version: number;

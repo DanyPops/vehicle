@@ -56,6 +56,12 @@ using.
 | `@danypops/vehicle-client-pi` | `vehicle-core`, `vehicle-server` | Projects any `VehicleClient` into native Pi tools, with live availability curation, plus the rest of this house's Pi-extension-facing surface: jiti-load-safety verification and the shared `/secrets` command. |
 | `@danypops/vehicle-conformance` | `vehicle-core`, `vehicle-server` | Host-neutral `bun:test` conformance suite any `VehicleClient` implementation must satisfy identically. Ships raw TypeScript -- a test-time devDependency, not a runtime library. |
 
+The tables below are the hand-maintained, narrative version of this layout --
+why each module exists, what it replaced, and the design rationale behind it.
+For the mechanical, always-current version (every real export, its exact
+signature, and its own TSDoc description where seeded) generated straight
+from source, see **[`docs/api/`](docs/api/README.md)** -- run `npm run docs` to regenerate it after changing an export. `@danypops/vehicle-conformance` is deliberately excluded (test-time-only, per its own row above).
+
 ## `@danypops/vehicle-server` modules
 
 Each module is independently importable (`@danypops/vehicle-server/paths`,

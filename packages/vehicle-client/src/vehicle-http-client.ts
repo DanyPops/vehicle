@@ -93,6 +93,19 @@ interface FailurePayload {
 	operationId?: unknown;
 }
 
+/**
+ * A `VehicleClient` that talks to a remote daemon's
+ * `@danypops/vehicle-server`'s `./http` provider over the same
+ * Bearer-authenticated loopback transport every Vehicle server uses --
+ * preserving `LocalVehicleClient`'s exact semantics over the wire (every
+ * `VehicleInvocationOptions` field sent in the request body, a relative
+ * `deadlineMs`, cancellation aborting the underlying fetch AND
+ * best-effort notifying the provider's `/vehicle/cancel`, progress via SSE
+ * when `onProgress` is set, and a `VehicleError` round-tripping with its
+ * original code/category/details rather than becoming a generic HTTP
+ * error) -- so a daemon-backed Pi extension can project a remote Vehicle
+ * through `@danypops/vehicle-client-pi` exactly as it would a local one.
+ */
 export class RemoteVehicleClient implements VehicleClient {
 	private readonly fetchImpl: typeof globalThis.fetch;
 	private closed = false;
