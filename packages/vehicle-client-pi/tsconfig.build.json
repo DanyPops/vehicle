@@ -13,6 +13,7 @@
 	},
 	"include": [
 		"src/vehicle-pi.ts",
+		"src/expand-hint.ts",
 		"src/pi-tool-availability.ts",
 		"src/activity-broker.ts",
 		"src/vehicle-safety.ts",

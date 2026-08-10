@@ -7,7 +7,7 @@ import {
 	type VehicleOperationDescriptor,
 } from "@danypops/vehicle-core";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { keyHint, type Theme, type ThemeColor, type ToolDefinition, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import type { Theme, ThemeColor, ToolDefinition, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth as truncateToWidthUnsafe, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
@@ -26,6 +26,7 @@ import {
 	Text,
 	type TextMeasure,
 } from "malevich-tui-components";
+import { expandHint } from "./expand-hint.js";
 import { type GenericVehiclePresentation, parseGenericVehiclePresentation, type VehiclePresentationField } from "./vehicle-render-model.js";
 
 // ToolRenderContext itself isn't part of the public export barrel; derive
@@ -239,7 +240,7 @@ export function renderVehicleCall(
 const DEFAULT_VISIBLE_ROWS = 20;
 
 function moreRowsLine(theme: Theme, hiddenCount: number): string {
-	return theme.fg("dim", `... ${hiddenCount} more row${hiddenCount === 1 ? "" : "s"} (${keyHint("app.tools.expand", "to expand")})`);
+	return theme.fg("dim", `... ${hiddenCount} more row${hiddenCount === 1 ? "" : "s"} (${expandHint("to expand")})`);
 }
 
 /** Best-effort duck-typing over an untyped Vehicle progress payload: {current,total} or {value,max} render as a bar, anything else falls back to a plain line. */

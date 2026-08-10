@@ -20,6 +20,10 @@
 			"types": "./dist/client-diagnostics.d.ts",
 			"default": "./dist/client-diagnostics.js"
 		},
+		"./expand-hint": {
+			"types": "./dist/expand-hint.d.ts",
+			"default": "./dist/expand-hint.js"
+		},
 		"./hitl-prompt": {
 			"types": "./dist/hitl-prompt.d.ts",
 			"default": "./dist/hitl-prompt.js"
