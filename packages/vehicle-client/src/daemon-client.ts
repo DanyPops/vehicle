@@ -173,6 +173,50 @@ export interface CreateRetryingClientOptions {
 	 * behavior). Defaults to enabled with failureThreshold: 3, cooldownMs: 10_000.
 	 */
 	circuitBreaker?: CircuitBreakerOptions | false;
+	/**
+	 * Fired at every internal retry/breaker decision point -- purely observational, never changes
+	 * behavior. A caller hitting a scrubbed, deliberately generic error at some outer boundary (e.g.
+	 * pi-pipes' withConnectorDiagnostics, which strips the raw cause/URL/token before it reaches a
+	 * tool caller) otherwise has no way to RCA *why*: a genuine fresh connect() failure, a
+	 * breaker-open short-circuit (no connect attempted at all this call), or an in-flight operation
+	 * failure that triggered a stale-connection retry are all real, distinguishable causes that
+	 * collapse into the same outer message today. Exceptions thrown from onEvent itself propagate --
+	 * keep it synchronous and side-effect-light (e.g. a log line), never something that can fail.
+	 */
+	onEvent?: (event: RetryingClientDiagnosticEvent) => void;
+}
+
+/**
+ * One retry/breaker decision, in the order they can occur:
+ *  - connect-success / connect-failure: a real connect() attempt just resolved or rejected.
+ *  - breaker-open-short-circuit: call()/callOnce() rejected immediately from the breaker's last
+ *    recorded failure, without attempting a new connect() at all this call.
+ *  - stale-connection-retry: call() saw a stale-connection error from operation(client) and is
+ *    about to drop the connection and retry once against a fresh one.
+ *  - pre-dispatch-retry: callOnce() saw an error proving dispatch never began (ECONNREFUSED-shaped)
+ *    and is transparently retrying once, with no risk of a duplicate side effect.
+ *  - pre-dispatch-exhausted: callOnce()'s transparent pre-dispatch retry itself also failed;
+ *    surfacing as PreDispatchConnectionError.
+ *  - mutation-outcome-unknown: callOnce() saw an ambiguous transport failure (dispatch may or may
+ *    not have reached the daemon) and is surfacing MutationOutcomeUnknownError without retrying.
+ */
+export interface RetryingClientDiagnosticEvent {
+	type:
+		| "connect-success"
+		| "connect-failure"
+		| "breaker-open-short-circuit"
+		| "stale-connection-retry"
+		| "pre-dispatch-retry"
+		| "pre-dispatch-exhausted"
+		| "mutation-outcome-unknown";
+	/** The raw underlying error, never scrubbed -- present on every event except connect-success. */
+	error?: unknown;
+	/** 0-indexed attempt number within the current call()/callOnce() invocation, when applicable. */
+	attempt?: number;
+	/** Present only on breaker-open-short-circuit -- the breaker's own consecutive-failure count that tripped it. */
+	consecutiveFailures?: number;
+	/** Present only when the caller supplied one to callOnce(). */
+	operationId?: string;
 }
 
 export interface CircuitBreakerOptions {
@@ -283,11 +327,13 @@ export function createRetryingClient<Client>(
 			const promise = connect()
 				.then((client) => {
 					breaker.recordSuccess();
+					options.onEvent?.({ type: "connect-success" });
 					return client;
 				})
 				.catch((error: unknown) => {
 					invalidateGeneration(createdGeneration);
 					breaker.recordFailure(error);
+					options.onEvent?.({ type: "connect-failure", error });
 					throw error;
 				});
 			cached = { promise, generation: createdGeneration };
@@ -299,7 +345,15 @@ export function createRetryingClient<Client>(
 		async call(operation) {
 			for (let attempt = 0; attempt < 2; attempt++) {
 				await prepareIdentity();
-				if (breaker.isOpen()) throw breaker.lastFailure();
+				if (breaker.isOpen()) {
+					const lastFailure = breaker.lastFailure();
+					options.onEvent?.({
+						type: "breaker-open-short-circuit",
+						error: lastFailure,
+						consecutiveFailures: breaker.state().consecutiveFailures,
+					});
+					throw lastFailure;
+				}
 				const resolved = resolveClient();
 				const client = await resolved.promise;
 				try {
@@ -308,6 +362,7 @@ export function createRetryingClient<Client>(
 					if (!isStale(error)) throw error;
 					invalidateGeneration(resolved.generation);
 					if (attempt === 1) throw error;
+					options.onEvent?.({ type: "stale-connection-retry", error, attempt });
 				}
 			}
 			// Unreachable with the current fixed 2-attempt bound -- attempt 1's
@@ -319,7 +374,16 @@ export function createRetryingClient<Client>(
 		async callOnce(operation, callOptions = {}) {
 			for (let attempt = 0; attempt < 2; attempt++) {
 				await prepareIdentity();
-				if (breaker.isOpen()) throw breaker.lastFailure();
+				if (breaker.isOpen()) {
+					const lastFailure = breaker.lastFailure();
+					options.onEvent?.({
+						type: "breaker-open-short-circuit",
+						error: lastFailure,
+						consecutiveFailures: breaker.state().consecutiveFailures,
+						operationId: callOptions.operationId,
+					});
+					throw lastFailure;
+				}
 				const resolved = resolveClient();
 				const client = await resolved.promise;
 				try {
@@ -328,10 +392,15 @@ export function createRetryingClient<Client>(
 					if (!isStale(error)) throw error;
 					invalidateGeneration(resolved.generation);
 					if (isPreDispatch(error)) {
-						if (attempt === 0) continue;
+						if (attempt === 0) {
+							options.onEvent?.({ type: "pre-dispatch-retry", error, attempt, operationId: callOptions.operationId });
+							continue;
+						}
+						options.onEvent?.({ type: "pre-dispatch-exhausted", error, attempt, operationId: callOptions.operationId });
 						throw new PreDispatchConnectionError(callOptions.operationId, error);
 					}
 					if (error instanceof Error && error.name === "AbortError") throw error;
+					options.onEvent?.({ type: "mutation-outcome-unknown", error, attempt, operationId: callOptions.operationId });
 					throw new MutationOutcomeUnknownError(callOptions.operationId, error);
 				}
 			}

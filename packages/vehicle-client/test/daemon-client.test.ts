@@ -435,6 +435,121 @@ describe("createRetryingClient", () => {
 			expect(connectCount).toBe(2); // the third call short-circuited, no new connect attempt
 		});
 	});
+
+	// Reproduces a real, observed RCA gap: a caller hitting "connector unavailable" mid a live
+	// daemon restart has no way to tell -- from the outside -- whether that came from a genuine
+	// fresh connect() failure, a breaker-open short-circuit (no connect attempted at all), or an
+	// in-flight operation failure that triggered a stale-connection retry. Every one of those
+	// collapses into the exact same scrubbed message at withConnectorDiagnostics' own boundary
+	// (pi-pipes' connector-diagnostics.ts), by design, to avoid leaking the raw fetch cause/URL/
+	// token to a tool caller -- but that leaves nothing to actually RCA the next occurrence with.
+	describe("onEvent diagnostics", () => {
+		it("reports connect-success and connect-failure for every real connect() attempt", async () => {
+			const events: unknown[] = [];
+			let connectCount = 0;
+			const client = createRetryingClient<FakeClient>(
+				async () => {
+					connectCount++;
+					if (connectCount === 1) throw new Error("connect ECONNREFUSED");
+					return new FakeClient(connectCount);
+				},
+				{ onEvent: (event) => events.push(event) },
+			);
+
+			await expect(client.call(async (c) => c.id)).rejects.toThrow("ECONNREFUSED");
+			expect(await client.call(async (c) => c.id)).toBe(2);
+
+			expect(events).toEqual([
+				{ type: "connect-failure", error: expect.objectContaining({ message: "connect ECONNREFUSED" }) },
+				{ type: "connect-success" },
+			]);
+		});
+
+		it("reports breaker-open-short-circuit -- distinguishing a breaker rejection from a real connect attempt -- with the failure count", async () => {
+			const events: unknown[] = [];
+			let connectCount = 0;
+			const client = createRetryingClient<FakeClient>(
+				async () => {
+					connectCount++;
+					throw new Error(`fail ${connectCount}`);
+				},
+				{ circuitBreaker: { failureThreshold: 2, cooldownMs: 10_000 }, onEvent: (event) => events.push(event) },
+			);
+
+			await expect(client.call(async (c) => c.id)).rejects.toThrow("fail 1");
+			await expect(client.call(async (c) => c.id)).rejects.toThrow("fail 2");
+			events.length = 0; // only care about the 3rd call's own event from here
+
+			await expect(client.call(async (c) => c.id)).rejects.toThrow("fail 2");
+			expect(connectCount).toBe(2); // confirms no 3rd connect attempt was made -- this really was a short-circuit
+			expect(events).toEqual([
+				{
+					type: "breaker-open-short-circuit",
+					error: expect.objectContaining({ message: "fail 2" }),
+					consecutiveFailures: 2,
+				},
+			]);
+		});
+
+		it("reports stale-connection-retry when call() drops the cached client and retries against a fresh one", async () => {
+			const events: unknown[] = [];
+			const client = createRetryingClient<FakeClient>(async () => new FakeClient(1), { onEvent: (event) => events.push(event) });
+
+			let operationCalls = 0;
+			await client.call(async () => {
+				operationCalls++;
+				if (operationCalls === 1) throw new TypeError("fetch failed");
+				return "ok";
+			});
+
+			expect(events).toContainEqual({ type: "stale-connection-retry", error: expect.any(TypeError), attempt: 0 });
+		});
+
+		it("reports pre-dispatch-retry then connect-success on callOnce()'s transparent ECONNREFUSED retry, never mutation-outcome-unknown", async () => {
+			const events: unknown[] = [];
+			const client = createRetryingClient<FakeClient>(async () => new FakeClient(1), { onEvent: (event) => events.push(event) });
+
+			let operationCalls = 0;
+			await client.callOnce(async () => {
+				operationCalls++;
+				if (operationCalls === 1) {
+					throw new TypeError("fetch failed", { cause: Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+				}
+				return "ok";
+			});
+
+			expect(events.some((e) => (e as { type: string }).type === "pre-dispatch-retry")).toBe(true);
+			expect(events.some((e) => (e as { type: string }).type === "mutation-outcome-unknown")).toBe(false);
+		});
+
+		it("reports mutation-outcome-unknown for callOnce()'s own ambiguous (ECONNREFUSED-less) transport failure", async () => {
+			const events: unknown[] = [];
+			const client = createRetryingClient<FakeClient>(async () => new FakeClient(1), { onEvent: (event) => events.push(event) });
+
+			await expect(
+				client.callOnce(async () => {
+					throw new TypeError("fetch failed");
+				}),
+			).rejects.toBeInstanceOf(MutationOutcomeUnknownError);
+
+			expect(events).toContainEqual({ type: "mutation-outcome-unknown", error: expect.any(TypeError), attempt: 0, operationId: undefined });
+		});
+
+		it("never fires for a genuine domain-level rejection -- nothing connection-shaped happened", async () => {
+			const events: unknown[] = [];
+			const client = createRetryingClient<FakeClient>(async () => new FakeClient(1), { onEvent: (event) => events.push(event) });
+
+			await expect(
+				client.call(async () => {
+					throw new Error("validation failed");
+				}),
+			).rejects.toThrow("validation failed");
+
+			// connect() itself succeeded (fired once), but nothing else -- no stale-retry/breaker/mutation
+			// event for a rejection the connection layer never considered connection-shaped.
+			expect(events).toEqual([{ type: "connect-success" }]);
+		});
+	});
 });
 
 const FAKE_HANDLE: DaemonHandleLike = { host: "127.0.0.1", port: 4242, pid: 1 };
