@@ -62,6 +62,8 @@ interface InvokeRequestBody {
 	idempotencyKey?: unknown;
 	expectedRevision?: unknown;
 	approvalCapability?: unknown;
+	callerSessionId?: unknown;
+	callerProjectRoot?: unknown;
 }
 
 function statusForCategory(category: VehicleFailureCategory): number {
@@ -174,6 +176,16 @@ async function handleInvoke(
 		idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
 		expectedRevision: body.expectedRevision as string | number | undefined,
 		approvalCapability: typeof body.approvalCapability === "string" ? body.approvalCapability : undefined,
+		// See VehicleInvocationOptions's own doc comment (vehicle-core) -- a generic
+		// ownership/attribution hook a handler can read (e.g. scoping a background
+		// subscription, or a session-scoped focus pointer, to the session/project that
+		// created it). Was silently dropped here until now -- vehicle-client-pi already
+		// computes and sends both correctly, but RemoteVehicleClient never put them on
+		// the wire and this provider never read them, so every remote (non-LocalVehicleClient)
+		// caller always saw both as undefined despite this file's own "every field is
+		// threaded through" doc comment above.
+		callerSessionId: typeof body.callerSessionId === "string" ? body.callerSessionId : undefined,
+		callerProjectRoot: typeof body.callerProjectRoot === "string" ? body.callerProjectRoot : undefined,
 	};
 
 	const wantsStream = (request.headers.get("accept") ?? "").includes("text/event-stream");

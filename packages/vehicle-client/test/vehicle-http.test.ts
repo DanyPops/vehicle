@@ -102,6 +102,27 @@ const Write = defineVehicleOperation({
 	limits: LIMITS,
 });
 
+const identityOutputSchema = objectSchema<{ callerSessionId: string | null; callerProjectRoot: string | null }>(
+	{ callerSessionId: { type: ["string", "null"] }, callerProjectRoot: { type: ["string", "null"] } },
+	(value) =>
+		typeof value === "object" && value !== null
+			? (value as { callerSessionId: string | null; callerProjectRoot: string | null })
+			: undefined,
+);
+
+/** Echoes back exactly what the handler's own VehicleOperationContext saw -- the one way to prove callerSessionId/callerProjectRoot actually survived a real HTTP round trip, not just an in-process LocalVehicleClient call. */
+const Identity = defineVehicleOperation({
+	name: "test.identity",
+	version: 1,
+	description: "Echoes context.callerSessionId/callerProjectRoot.",
+	input: inputSchema,
+	output: identityOutputSchema,
+	permissions: [],
+	effect: "read",
+	idempotency: { mode: "safe" },
+	limits: LIMITS,
+});
+
 let server: ReturnType<typeof Bun.serve> | undefined;
 
 afterEach(() => {
@@ -155,6 +176,13 @@ function startTestServer(options: { logger?: Logger } = {}): { baseUrl: string; 
 		"test-owner",
 		bindVehicleOperation(Write, () => async (context) => ({ echoed: context.input.value })),
 	);
+	registry.register(
+		"test-owner",
+		bindVehicleOperation(Identity, () => async (context) => ({
+			callerSessionId: context.callerSessionId ?? null,
+			callerProjectRoot: context.callerProjectRoot ?? null,
+		})),
+	);
 	const app = createVehicleHttpApp({ registry, token, logger: options.logger });
 	server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: app.fetch });
 	return { baseUrl: `http://127.0.0.1:${server.port}`, token, registry };
@@ -205,6 +233,27 @@ describe("Vehicle HTTP provider + RemoteVehicleClient: local/HTTP parity", () =>
 			expect((error as VehicleError).code).toBe("boom");
 			expect((error as VehicleError).message).toBe("always fails");
 		}
+	});
+
+	it("callerSessionId/callerProjectRoot survive a real HTTP round trip, not just an in-process LocalVehicleClient call (regression: RemoteVehicleClient never put them on the wire and the provider never read them)", async () => {
+		const { baseUrl, token } = startTestServer();
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		const result = await client.invoke<{ callerSessionId: string | null; callerProjectRoot: string | null }>(
+			"test.identity",
+			1,
+			{ value: "x" },
+			{ callerSessionId: "session-abc", callerProjectRoot: "/home/user/project" },
+		);
+		expect(result).toEqual({ callerSessionId: "session-abc", callerProjectRoot: "/home/user/project" });
+	});
+
+	it('callerSessionId/callerProjectRoot are undefined (not the literal string "undefined") when the caller never sets them', async () => {
+		const { baseUrl, token } = startTestServer();
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		const result = await client.invoke<{ callerSessionId: string | null; callerProjectRoot: string | null }>("test.identity", 1, {
+			value: "x",
+		});
+		expect(result).toEqual({ callerSessionId: null, callerProjectRoot: null });
 	});
 
 	it("invoking an unknown operation returns not-found", async () => {

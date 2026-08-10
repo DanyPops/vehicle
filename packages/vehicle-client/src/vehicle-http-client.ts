@@ -146,6 +146,12 @@ export class RemoteVehicleClient implements VehicleClient {
 			idempotencyKey: options.idempotencyKey,
 			expectedRevision: options.expectedRevision,
 			approvalCapability: options.approvalCapability,
+			// See VehicleInvocationOptions's own doc comment (vehicle-core): auto-derived by
+			// vehicle-client-pi on every call, but silently never reached the wire until now --
+			// this class's own doc comment above already claimed "every VehicleInvocationOptions
+			// field is sent in the request body", which was false for exactly these two.
+			callerSessionId: options.callerSessionId,
+			callerProjectRoot: options.callerProjectRoot,
 		};
 
 		const onAbort = options.signal ? (): void => void this.cancel(operationId) : undefined;
