@@ -30,6 +30,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
+import type { DaemonLifecycleLog } from "./daemon-lifecycle.ts";
 import type { Logger } from "./logging.ts";
 import {
 	acquireDaemonLock,
@@ -80,9 +81,12 @@ export interface MaintenanceTask {
 export interface RunningDaemon {
 	host: string;
 	port: number;
+	/** Minted once at startup (see daemon-lifecycle.ts) -- present regardless of whether lifecycleLog was supplied, since it's cheap and useful identity even without logging. */
+	instanceId: string;
 	/** The idle-shutdown budget actually in effect (0 means disabled) -- exposed so a caller/test can observe the provenance-derived default without waiting it out. */
 	idleBudgetMs: number;
-	stop(): Promise<void>;
+	/** reason (e.g. "SIGTERM") is recorded to lifecycleLog when supplied; omitted defaults to "explicit". Purely additive over the prior zero-arg signature -- every existing caller keeps working unchanged. */
+	stop(reason?: string): Promise<void>;
 	/** Resolves once stop() has fully run, however it was triggered (an explicit call, or the internal idle timer) -- the single signal runDaemonProcess needs to exit the process for either case. */
 	stopped: Promise<void>;
 }
@@ -156,6 +160,14 @@ export interface StartDaemonOptions {
 	 * real wall-clock time. See paths.ts's acquireDaemonLockAsService.
 	 */
 	lockReclaim?: ReclaimDeps;
+	/**
+	 * Opt-in structured lifecycle event log (see daemon-lifecycle.ts) -- when supplied, startDaemon
+	 * records "started"/"already_running"/"stopped" events against it. Omitted by default so every
+	 * existing caller is unaffected; a consumer wanting a `<daemon> diagnose` command supplies one
+	 * backed by openDaemonLifecycleLog(). Recording failures are logged and swallowed -- a lifecycle
+	 * log must never be why a daemon fails to start or stop.
+	 */
+	lifecycleLog?: DaemonLifecycleLog;
 }
 
 const NOOP_LOGGER: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -317,11 +329,28 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 	// Any other provenance (auto-spawn/unknown) keeps today's plain behavior unchanged: losing
 	// the race there is a normal join between equally-unprivileged callers, not something to
 	// escalate over.
+	const instanceId = randomUUID();
+	// Awaited (not fire-and-forget) at every call site -- a few ms of extra latency on
+	// start/stop is an acceptable, bounded cost for a deterministic, testable log; the
+	// try/catch is what actually keeps "never be why a daemon fails to start/stop" true,
+	// not fire-and-forget's silent race against whatever reads the log next.
+	const recordLifecycle = async (type: "started" | "already_running" | "stopped", reason?: string): Promise<void> => {
+		if (!options.lifecycleLog) return;
+		try {
+			await options.lifecycleLog.record({ instanceId, pid: process.pid, type, provenance, reason });
+		} catch (error) {
+			logger.error("daemon lifecycle log record failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	};
+
 	const lock =
 		provenance === "service"
 			? await acquireDaemonLockAsService(lockPath, reclaimDepsWithLogging(options, logger))
 			: acquireDaemonLock(lockPath, undefined, provenance);
-	if (!lock.acquired) throw new DaemonAlreadyRunningError(lock.holderPid);
+	if (!lock.acquired) {
+		await recordLifecycle("already_running", lock.holderPid === null ? undefined : `holder pid ${lock.holderPid}`);
+		throw new DaemonAlreadyRunningError(lock.holderPid);
+	}
 
 	if (options.pushChannel && !isBun) {
 		releaseDaemonLock(lockPath); // never held the port -- must not leave the lock as if it had
@@ -342,6 +371,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 		throw new Error(`${options.daemonLabel} daemon failed to bind a listener`);
 	}
 	writeDaemonHandle(options.handlePath, { host: LOOPBACK_HOST, port: listener.port, pid: process.pid }, options.handleMode);
+	await recordLifecycle("started");
 
 	const timers: ReturnType<typeof setInterval>[] = [];
 	for (const task of options.maintenanceTasks ?? []) {
@@ -373,7 +403,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 		idleTimer = setInterval(() => {
 			if (Date.now() - lastActive > budget) {
 				logger.info("idle budget exceeded, shutting down", { idleBudgetMs: budget });
-				void stop();
+				void stop("idle_budget_exceeded");
 			}
 		}, options.idleTickMs ?? DEFAULT_IDLE_TICK_MS);
 	}
@@ -383,9 +413,10 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 	const stoppedPromise = new Promise<void>((resolve) => {
 		resolveStopped = resolve;
 	});
-	const stop = async (): Promise<void> => {
+	const stop = async (reason = "explicit"): Promise<void> => {
 		if (alreadyStopping) return;
 		alreadyStopping = true;
+		await recordLifecycle("stopped", reason);
 		for (const timer of timers) clearInterval(timer);
 		if (idleTimer) clearInterval(idleTimer);
 		removeDaemonHandle(options.handlePath);
@@ -395,7 +426,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 		resolveStopped();
 	};
 
-	return { host: LOOPBACK_HOST, port: listener.port, idleBudgetMs: effectiveIdleBudgetMs, stop, stopped: stoppedPromise };
+	return { host: LOOPBACK_HOST, port: listener.port, instanceId, idleBudgetMs: effectiveIdleBudgetMs, stop, stopped: stoppedPromise };
 }
 
 export interface RunDaemonProcessOptions extends StartDaemonOptions {
@@ -434,11 +465,11 @@ async function runDaemonProcessAsync(options: RunDaemonProcessOptions, logger: L
 	// process manager) only recovers a daemon that genuinely exits.
 	void daemon.stopped.then(() => process.exit(0));
 	let shuttingDown = false;
-	const shutdown = (): void => {
+	const shutdown = (signal: string): void => {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		void daemon.stop();
+		void daemon.stop(signal);
 	};
-	process.on("SIGINT", shutdown);
-	process.on("SIGTERM", shutdown);
+	process.on("SIGINT", () => shutdown("SIGINT"));
+	process.on("SIGTERM", () => shutdown("SIGTERM"));
 }

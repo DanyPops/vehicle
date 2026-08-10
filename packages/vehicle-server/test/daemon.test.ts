@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createNodeAtomicJsonFsAdapter } from "../src/atomic-json-node.ts";
 import {
 	DaemonAlreadyRunningError,
 	DEFAULT_AUTO_SPAWN_IDLE_BUDGET_MS,
@@ -12,6 +13,7 @@ import {
 	runDaemonProcess,
 	startDaemon,
 } from "../src/daemon.ts";
+import { openDaemonLifecycleLog } from "../src/daemon-lifecycle.ts";
 import { createLogger, type Logger } from "../src/logging.ts";
 import { readDaemonHandle } from "../src/paths.ts";
 import { getCurrentRpcCallId } from "../src/rpc-correlation.ts";
@@ -428,6 +430,78 @@ describe("runDaemonProcess idle-shutdown", () => {
 		} finally {
 			process.exit = originalExit;
 		}
+	});
+});
+
+describe("startDaemon: opt-in lifecycle event log", () => {
+	it("is a no-op when lifecycleLog is omitted -- every existing caller is unaffected", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath: join(dir, "handle.json"), buildApp: trivialApp });
+		expect(daemon.instanceId).toEqual(expect.any(String));
+		expect(daemon.instanceId.length).toBeGreaterThan(0);
+	});
+
+	it("records started then stopped(reason) against a real file, and the next start sees the prior instance's history", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		const lifecyclePath = join(dir, "lifecycle.json");
+		const lifecycleLog = openDaemonLifecycleLog({ path: lifecyclePath, fs: createNodeAtomicJsonFsAdapter() });
+
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, buildApp: trivialApp, lifecycleLog });
+		const firstInstanceId = daemon.instanceId;
+		await daemon.stop("SIGTERM");
+		daemon = undefined;
+
+		const afterFirstRun = await lifecycleLog.recent();
+		expect(afterFirstRun.map((event) => event.type)).toEqual(["started", "stopped"]);
+		expect(afterFirstRun.every((event) => event.instanceId === firstInstanceId)).toBe(true);
+		expect(afterFirstRun[1]?.reason).toBe("SIGTERM");
+
+		// A fresh startDaemon (new process, same lifecycleLog file) mints a new instanceId but sees
+		// its predecessor's history -- the whole point of persisting this beyond one process's memory.
+		const secondLifecycleLog = openDaemonLifecycleLog({ path: lifecyclePath, fs: createNodeAtomicJsonFsAdapter() });
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, buildApp: trivialApp, lifecycleLog: secondLifecycleLog });
+		expect(daemon.instanceId).not.toBe(firstInstanceId);
+		const afterSecondStart = await secondLifecycleLog.recent();
+		expect(afterSecondStart.map((event) => event.type)).toEqual(["started", "stopped", "started"]);
+	});
+
+	it("records already_running with the holder's pid when a second startDaemon loses the race", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		const lifecyclePath = join(dir, "lifecycle.json");
+		const lifecycleLog = openDaemonLifecycleLog({ path: lifecyclePath, fs: createNodeAtomicJsonFsAdapter() });
+
+		daemon = await startDaemon({ daemonLabel: "Acme", handlePath, buildApp: trivialApp, lifecycleLog });
+		await expect(startDaemon({ daemonLabel: "Acme", handlePath, buildApp: trivialApp, lifecycleLog })).rejects.toThrow(
+			DaemonAlreadyRunningError,
+		);
+
+		const history = await lifecycleLog.recent();
+		expect(history.map((event) => event.type)).toEqual(["started", "already_running"]);
+		expect(history[1]?.reason).toContain(`${process.pid}`);
+	});
+
+	it("a lifecycle log write failure never prevents startup or shutdown", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const logger = createLogger("test");
+		const errorSpy = spyOn(logger, "error");
+		const poisonedLog = {
+			record: () => Promise.reject(new Error("disk full")),
+			recent: () => Promise.resolve([]),
+		};
+		daemon = await startDaemon({
+			daemonLabel: "Acme",
+			handlePath: join(dir, "handle.json"),
+			buildApp: trivialApp,
+			lifecycleLog: poisonedLog,
+			logger,
+		});
+		expect(daemon.port).toBeGreaterThan(0);
+		await daemon.stop();
+		// Give the swallowed rejection's .catch a tick to run and log before asserting on it.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(errorSpy).toHaveBeenCalled();
 	});
 });
 
