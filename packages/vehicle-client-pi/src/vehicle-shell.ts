@@ -1,4 +1,4 @@
-import type { JsonSchema, VehicleManifest, VehicleOperationDescriptor } from "@danypops/vehicle-core";
+import type { JsonSchema, VehicleManifest, VehicleManifestOperation, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { syncManagedActiveTools } from "./pi-tool-availability.js";
@@ -236,6 +236,18 @@ export interface VehicleShellBrokerOptions {
 	readonly ownVehicleName: string;
 	/** Injectable for tests; defaults to a real discoverForeignVehicles(ownVehicleName) call. */
 	readonly discover?: () => Promise<readonly DiscoveredVehicle[]>;
+	/**
+	 * Builds and registers (via pi.registerTool) a real, fully policy-wrapped Pi tool bound to one
+	 * foreign vehicle's operation, returning the Pi tool name it registered under. Owned by the
+	 * consumer (registerVehicleTools in vehicle-pi.ts auto-supplies this) because activating a
+	 * foreign operation must carry every cross-cutting guarantee a native operation gets
+	 * (permissions, safety, presentations, activity broadcasting, idempotency) -- this file
+	 * deliberately has no knowledge of any of that policy layer. Called at most once per foreign
+	 * operation for this handle's lifetime; a repeat tools_man call on an already-activated foreign
+	 * operation only re-seeds its TTL. Omitted keeps tools_man's pre-routing behavior: a foreign
+	 * operation is reported as known but not yet locally activatable.
+	 */
+	readonly activateForeignOperation?: (vehicle: DiscoveredVehicle, descriptor: VehicleManifestOperation) => string;
 }
 
 export interface VehicleShellHandle {
@@ -300,16 +312,26 @@ function namespacedDescriptor(vehicleName: string, descriptor: VehicleOperationD
 	return { ...descriptor, name: `${vehicleName}:${descriptor.name}` };
 }
 
-async function discoverBrokerOperations(broker: VehicleShellBrokerOptions | undefined): Promise<readonly VehicleOperationDescriptor[]> {
+async function discoverBrokerVehicles(broker: VehicleShellBrokerOptions | undefined): Promise<readonly DiscoveredVehicle[]> {
 	if (!broker) return [];
 	try {
 		const discover = broker.discover ?? (() => discoverForeignVehicles(broker.ownVehicleName));
-		const foreign = await discover();
-		return foreign.flatMap((vehicle) => vehicle.manifest.operations.map((op) => namespacedDescriptor(vehicle.name, op)));
+		return await discover();
 	} catch {
 		// Broker discovery must never break this Vehicle's own base tools_list/tools_man behavior.
 		return [];
 	}
+}
+
+function foreignOperationsOf(vehicles: readonly DiscoveredVehicle[]): readonly VehicleOperationDescriptor[] {
+	return vehicles.flatMap((vehicle) => vehicle.manifest.operations.map((op) => namespacedDescriptor(vehicle.name, op)));
+}
+
+/** Splits a namespaced "<vehicle>:<operation>" name; undefined when name carries no vehicle prefix at all. */
+function splitNamespacedName(name: string): { vehicleName: string; operationName: string } | undefined {
+	const separator = name.indexOf(":");
+	if (separator <= 0 || separator === name.length - 1) return undefined;
+	return { vehicleName: name.slice(0, separator), operationName: name.slice(separator + 1) };
 }
 
 function createToolsListTool(listToolName: string, manifest: VehicleManifest, broker?: VehicleShellBrokerOptions): ToolDefinition {
@@ -324,7 +346,7 @@ function createToolsListTool(listToolName: string, manifest: VehicleManifest, br
 		}),
 		async execute(_toolCallId, params) {
 			const query = (params as { query?: string }).query ?? "";
-			const operations = [...manifest.operations, ...(await discoverBrokerOperations(broker))];
+			const operations = [...manifest.operations, ...foreignOperationsOf(await discoverBrokerVehicles(broker))];
 			const matches = operations
 				.flatMap((descriptor, index) => {
 					const score = shellQueryScore(descriptor, query);
@@ -364,7 +386,7 @@ function createToolsManTool(
 			const byOperationName = new Map(handle.managedTools.map((tool) => [tool.operationName, tool]));
 			// Only resolved once, lazily, and only if at least one requested name isn't local -- a
 			// broker discovery round-trip is real network/fs work, never paid for a purely-local request.
-			let foreignOperations: readonly VehicleOperationDescriptor[] | undefined;
+			let foreignVehicles: readonly DiscoveredVehicle[] | undefined;
 			const pages = await Promise.all(
 				names.map(async (name) => {
 					const descriptor = manifest.operations.find((op) => op.name === name);
@@ -375,13 +397,30 @@ function createToolsManTool(
 						handle.tracker.seed(managed.toolName, discoveredTtlTurns);
 						return `${formatOperationManPage(descriptor, managed.toolName)}\n\n(now callable as ${managed.toolName})`;
 					}
-					foreignOperations ??= await discoverBrokerOperations(broker);
-					const foreignDescriptor = foreignOperations.find((op) => op.name === name);
-					if (foreignDescriptor) {
-						const vehicleName = name.slice(0, name.indexOf(":"));
-						return `${name}: known -- provided by Vehicle "${vehicleName}", discovered live via broker mode. Foreign-vehicle activation isn't wired yet; not yet callable here.`;
+					const split = splitNamespacedName(name);
+					if (!split) return `${name}: no such operation. Use ${DEFAULT_LIST_TOOL_NAME} to browse available names.`;
+					foreignVehicles ??= await discoverBrokerVehicles(broker);
+					const vehicle = foreignVehicles.find((entry) => entry.name === split.vehicleName);
+					const foreignDescriptor = vehicle?.manifest.operations.find((op) => op.name === split.operationName);
+					if (!vehicle || !foreignDescriptor) return `${name}: no such operation. Use ${DEFAULT_LIST_TOOL_NAME} to browse available names.`;
+
+					const alreadyActivated = byOperationName.get(name);
+					if (alreadyActivated) {
+						handle.tracker.seed(alreadyActivated.toolName, discoveredTtlTurns);
+						return `${formatOperationManPage(namespacedDescriptor(split.vehicleName, foreignDescriptor), alreadyActivated.toolName)}\n\n(now callable as ${alreadyActivated.toolName})`;
 					}
-					return `${name}: no such operation. Use ${DEFAULT_LIST_TOOL_NAME} to browse available names.`;
+					if (!broker?.activateForeignOperation) {
+						return `${name}: known -- provided by Vehicle "${split.vehicleName}", discovered live via broker mode. Foreign-vehicle activation isn't wired yet; not yet callable here.`;
+					}
+					let toolName: string;
+					try {
+						toolName = broker.activateForeignOperation(vehicle, foreignDescriptor);
+					} catch (error) {
+						return `${name}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
+					}
+					handle.managedTools = [...handle.managedTools, { toolName, operationName: name, available: true, blocked: false }];
+					handle.tracker.seed(toolName, discoveredTtlTurns);
+					return `${formatOperationManPage(namespacedDescriptor(split.vehicleName, foreignDescriptor), toolName)}\n\n(now callable as ${toolName})`;
 				}),
 			);
 			applyShellActivation(pi, handle);

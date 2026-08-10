@@ -1,10 +1,23 @@
 import { describe, expect, it } from "bun:test";
-import type { VehicleManifest } from "@danypops/vehicle-core";
+import type { VehicleClient, VehicleInvocationOptions, VehicleManifest } from "@danypops/vehicle-core";
 import type { SharedVehicleHandleEntry } from "@danypops/vehicle-server/paths";
 import { discoverForeignVehicles } from "../src/vehicle-shell-broker.ts";
 
 function manifest(name: string): VehicleManifest {
 	return { name, version: "1.0.0", description: "", operations: [] };
+}
+
+class FakeClient implements VehicleClient {
+	constructor(private readonly value: VehicleManifest) {}
+	manifest(): Promise<VehicleManifest> {
+		return Promise.resolve(this.value);
+	}
+	async invoke<Output = unknown>(_name: string, _version: number, _input: unknown, _options?: VehicleInvocationOptions): Promise<Output> {
+		return { ok: true } as Output;
+	}
+	close(): Promise<void> {
+		return Promise.resolve();
+	}
 }
 
 function handle(overrides: Partial<SharedVehicleHandleEntry> = {}): SharedVehicleHandleEntry {
@@ -23,13 +36,16 @@ describe("discoverForeignVehicles", () => {
 			readHandle: () => handle(),
 			isPidAlive: () => true,
 			readToken: async () => "secret-token",
-			fetchManifest: async (baseUrl, token) => {
+			createClient: (baseUrl, token) => {
 				expect(baseUrl).toBe("http://127.0.0.1:4321");
 				expect(token).toBe("secret-token");
-				return manifest("packed");
+				return new FakeClient(manifest("packed"));
 			},
 		});
-		expect(result).toEqual([{ name: "packed", manifest: manifest("packed") }]);
+		expect(result.map((entry) => ({ name: entry.name, manifest: entry.manifest }))).toEqual([
+			{ name: "packed", manifest: manifest("packed") },
+		]);
+		expect(result[0]?.client).toBeInstanceOf(FakeClient);
 	});
 
 	it("excludes its own vehicle's entry -- never discovers or fetches itself", async () => {
@@ -39,9 +55,9 @@ describe("discoverForeignVehicles", () => {
 			readHandle: () => handle(),
 			isPidAlive: () => true,
 			readToken: async () => "secret-token",
-			fetchManifest: async () => {
+			createClient: () => {
 				fetched = true;
-				return manifest("packed");
+				return new FakeClient(manifest("packed"));
 			},
 		});
 		expect(result.map((entry) => entry.name)).toEqual(["packed"]);
@@ -53,7 +69,7 @@ describe("discoverForeignVehicles", () => {
 			listHandleFiles: async () => ["packed.json"],
 			readHandle: () => handle(),
 			isPidAlive: () => false,
-			fetchManifest: async () => manifest("packed"),
+			createClient: () => new FakeClient(manifest("packed")),
 		});
 		expect(result).toEqual([]);
 	});
@@ -63,7 +79,7 @@ describe("discoverForeignVehicles", () => {
 			listHandleFiles: async () => ["packed.json"],
 			readHandle: () => handle({ tokenPath: undefined }),
 			isPidAlive: () => true,
-			fetchManifest: async () => manifest("packed"),
+			createClient: () => new FakeClient(manifest("packed")),
 		});
 		expect(result).toEqual([]);
 	});
@@ -74,7 +90,7 @@ describe("discoverForeignVehicles", () => {
 			readHandle: () => handle(),
 			isPidAlive: () => true,
 			readToken: async () => undefined,
-			fetchManifest: async () => manifest("packed"),
+			createClient: () => new FakeClient(manifest("packed")),
 		});
 		expect(result).toEqual([]);
 	});
@@ -93,18 +109,27 @@ describe("discoverForeignVehicles", () => {
 			readHandle: (path) => handle({ port: path.includes("packed") ? 4321 : 5555 }),
 			isPidAlive: () => true,
 			readToken: async () => "secret-token",
-			fetchManifest: async (baseUrl) => {
-				if (baseUrl.includes("4321")) throw new Error("connection refused");
-				return manifest("pipes");
+			createClient: (baseUrl) => {
+				if (baseUrl.includes("4321")) {
+					class ThrowingClient extends FakeClient {
+						override manifest(): Promise<VehicleManifest> {
+							return Promise.reject(new Error("connection refused"));
+						}
+					}
+					return new ThrowingClient(manifest("packed"));
+				}
+				return new FakeClient(manifest("pipes"));
 			},
 		});
-		expect(result).toEqual([{ name: "pipes", manifest: manifest("pipes") }]);
+		expect(result.map((entry) => ({ name: entry.name, manifest: entry.manifest }))).toEqual([
+			{ name: "pipes", manifest: manifest("pipes") },
+		]);
 	});
 
 	it("ignores a non-.json entry in the shared directory", async () => {
 		const result = await discoverForeignVehicles("papyrus", {
 			listHandleFiles: async () => ["stray.lock"],
-			fetchManifest: async () => manifest("packed"),
+			createClient: () => new FakeClient(manifest("packed")),
 		});
 		expect(result).toEqual([]);
 	});
@@ -117,8 +142,21 @@ describe("discoverForeignVehicles", () => {
 			readHandle: () => handle(),
 			isPidAlive: () => true,
 			readToken: async () => "secret-token",
-			fetchManifest: async () => manifest("packed"),
+			createClient: () => new FakeClient(manifest("packed")),
 		});
 		expect(result.length).toBe(1);
+	});
+
+	it("a discovered vehicle's own client is a real, usable VehicleClient -- reused directly for routing, never rebuilt from raw parts", async () => {
+		const client = new FakeClient(manifest("packed"));
+		const result = await discoverForeignVehicles("papyrus", {
+			listHandleFiles: async () => ["packed.json"],
+			readHandle: () => handle(),
+			isPidAlive: () => true,
+			readToken: async () => "secret-token",
+			createClient: () => client,
+		});
+		expect(result[0]?.client).toBe(client);
+		await expect(result[0]?.client.invoke("package.install", 1, {})).resolves.toEqual({ ok: true });
 	});
 });

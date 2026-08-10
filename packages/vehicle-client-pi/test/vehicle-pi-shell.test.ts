@@ -3,6 +3,7 @@ import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { refreshVehicleToolAvailability, registerVehicleTools } from "../src/vehicle-pi.ts";
+import { registerVehicleShell } from "../src/vehicle-shell.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
 
@@ -27,6 +28,11 @@ function operation(name: string, overrides: Partial<VehicleManifestOperation> = 
 
 function manifest(operations: readonly VehicleManifestOperation[]): VehicleManifest {
 	return { name: "test-vehicle", version: "1.0.0", description: "Test Vehicle.", operations };
+}
+
+function discoveredVehicle(name: string, operations: readonly VehicleManifestOperation[]) {
+	const vehicleManifest = { name, version: "1.0.0", description: `${name} Vehicle.`, operations };
+	return { name, manifest: vehicleManifest, client: new FakeClient(vehicleManifest) };
 }
 
 class FakeClient implements VehicleClient {
@@ -280,7 +286,7 @@ describe("registerVehicleTools with shell broker mode", () => {
 			shell: {
 				broker: {
 					ownVehicleName: "papyrus",
-					discover: async () => [{ name: "packed", manifest: manifest([operation("package.install")]) }],
+					discover: async () => [discoveredVehicle("packed", [operation("package.install")])],
 				},
 			},
 		});
@@ -296,7 +302,7 @@ describe("registerVehicleTools with shell broker mode", () => {
 			shell: {
 				broker: {
 					ownVehicleName: "papyrus",
-					discover: async () => [{ name: "packed", manifest: manifest([operation("package.install")]) }],
+					discover: async () => [discoveredVehicle("packed", [operation("package.install")])],
 				},
 			},
 		});
@@ -333,14 +339,16 @@ describe("registerVehicleTools with shell broker mode", () => {
 		expect(harness.activeTools).toContain("tasks_create");
 	});
 
-	it("tools_man for a broker-discovered foreign operation reports it as known but not yet locally activatable", async () => {
+	// registerVehicleTools always auto-supplies activateForeignOperation now (see the real-routing
+	// tests below) -- this fallback message is only reachable by a consumer calling
+	// registerVehicleShell directly without one, e.g. a future consumer that wants broker-mode
+	// discovery/listing without dynamic foreign-tool activation.
+	it("tools_man for a broker-discovered foreign operation reports it as known but not yet locally activatable when no activateForeignOperation hook is given", async () => {
 		const { pi, tools, harness } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: {
-				broker: {
-					ownVehicleName: "papyrus",
-					discover: async () => [{ name: "packed", manifest: manifest([operation("package.install")]) }],
-				},
+		registerVehicleShell(pi, manifest([operation("tasks.create")]), [], {
+			broker: {
+				ownVehicleName: "papyrus",
+				discover: async () => [discoveredVehicle("packed", [operation("package.install")])],
 			},
 		});
 
@@ -358,5 +366,106 @@ describe("registerVehicleTools with shell broker mode", () => {
 
 		const result = (await callTool(tools, "tools_man", { names: ["nonexistent.operation"] })) as { content: Array<{ text: string }> };
 		expect(result.content[0]?.text).toBe("nonexistent.operation: no such operation. Use tools_list to browse available names.");
+	});
+
+	it("tools_man for a broker-discovered operation dynamically routes to and registers a real, callable Pi tool via activateForeignOperation", async () => {
+		const { pi, tools, harness } = fakePi();
+		const vehicle = discoveredVehicle("packed", [operation("package.install")]);
+		const activated: Array<{ vehicleName: string; operationName: string }> = [];
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: {
+				broker: {
+					ownVehicleName: "papyrus",
+					discover: async () => [vehicle],
+					activateForeignOperation: (v, descriptor) => {
+						activated.push({ vehicleName: v.name, operationName: descriptor.name });
+						const toolName = `${v.name}_${descriptor.name.replace(/\./g, "_")}`;
+						pi.registerTool({
+							name: toolName,
+							label: descriptor.name,
+							description: descriptor.description,
+							parameters: descriptor.inputSchema as never,
+							async execute() {
+								return { content: [{ type: "text", text: "ok" }], details: {} };
+							},
+						});
+						return toolName;
+					},
+				},
+			},
+		});
+
+		const result = (await callTool(tools, "tools_man", { names: ["packed:package.install"] })) as { content: Array<{ text: string }> };
+		expect(activated).toEqual([{ vehicleName: "packed", operationName: "package.install" }]);
+		expect(result.content[0]?.text).toContain("now callable as packed_package_install");
+		expect(harness.activeTools).toContain("packed_package_install");
+
+		// A second tools_man call on the same foreign operation must not re-activate it.
+		await callTool(tools, "tools_man", { names: ["packed:package.install"] });
+		expect(activated.length).toBe(1);
+	});
+
+	it("by default (no explicit activateForeignOperation), registerVehicleTools wires real routing: the activated foreign tool actually invokes the foreign vehicle's own client, and decays via the same TTL cycle as any local tool", async () => {
+		const { pi, tools, harness } = fakePi();
+		const foreignManifest = manifest([
+			operation("package.install", { inputSchema: { type: "object", properties: { name: { type: "string" } } } }),
+		]);
+		const invocations: Array<{ name: string; version: number; input: unknown }> = [];
+		class RecordingClient extends FakeClient {
+			override async invoke<Output = unknown>(name: string, version: number, input: unknown): Promise<Output> {
+				invocations.push({ name, version, input });
+				return { installed: true } as Output;
+			}
+		}
+		const vehicle = { name: "packed", manifest: foreignManifest, client: new RecordingClient(foreignManifest) };
+
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: { broker: { ownVehicleName: "papyrus", discover: async () => [vehicle] } },
+		});
+
+		await callTool(tools, "tools_man", { names: ["packed:package.install"] });
+		expect(harness.activeTools).toContain("packed_package_install");
+
+		const installTool = tools.find((tool) => tool.name === "packed_package_install");
+		if (!installTool) throw new Error("packed_package_install not registered");
+		const result = (await installTool.execute(
+			"call-1",
+			{ name: "curl" } as never,
+			undefined as never,
+			undefined as never,
+			{
+				sessionManager: { getSessionId: () => "session-1" },
+				hasUI: false,
+			} as never,
+		)) as { content: Array<{ text: string }> };
+		expect(invocations).toEqual([{ name: "package.install", version: 1, input: { name: "curl" } }]);
+		expect(result.content[0]?.text).toContain("installed");
+
+		// Same decay cycle as any locally-registered discovered operation (default discoveredTtlTurns=8).
+		for (let turn = 0; turn < 8; turn++) {
+			await harness.emit("turn_end", { turnIndex: turn, message: {}, toolResults: [] });
+		}
+		expect(harness.activeTools).not.toContain("packed_package_install");
+	});
+
+	it("activateForeignOperation throwing (e.g. a Pi tool-name collision) reports a friendly failure without crashing tools_man", async () => {
+		const { pi, tools } = fakePi();
+		const vehicle = discoveredVehicle("packed", [operation("package.install")]);
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: {
+				broker: {
+					ownVehicleName: "papyrus",
+					discover: async () => [vehicle],
+					activateForeignOperation: () => {
+						throw new Error("Pi tool 'packed_package_install' is already registered");
+					},
+				},
+			},
+		});
+
+		const result = (await callTool(tools, "tools_man", { names: ["packed:package.install"] })) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toBe(
+			"packed:package.install: could not activate -- Pi tool 'packed_package_install' is already registered.",
+		);
 	});
 });

@@ -13,12 +13,16 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RemoteVehicleClient } from "@danypops/vehicle-client/http";
-import type { VehicleManifest } from "@danypops/vehicle-core";
+import type { VehicleClient, VehicleManifest } from "@danypops/vehicle-core";
 import { readDaemonHandle, resolveSharedVehicleHandleDirectory, type SharedVehicleHandleEntry } from "@danypops/vehicle-server/paths";
 
 export interface DiscoveredVehicle {
 	readonly name: string;
 	readonly manifest: VehicleManifest;
+	/** A real, ready-to-invoke client for this vehicle -- freshly built each discovery pass (host:port/token
+	 * can change across daemon restarts), reused directly for foreign-operation routing rather than every
+	 * caller rebuilding its own from raw host/port/token. */
+	readonly client: VehicleClient;
 }
 
 export interface VehicleBrokerDependencies {
@@ -32,8 +36,8 @@ export interface VehicleBrokerDependencies {
 	isPidAlive?: (pid: number) => boolean;
 	/** Reads a token file's trimmed content. Defaults to a real fs read; undefined on any failure (missing, unreadable, a different OS user without permission -- never throws). */
 	readToken?: (tokenPath: string) => Promise<string | undefined>;
-	/** Fetches a manifest from a live vehicle. Defaults to a real RemoteVehicleClient call. */
-	fetchManifest?: (baseUrl: string, token: string) => Promise<VehicleManifest>;
+	/** Builds a client for a live foreign vehicle. Defaults to a real RemoteVehicleClient. */
+	createClient?: (baseUrl: string, token: string) => VehicleClient;
 }
 
 function defaultIsPidAlive(pid: number): boolean {
@@ -62,8 +66,8 @@ async function defaultReadToken(tokenPath: string): Promise<string | undefined> 
 	}
 }
 
-async function defaultFetchManifest(baseUrl: string, token: string): Promise<VehicleManifest> {
-	return new RemoteVehicleClient({ baseUrl, token }).manifest();
+function defaultCreateClient(baseUrl: string, token: string): VehicleClient {
+	return new RemoteVehicleClient({ baseUrl, token });
 }
 
 /**
@@ -81,7 +85,7 @@ export async function discoverForeignVehicles(
 	const readHandle = deps.readHandle ?? readDaemonHandle;
 	const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
 	const readToken = deps.readToken ?? defaultReadToken;
-	const fetchManifest = deps.fetchManifest ?? defaultFetchManifest;
+	const createClient = deps.createClient ?? defaultCreateClient;
 
 	const filenames = await listHandleFiles(directory);
 	const discovered = await Promise.all(
@@ -95,8 +99,9 @@ export async function discoverForeignVehicles(
 				if (!handle.tokenPath) return undefined;
 				const token = await readToken(handle.tokenPath);
 				if (!token) return undefined;
-				const manifest = await fetchManifest(`http://${handle.host}:${handle.port}`, token);
-				return { name, manifest };
+				const client = createClient(`http://${handle.host}:${handle.port}`, token);
+				const manifest = await client.manifest();
+				return { name, manifest, client };
 			} catch {
 				return undefined;
 			}

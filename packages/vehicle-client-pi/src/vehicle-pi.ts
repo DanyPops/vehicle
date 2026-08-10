@@ -49,6 +49,7 @@ import {
 	type VehicleShellHandle,
 	type VehicleShellOptions,
 } from "./vehicle-shell.js";
+import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
 
 export interface PiVehicleIdentity {
 	readonly name: string;
@@ -967,6 +968,35 @@ function createTool(
 }
 
 /**
+ * The Vehicle Shell broker mode's own default activateForeignOperation implementation: the exact
+ * same createTool() every native operation gets, just pointed at a foreign vehicle's own client
+ * and manifest -- so a dynamically-activated foreign operation carries every cross-cutting
+ * guarantee (permissions, safety, presentations, activity broadcasting, keyed idempotency,
+ * structured failures) a locally-registered operation gets, never a second-class code path.
+ *
+ * Tool name is namespaced by vehicle name up front (e.g. "packed_package_install") specifically
+ * so two different foreign vehicles can never collide with each other on a shared operation name;
+ * within one vehicle's own operations, defaultToolName's own uniqueness already holds. Still
+ * guards against every other kind of collision (a foreign vehicle whose own name collides with an
+ * already-registered local tool, or the rare case of two distinct operations sanitizing to the
+ * same name) via the same assertNamesAvailable check static registration already uses, surfacing
+ * a clear error tools_man turns into a friendly non-crashing message rather than silently
+ * overwriting an existing tool.
+ */
+function activateForeignVehicleOperation(
+	pi: ExtensionAPI,
+	vehicle: DiscoveredVehicle,
+	descriptor: VehicleManifestOperation,
+	options: RegisterVehicleToolsOptions,
+): string {
+	const toolName = `${defaultToolName({ ...descriptor, name: vehicle.name }, false)}_${defaultToolName(descriptor, false)}`;
+	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
+	assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
+	pi.registerTool(createTool(vehicle.client, vehicle.manifest, descriptor, toolName, options));
+	return toolName;
+}
+
+/**
  * A live client.manifest() call is the source of truth whenever it succeeds --
  * on success, best-effort persists it to options.manifestCache for next time
  * (a failed cache write never fails registration). On failure, falls back to
@@ -1115,7 +1145,7 @@ export async function registerVehicleTools(
 		effect: descriptor.effect,
 		safetyState: resolveSafetyState(manifest.name, descriptor, options),
 	}));
-	const shell = registerVehicleShell(pi, manifest, shellManagedTools(tools), options.shell);
+	const shell = registerVehicleShell(pi, manifest, shellManagedTools(tools), withBrokerRouting(pi, options));
 	// Registered tools whose operation is currently unavailable (e.g. a
 	// missing credential) or currently resolved to "blocked" (missing
 	// permissions, or an explicit /safety override) are hidden from the LLM
@@ -1151,6 +1181,21 @@ function shellManagedTools(tools: readonly RegisteredPiVehicleTool[]) {
 		available: tool.available,
 		blocked: tool.safetyState === "blocked",
 	}));
+}
+
+/** Auto-supplies broker mode's real routing hook (activateForeignVehicleOperation) whenever a
+ * consumer opts into options.shell.broker without already supplying its own -- the only reason
+ * this file passes anything other than options.shell straight through to registerVehicleShell.
+ * Returns options.shell completely unmodified in every other case, including no shell at all. */
+function withBrokerRouting(pi: ExtensionAPI, options: RegisterVehicleToolsOptions): VehicleShellOptions | undefined {
+	if (!options.shell?.broker || options.shell.broker.activateForeignOperation) return options.shell;
+	return {
+		...options.shell,
+		broker: {
+			...options.shell.broker,
+			activateForeignOperation: (vehicle, descriptor) => activateForeignVehicleOperation(pi, vehicle, descriptor, options),
+		},
+	};
 }
 
 /**
