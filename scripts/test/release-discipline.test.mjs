@@ -56,6 +56,46 @@ describe("release discipline", () => {
 		expect(candidates).toEqual({ removedDeclarations: [], removedProperties: [], addedRequiredProperties: ["handlePath"] });
 	});
 
+	it("resets brace-depth tracking at each hunk boundary -- an interface opened but not closed within its own hunk (the normal --unified=0 shape) must never bleed into a later, unrelated hunk's own multi-line parameter list", () => {
+		// Mirrors a real `git diff --unified=0` shape: the interface's own closing `}` is
+		// unchanged context and so never appears in a zero-context diff at all -- only the
+		// added property line does. Confirmed live releasing vehicle-server 0.20.0: exactly
+		// this shape (a new optional field in one interface, then an unrelated private
+		// method's params refactored much later in the file) flagged the method's own
+		// now-consolidated parameter names as "removed required properties".
+		const candidates = findBreakingTypeCandidates(`
+diff --git a/src/registry.ts b/src/registry.ts
+index abc..def 100644
+--- a/src/registry.ts
++++ b/src/registry.ts
+@@ -10,0 +11,2 @@ export interface Options {
++	readonly enabled?: boolean;
+@@ -50,10 +55 @@ class Registry {
+-		key: string,
+-		name: string,
+-		version: number,
+-		effect: string,
++		descriptor: Descriptor,
+`);
+		expect(candidates).toEqual({ removedDeclarations: [], removedProperties: [], addedRequiredProperties: [] });
+	});
+
+	it("still resets across a hunk boundary even when the interface's own opening line is itself part of the diff", () => {
+		const candidates = findBreakingTypeCandidates(`
+@@ -1,0 +2 @@
++export interface Widened {
+@@ -20,3 +25 @@ function unrelated(
+-	a: string,
+-	b: string,
+-	c: string,
++	combined: Combined,
+`);
+		// Widened's own body is never shown (its properties, if any, are on lines this hunk
+		// never touches) -- the point is that its dangling, never-closed "{" must not keep
+		// exportedAtDepth active into the unrelated function's own parameter-list hunk below.
+		expect(candidates).toEqual({ removedDeclarations: [], removedProperties: [], addedRequiredProperties: [] });
+	});
+
 	it("requires an explicit pre-1.0 breaking note", () => {
 		const candidates = { removedDeclarations: [], removedProperties: ["descriptorPath"], addedRequiredProperties: ["handlePath"] };
 		expect(() =>

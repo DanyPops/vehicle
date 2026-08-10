@@ -24,13 +24,29 @@ function declarationNames(lines, prefix) {
 
 const EXPORT_BLOCK_OPEN_PATTERN = /^export\s+(?:interface\s+\w+|type\s+\w+\s*=)\b/;
 
+/** Hunk header ("@@ -a,b +c,d @@ ...") or file header ("diff --git a/x b/y") -- the two places
+ * a `--unified=0` diff jumps to an unrelated location with no context to show the seam. */
+const DIFF_BOUNDARY_PATTERN = /^(?:@@ |diff --git )/;
+
 /**
  * Scoped to an actual exported interface/type-literal body -- an unexported function's own
  * multi-line parameter list (one param per line, e.g. after a Biome reformat) matches the
  * bare `name: Type` shape just as well as a real interface property, with nothing in the
- * original unscoped version to tell them apart. Tracks brace depth across every diff line
- * (context included) and only counts a `${prefix}` line while depth is at or below the level
- * an `export interface`/`export type =` line's own opening brace introduced.
+ * original unscoped version to tell them apart. Tracks brace depth across each diff hunk's own
+ * lines and only counts a `${prefix}` line while depth is at or below the level an `export
+ * interface`/`export type =` line's own opening brace introduced.
+ *
+ * Explicitly resets at every hunk/file boundary (see DIFF_BOUNDARY_PATTERN) rather than
+ * tracking depth continuously across the whole diff: with `--unified=0` there is no
+ * surrounding context, so two hunks from unrelated locations in the file (or in different
+ * files entirely) sit back-to-back in `lines` with nothing to show where one scope actually
+ * closes. Treating that seam as if it were contiguous code let an interface opened in one
+ * hunk (never closed within that same hunk's visible lines) silently keep "exportedAtDepth"
+ * active into a later, unrelated hunk -- e.g. a private method's own multi-line parameter
+ * list several hundred lines away got misread as that interface's own properties. Confirmed
+ * live releasing vehicle-server 0.20.0: a purely additive change (new optional interface
+ * fields, a method signature consolidating existing params into one) was flagged as removing
+ * required properties named after the method's own now-removed parameter names.
  */
 function propertyNames(lines, prefix, requiredOnly) {
 	const names = new Set();
@@ -39,6 +55,11 @@ function propertyNames(lines, prefix, requiredOnly) {
 	let depth = 0;
 	let exportedAtDepth = null;
 	for (const rawLine of lines) {
+		if (DIFF_BOUNDARY_PATTERN.test(rawLine)) {
+			depth = 0;
+			exportedAtDepth = null;
+			continue;
+		}
 		const marker = rawLine.length > 0 ? rawLine[0] : " ";
 		const content = rawLine.length > 0 ? rawLine.slice(1) : "";
 		const opensExportBlock = exportedAtDepth === null && EXPORT_BLOCK_OPEN_PATTERN.test(content) && content.includes("{");
