@@ -433,6 +433,44 @@ describe("runDaemonProcess idle-shutdown", () => {
 	});
 });
 
+describe("runDaemonProcess: onListen identity", () => {
+	// A composition root registering a `<daemon> diagnose` Vehicle operation needs this daemon's
+	// own instanceId to answer "who am I" -- but buildApp() (where that operation gets registered)
+	// runs *inside* startDaemon(), before RunningDaemon is ever returned to the caller. onListen is
+	// the one caller-visible hook that fires after startDaemon() resolves, so it's where a
+	// composition root can capture identity into a mutable ref for a handler to read lazily at call
+	// time. Additive: existing callers destructuring only {host, port} are unaffected.
+	it("passes the real instanceId alongside host/port, matching the resolved RunningDaemon's own", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-onlisten-"));
+		const handlePath = join(dir, "handle.json");
+		const originalExit = process.exit;
+		let exitCode: number | undefined;
+		process.exit = ((code?: number) => {
+			exitCode = code;
+		}) as typeof process.exit;
+		let seen: { host: string; port: number; instanceId: string } | undefined;
+		try {
+			runDaemonProcess({
+				daemonLabel: "Acme",
+				handlePath,
+				buildApp: trivialApp,
+				// Short idle budget so the listener self-stops instead of lingering across tests --
+				// runDaemonProcess never exposes the RunningDaemon handle a test could stop() directly.
+				idleBudgetMs: 20,
+				idleTickMs: 5,
+				onListen: (info) => {
+					seen = info;
+				},
+			});
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(seen?.instanceId).toEqual(expect.any(String));
+			expect(exitCode).toBe(0);
+		} finally {
+			process.exit = originalExit;
+		}
+	});
+});
+
 describe("startDaemon: opt-in lifecycle event log", () => {
 	it("is a no-op when lifecycleLog is omitted -- every existing caller is unaffected", async () => {
 		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));

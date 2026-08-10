@@ -430,7 +430,16 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 }
 
 export interface RunDaemonProcessOptions extends StartDaemonOptions {
-	onListen?: (info: { host: string; port: number }) => void;
+	/**
+	 * instanceId is additive over the original {host, port}-only shape -- an existing caller
+	 * destructuring just those two fields is unaffected. Included because buildApp() (where a
+	 * composition root would register a `<daemon> diagnose` Vehicle operation) runs *inside*
+	 * startDaemon(), before RunningDaemon -- and its own instanceId -- is ever returned to the
+	 * caller; onListen is the first caller-visible hook that fires after identity is known, so it's
+	 * where a composition root captures it (typically into a mutable ref) for such a handler to read
+	 * lazily at call time.
+	 */
+	onListen?: (info: { host: string; port: number; instanceId: string }) => void;
 }
 
 /**
@@ -458,7 +467,7 @@ async function runDaemonProcessAsync(options: RunDaemonProcessOptions, logger: L
 		// a synchronous throw from the pre-async version of this function gave.
 		throw error;
 	}
-	options.onListen?.({ host: daemon.host, port: daemon.port });
+	options.onListen?.({ host: daemon.host, port: daemon.port, instanceId: daemon.instanceId });
 	// One unified exit path for both triggers: an explicit SIGINT/SIGTERM below, or the
 	// idle timer inside startDaemon() calling stop() on its own. Either way, once stop()
 	// has actually finished, this process must exit -- Restart=always (or any other
