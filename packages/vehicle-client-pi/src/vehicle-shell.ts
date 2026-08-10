@@ -1,7 +1,7 @@
 import type { JsonSchema, VehicleManifest, VehicleManifestOperation, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { syncManagedActiveTools } from "./pi-tool-availability.js";
+import { syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
 import { type DiscoveredVehicle, discoverForeignVehicles } from "./vehicle-shell-broker.js";
 
 /**
@@ -262,6 +262,13 @@ export interface VehicleShellHandle {
 	/** Starting TTL a core operation is (re-)seeded with -- kept on the handle so a later refresh
 	 * can seed a core operation that just became available the same way initial registration did. */
 	readonly coreTtlTurns: number;
+	/** False when another extension already owns listToolName/manToolName at registration time (Pi's
+	 * "first registration per name wins" means registering a second copy would be pure dead weight,
+	 * forever unreachable) -- this handle never registered, and never tries to activate/deactivate,
+	 * either meta-tool name, leaving the winner in exclusive control of them. Always true when
+	 * ownership can't be determined yet (Pi's action methods aren't ready during extension loading)
+	 * -- registers unconditionally, today's exact behavior, never worse than before this existed. */
+	readonly ownsMetaTools: boolean;
 }
 
 /**
@@ -284,7 +291,8 @@ export function refreshVehicleShellManagedTools(handle: VehicleShellHandle, mana
 
 /** Every Pi tool name this handle could ever legitimately activate -- the full `managed` superset syncManagedActiveTools requires. */
 function allManagedNames(handle: VehicleShellHandle): string[] {
-	return [...handle.managedTools.map((tool) => tool.toolName), handle.listToolName, handle.manToolName];
+	const toolNames = handle.managedTools.map((tool) => tool.toolName);
+	return handle.ownsMetaTools ? [...toolNames, handle.listToolName, handle.manToolName] : toolNames;
 }
 
 /**
@@ -299,7 +307,8 @@ export function desiredShellActiveNames(handle: VehicleShellHandle): string[] {
 		const tool = byToolName.get(toolName);
 		return tool?.available === true && !tool.blocked;
 	});
-	return [...new Set([handle.listToolName, handle.manToolName, ...tracked])];
+	const metaTools = handle.ownsMetaTools ? [handle.listToolName, handle.manToolName] : [];
+	return [...new Set([...metaTools, ...tracked])];
 }
 
 function applyShellActivation(pi: ExtensionAPI, handle: VehicleShellHandle): void {
@@ -438,6 +447,16 @@ function createToolsManTool(
  * behavior applies) when options is omitted -- opt-in only, per this package's own convention for
  * a change that could alter an existing consumer's visible tool surface.
  */
+/** True when a Pi tool by this name is already registered (by any extension, including a prior
+ * call of this vehicle's own) at THIS exact call time. False whenever ownership genuinely can't
+ * be determined yet -- Pi's action methods (getAllTools included) aren't ready during pure
+ * extension-loading; registerVehicleShell then registers unconditionally, matching every
+ * consumer's behavior before this check existed. */
+function metaToolAlreadyRegistered(pi: ExtensionAPI, toolName: string): boolean {
+	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
+	return runtime.status === "ready" && runtime.value.some((tool) => tool.name === toolName);
+}
+
 export function registerVehicleShell(
 	pi: ExtensionAPI,
 	manifest: VehicleManifest,
@@ -446,13 +465,21 @@ export function registerVehicleShell(
 ): VehicleShellHandle | undefined {
 	if (!options) return undefined;
 	const discoveredTtlTurns = options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS;
+	const listToolName = options.listToolName ?? DEFAULT_LIST_TOOL_NAME;
+	const manToolName = options.manToolName ?? DEFAULT_MAN_TOOL_NAME;
+	// Checked once, up front, against the SAME name a losing extension's own registerTool call
+	// would otherwise shadow forever (Pi has no unregisterTool()) -- registering a redundant,
+	// permanently-unreachable copy is pure dead weight; the shared handle directory (see
+	// @danypops/vehicle-server) is how this vehicle's own operations stay discoverable regardless.
+	const ownsMetaTools = !metaToolAlreadyRegistered(pi, listToolName);
 	const handle: VehicleShellHandle = {
 		tracker: new VehicleShellTtlTracker(),
-		listToolName: options.listToolName ?? DEFAULT_LIST_TOOL_NAME,
-		manToolName: options.manToolName ?? DEFAULT_MAN_TOOL_NAME,
+		listToolName,
+		manToolName,
 		managedTools,
 		coreOperationNames: new Set(options.coreOperations ?? []),
 		coreTtlTurns: options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS,
+		ownsMetaTools,
 	};
 
 	for (const tool of managedTools) {
@@ -460,8 +487,10 @@ export function registerVehicleShell(
 			handle.tracker.seed(tool.toolName, handle.coreTtlTurns);
 	}
 
-	pi.registerTool(createToolsListTool(handle.listToolName, manifest, options.broker));
-	pi.registerTool(createToolsManTool(pi, handle.manToolName, manifest, handle, discoveredTtlTurns, options.broker));
+	if (ownsMetaTools) {
+		pi.registerTool(createToolsListTool(listToolName, manifest, options.broker));
+		pi.registerTool(createToolsManTool(pi, manToolName, manifest, handle, discoveredTtlTurns, options.broker));
+	}
 
 	pi.on("tool_execution_end", (event) => {
 		const toolName = (event as { toolName?: unknown }).toolName;

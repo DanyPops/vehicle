@@ -48,9 +48,9 @@ class FakeClient implements VehicleClient {
 	}
 }
 
-function fakePi() {
+function fakePi(options: { existingTools?: string[] } = {}) {
 	const tools: ToolDefinition[] = [];
-	const harness = createExtensionHarness(() => {});
+	const harness = createExtensionHarness(() => {}, { existingTools: options.existingTools });
 	const pi: ExtensionAPI = {
 		...harness.api,
 		registerTool(tool: ToolDefinition) {
@@ -467,5 +467,55 @@ describe("registerVehicleTools with shell broker mode", () => {
 		expect(result.content[0]?.text).toBe(
 			"packed:package.install: could not activate -- Pi tool 'packed_package_install' is already registered.",
 		);
+	});
+});
+
+describe("registerVehicleTools skips registering redundant meta-tools", () => {
+	it("when tools_list is already registered by another extension, never registers its own tools_list/tools_man -- pure dead weight, Pi has no unregisterTool()", async () => {
+		const { pi, tools } = fakePi({ existingTools: ["tools_list"] });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+		expect(tools.find((tool) => tool.name === "tools_list")).toBeUndefined();
+		expect(tools.find((tool) => tool.name === "tools_man")).toBeUndefined();
+	});
+
+	it("still registers and activates its own core/discovered operation tools normally when meta-tools are skipped", async () => {
+		const { pi, tools, harness } = fakePi({ existingTools: ["tools_list"] });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+			shell: { coreOperations: ["tasks.create"] },
+		});
+
+		expect(tools.find((tool) => tool.name === "tasks_create")).toBeDefined();
+		expect(harness.activeTools).toContain("tasks_create");
+	});
+
+	it("never touches another extension's tools_list/tools_man active state -- doesn't own them, so never adds or removes them via setActiveTools", async () => {
+		const { pi, harness } = fakePi({ existingTools: ["tools_list", "tools_man"] });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+		// Started active (existingTools' own default) and must stay that way -- untouched, not
+		// re-added by us (which would be indistinguishable from "left alone" here, but the next
+		// assertion -- decaying our own tools_man -- proves we genuinely never track them at all).
+		expect(harness.activeTools).toContain("tools_list");
+		expect(harness.activeTools).toContain("tools_man");
+
+		// If this vehicle mistakenly believed it owned tools_man, turn_end's decay cycle would
+		// eventually deactivate it once untracked/unseeded -- it must not, since we never seeded or
+		// claimed it in the first place.
+		for (let turn = 0; turn < 30; turn++) {
+			await harness.emit("turn_end", { turnIndex: turn, message: {}, toolResults: [] });
+		}
+		expect(harness.activeTools).toContain("tools_list");
+		expect(harness.activeTools).toContain("tools_man");
+	});
+
+	it("without any pre-existing tools_list, registers both meta-tools exactly as before this check existed", async () => {
+		const { pi, tools, harness } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+		expect(tools.find((tool) => tool.name === "tools_list")).toBeDefined();
+		expect(tools.find((tool) => tool.name === "tools_man")).toBeDefined();
+		expect(harness.activeTools).toContain("tools_list");
+		expect(harness.activeTools).toContain("tools_man");
 	});
 });
