@@ -465,8 +465,26 @@ export interface VehicleOperationInvocationResult {
  * shape while still calling through the same policy layer
  * registerVehicleTools() uses internally.
  */
-export async function invokeVehicleOperation(params: VehicleOperationInvocationParams): Promise<VehicleOperationInvocationResult> {
-	const { client, manifest, descriptor, toolName, toolCallId, input, context, signal, onUpdate, options } = params;
+/**
+ * Shared state built once per invokeVehicleOperation() call and threaded through each of its
+ * extracted steps below -- an Extract-Method decomposition, not a generic Decorator/middleware
+ * pipeline: a real pipeline was considered and rejected because the approval-required retry step
+ * (see invokeWithApprovalRetry) re-invokes the SAME core call with a mutated capability rather
+ * than delegating to a distinct "next" step, which doesn't compose cleanly as a generic
+ * (input, next) middleware signature, and only 5 concerns exist today, all added in-repo rather
+ * than pluggable by a third party at runtime -- not enough to justify that generality yet.
+ */
+export interface InvocationContext {
+	readonly params: VehicleOperationInvocationParams;
+	readonly identity: PiVehicleIdentity;
+	readonly request: PiVehicleInvocationRequest;
+	readonly baseInvocation: VehicleInvocationOptions;
+	readonly jobPollIntervalMs: number;
+	readonly presentationProjector: PiVehiclePresentationProjector | undefined;
+}
+
+export async function buildInvocationContext(params: VehicleOperationInvocationParams): Promise<InvocationContext> {
+	const { manifest, descriptor, toolName, toolCallId, input, context, signal, onUpdate, options } = params;
 	const presentationProjector = params.presentationProjector ?? options.presentations?.(descriptor)?.projector;
 	const identity = vehicleIdentity(manifest, descriptor, toolCallId);
 	const request: PiVehicleInvocationRequest = { descriptor, manifest, toolName, toolCallId, input, context, signal, onUpdate };
@@ -503,48 +521,56 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 		onProgress: reportProgress,
 		...(descriptor.idempotency.mode === "keyed" && !resolved?.idempotencyKey ? { idempotencyKey: toolCallId } : {}),
 	};
+	return {
+		params,
+		identity,
+		request,
+		baseInvocation,
+		jobPollIntervalMs: options.jobPollIntervalMs ?? DEFAULT_JOB_POLL_INTERVAL_MS,
+		presentationProjector,
+	};
+}
 
-	publishOperationActivity("started", identity, descriptor);
+// A human's own /safety override, not the effect-level default (that case is already covered by
+// the approval-required round trip in invokeWithApprovalRetry below) -- a client-only gate, never
+// touches invoke() at all on denial, so no server capability is needed for an effect the server
+// itself never gates.
+export async function applyLocalSafetyGate(ctx: InvocationContext): Promise<void> {
+	const { manifest, descriptor, input, context, signal, options } = ctx.params;
+	if (options.safetyPolicyStore?.get(manifest.name, descriptor.name) !== "ask") return;
+	const answer = await requestLocalApproval(
+		context,
+		descriptor,
+		input,
+		signal,
+		options.approvalPresentation,
+		options.approvalPrompt?.(descriptor, input),
+		options.requestApproval,
+	);
+	if (answer?.approved) return;
+	const failure: VehicleFailure = {
+		code: "vehicle-safety-denied",
+		category: "authorization",
+		message: `${operationKey(descriptor)} was denied by the local /safety policy`,
+		retryable: true,
+	};
+	publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
+	throw new PiVehicleInvocationError(failure, manifest.name);
+}
 
-	// A human's own /safety override, not the effect-level default (that
-	// case is already covered by the approval-required round trip below) --
-	// a client-only gate, never touches invoke() at all on denial, so no
-	// server capability is needed for an effect the server itself never
-	// gates.
-	if (options.safetyPolicyStore?.get(manifest.name, descriptor.name) === "ask") {
-		const answer = await requestLocalApproval(
-			context,
-			descriptor,
-			input,
-			signal,
-			options.approvalPresentation,
-			options.approvalPrompt?.(descriptor, input),
-			options.requestApproval,
-		);
-		if (!answer?.approved) {
-			const failure: VehicleFailure = {
-				code: "vehicle-safety-denied",
-				category: "authorization",
-				message: `${operationKey(descriptor)} was denied by the local /safety policy`,
-				retryable: true,
-			};
-			publishOperationActivity("failed", identity, descriptor, { code: failure.code });
-			throw new PiVehicleInvocationError(failure, manifest.name);
-		}
-	}
-
-	const jobPollIntervalMs = options.jobPollIntervalMs ?? DEFAULT_JOB_POLL_INTERVAL_MS;
-	let output: unknown;
+// Owns the whole approval-required catch/resolve/retry dance around the core invokeOrRunAsJob
+// call -- the registry (once configureApprovals() is enabled there) records a durable
+// approval.requested event before ever failing this way, so a caller always has a path forward
+// via vehicle.approval.resolve; this is just the optional local fast path attempting it
+// automatically.
+export async function invokeWithApprovalRetry(ctx: InvocationContext): Promise<unknown> {
+	const { client, manifest, descriptor, input, context, signal, options } = ctx.params;
 	try {
-		output = await invokeOrRunAsJob(client, descriptor, input, baseInvocation, jobPollIntervalMs);
+		return await invokeOrRunAsJob(client, descriptor, input, ctx.baseInvocation, ctx.jobPollIntervalMs);
 	} catch (error) {
 		const failure = sanitizedFailure(error, descriptor.idempotency.mode);
-		// The registry (once configureApprovals() is enabled there) records a
-		// durable approval.requested event before ever failing this way -- a
-		// caller always has a path forward via vehicle.approval.resolve, this
-		// is just the optional local fast path attempting it automatically.
 		if (failure.code !== "approval-required") {
-			publishOperationActivity("failed", identity, descriptor, { code: failure.code });
+			publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 		const requestId = approvalRequestId(failure);
@@ -552,7 +578,7 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 		// stays durably pending (an async/remote approver can still resolve it
 		// later) rather than this call eagerly denying it on the caller's behalf.
 		if (!requestId || !context.hasUI) {
-			publishOperationActivity("failed", identity, descriptor, { code: failure.code });
+			publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 
@@ -581,49 +607,83 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			// never mint or assume a capability that was never actually granted.
 		}
 		if (!capability) {
-			publishOperationActivity("failed", identity, descriptor, { code: failure.code });
+			publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 		try {
-			output = await invokeOrRunAsJob(client, descriptor, input, { ...baseInvocation, approvalCapability: capability }, jobPollIntervalMs);
+			return await invokeOrRunAsJob(
+				client,
+				descriptor,
+				input,
+				{ ...ctx.baseInvocation, approvalCapability: capability },
+				ctx.jobPollIntervalMs,
+			);
 		} catch (retryError) {
 			const retryFailure = sanitizedFailure(retryError, descriptor.idempotency.mode);
-			publishOperationActivity("failed", identity, descriptor, { code: retryFailure.code });
+			publishOperationActivity("failed", ctx.identity, descriptor, { code: retryFailure.code });
 			throw new PiVehicleInvocationError(retryFailure, manifest.name);
 		}
 	}
-	publishOperationActivity("completed", identity, descriptor);
-	if (options.onInvoked) {
-		try {
-			await options.onInvoked({ descriptor, manifest, toolName, toolCallId, input, context }, output);
-		} catch {
-			// Best-effort: the invoke() itself already succeeded, so a broadcast failure
-			// must never surface as a failed tool call.
-		}
+}
+
+// Best-effort: the invoke() itself already succeeded, so a broadcast failure must never surface
+// as a failed tool call.
+async function runOnInvokedHook(ctx: InvocationContext, output: unknown): Promise<void> {
+	const { descriptor, manifest, toolName, toolCallId, input, context, options } = ctx.params;
+	if (!options.onInvoked) return;
+	try {
+		await options.onInvoked({ descriptor, manifest, toolName, toolCallId, input, context }, output);
+	} catch {
+		// see comment above
 	}
+}
+
+async function runInteractiveFollowUp(
+	ctx: InvocationContext,
+	output: unknown,
+): Promise<{ content: readonly VehicleContentBlock[]; presentationOutput: unknown }> {
+	const { client, descriptor, options } = ctx.params;
 	let presentationOutput = output;
 	let content: readonly VehicleContentBlock[] | undefined;
 	const followUp = options.interactiveFollowUps?.(descriptor);
 	if (followUp) {
-		const result = await followUp(request, output, client);
+		const result = await followUp(ctx.request, output, client);
 		if (result) {
 			presentationOutput = result.output ?? output;
 			content = boundVehicleModelContent(result.content, options.modelContentMaxBytes);
 		}
 	}
 	content ??= modelContentFor(output, options.modelContentMaxBytes);
-	if (!presentationProjector) {
-		return { content: [...content], details: { vehicle: identity, output: presentationOutput } };
-	}
+	return { content, presentationOutput };
+}
 
+async function projectPresentation(
+	ctx: InvocationContext,
+	presentationOutput: unknown,
+	content: readonly VehicleContentBlock[],
+): Promise<VehicleOperationInvocationResult> {
+	if (!ctx.presentationProjector) {
+		return { content: [...content], details: { vehicle: ctx.identity, output: presentationOutput } };
+	}
 	let presentation: JsonValue;
 	try {
-		presentation = await presentationProjector.project(presentationOutput, request);
-		assertJsonSafePresentation(presentation, presentationProjector.maxBytes);
+		presentation = await ctx.presentationProjector.project(presentationOutput, ctx.request);
+		assertJsonSafePresentation(presentation, ctx.presentationProjector.maxBytes);
 	} catch (cause) {
-		throw new PiVehiclePresentationProjectionError(operationKey(descriptor), cause);
+		throw new PiVehiclePresentationProjectionError(operationKey(ctx.params.descriptor), cause);
 	}
-	return { content: [...content], details: { vehicle: identity, presentation } };
+	return { content: [...content], details: { vehicle: ctx.identity, presentation } };
+}
+
+export async function invokeVehicleOperation(params: VehicleOperationInvocationParams): Promise<VehicleOperationInvocationResult> {
+	const ctx = await buildInvocationContext(params);
+	publishOperationActivity("started", ctx.identity, params.descriptor);
+	await applyLocalSafetyGate(ctx);
+	const output = await invokeWithApprovalRetry(ctx);
+	publishOperationActivity("completed", ctx.identity, params.descriptor);
+	await runOnInvokedHook(ctx, output);
+	const { content, presentationOutput } = await runInteractiveFollowUp(ctx, output);
+	return projectPresentation(ctx, presentationOutput, content);
 }
 
 const GENERIC_PRESENTATION_PROJECTOR: PiVehiclePresentationProjector = Object.freeze({

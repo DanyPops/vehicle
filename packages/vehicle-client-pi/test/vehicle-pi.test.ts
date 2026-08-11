@@ -15,8 +15,11 @@ import { Check } from "typebox/value";
 import { registerActivityBroker, unregisterActivityBroker, type VehicleActivityEvent } from "../src/activity-broker.ts";
 import { CLASSIFICATION_FAILURE_CHANNEL_NAME } from "../src/client-diagnostics.ts";
 import {
+	applyLocalSafetyGate,
 	boundVehicleModelContent,
+	buildInvocationContext,
 	invokeVehicleOperation,
+	invokeWithApprovalRetry,
 	PiVehicleInvocationError,
 	PiVehiclePresentationProjectionError,
 	type PiVehicleToolDetails,
@@ -341,6 +344,95 @@ describe("invokeVehicleOperation (standalone, no Pi tool registration)", () => {
 
 		expect(client.calls[0]?.options?.callerSessionId).toBe("session-1");
 		expect(client.calls[0]?.options?.callerProjectRoot).toBe("/home/x/pipes");
+	});
+});
+
+// invokeVehicleOperation's own extracted steps (Extract Method + shared InvocationContext, not a
+// generic Decorator/middleware pipeline -- see the InvocationContext doc comment in vehicle-pi.ts
+// for why), each independently exercised here without also exercising activity broadcasting,
+// the approval retry dance, or interactive follow-ups the way calling invokeVehicleOperation()
+// as a whole always would.
+describe("invokeVehicleOperation's extracted steps, exercised in isolation", () => {
+	it("applyLocalSafetyGate resolves without calling invoke() when no /safety override is set", async () => {
+		const descriptor = operation("category.list");
+		const client = new FakeClient(manifest([descriptor]));
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext(),
+			options: {},
+		});
+		await expect(applyLocalSafetyGate(ctx)).resolves.toBeUndefined();
+		expect(client.calls).toHaveLength(0);
+	});
+
+	it("applyLocalSafetyGate throws PiVehicleInvocationError on a denied /safety 'ask' override, in complete isolation from invokeWithApprovalRetry/activity broadcasting", async () => {
+		const descriptor = operation("category.remove");
+		const client = new FakeClient(manifest([descriptor]));
+		const safetyPolicyStore = await VehicleSafetyPolicyStore.restore();
+		await safetyPolicyStore.set("test-vehicle", "category.remove", "ask");
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: false }),
+			options: { safetyPolicyStore },
+		});
+		const events: VehicleActivityEvent[] = [];
+		registerActivityBroker({ publish: (event) => events.push(event) });
+		try {
+			await expect(applyLocalSafetyGate(ctx)).rejects.toThrow(PiVehicleInvocationError);
+			// invokeWithApprovalRetry (and the "started" activity event it's paired with in
+			// invokeVehicleOperation) never ran -- proof this step is genuinely isolated, not just
+			// independently callable while secretly still triggering its siblings.
+			expect(client.calls).toHaveLength(0);
+			expect(events.map((e) => e.type)).toEqual(["vehicle.operation.failed"]);
+		} finally {
+			unregisterActivityBroker();
+		}
+	});
+
+	it("invokeWithApprovalRetry alone runs the full approval-required retry dance, with no /safety gate or follow-up step involved", async () => {
+		const descriptor = operation("category.remove", 1, { effect: "local-write" });
+		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: true, ui: { confirm: () => Promise.resolve(true) } }),
+			options: {},
+		});
+		const output = await invokeWithApprovalRetry(ctx);
+		expect(output).toEqual({ ok: true });
+		expect(client.calls.some((call) => call.name === "vehicle.approval.resolve")).toBe(true);
+	});
+
+	it("invokeWithApprovalRetry surfaces the original approval-required failure when no UI can ask", async () => {
+		const descriptor = operation("category.remove", 1, { effect: "local-write" });
+		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: false }),
+			options: {},
+		});
+		await expect(invokeWithApprovalRetry(ctx)).rejects.toMatchObject({ failure: { code: "approval-required" } });
+		// Only the original attempt happened -- no vehicle.approval.resolve round trip without a UI.
+		expect(client.calls.filter((call) => call.name === "vehicle.approval.resolve")).toHaveLength(0);
 	});
 });
 
