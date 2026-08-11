@@ -23,8 +23,8 @@ import type { ProgressBarGlyphStyle, ProgressBarGlyphs } from "malevich-tui-comp
 import type { TSchema } from "typebox";
 import type { PiHitlPresentation } from "./hitl-prompt.js";
 import { guardExtensionRuntimeInitialized, syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
-import { DEFAULT_JOB_POLL_INTERVAL_MS, invokeOrRunAsJob } from "./vehicle-job-polling.js";
-import { type LocalApprovalRequester, requestLocalApproval } from "./vehicle-local-approval.js";
+import { DEFAULT_JOB_POLL_INTERVAL_MS, invokeOrRunAsJob, type RegisterVehicleToolsJobOptions } from "./vehicle-job-polling.js";
+import { type LocalApprovalRequester, type RegisterVehicleToolsApprovalOptions, requestLocalApproval } from "./vehicle-local-approval.js";
 import {
 	persistManifestCache,
 	type RegisterVehicleToolsHandshakeOptions,
@@ -49,7 +49,7 @@ import {
 	projectGenericVehiclePresentation,
 	projectGenericVehicleProgress,
 } from "./vehicle-render-model.js";
-import type { VehicleSafetyPolicyStore, VehicleSafetyState } from "./vehicle-safety.js";
+import type { RegisterVehicleToolsSafetyOptions, VehicleSafetyPolicyStore, VehicleSafetyState } from "./vehicle-safety.js";
 import {
 	approvalRequestId,
 	contributeToSafetyRegistry,
@@ -66,12 +66,23 @@ import {
 } from "./vehicle-shell.js";
 import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
 
-export type { LocalApprovalPrompt, LocalApprovalRequester, LocalApprovalRequestParams } from "./vehicle-local-approval.js";
+export type { RegisterVehicleToolsJobOptions } from "./vehicle-job-polling.js";
+export type {
+	LocalApprovalPrompt,
+	LocalApprovalRequester,
+	LocalApprovalRequestParams,
+	RegisterVehicleToolsApprovalOptions,
+} from "./vehicle-local-approval.js";
 export type { RegisterVehicleToolsHandshakeOptions } from "./vehicle-manifest-handshake.js";
 export {
 	boundVehicleModelContent,
 	DEFAULT_MODEL_CONTENT_MAX_BYTES,
 } from "./vehicle-pi-primitives.js";
+// RegisterVehicleToolsSafetyOptions also has its own public subpath ("./vehicle-safety") since
+// vehicle-safety.ts is independently exported for VehicleSafetyPolicyStore's own sake -- re-export
+// here too so a consumer building RegisterVehicleToolsOptions's `safety` group doesn't have to
+// know that subpath exists just to name its type, matching every other grouped option above.
+export type { RegisterVehicleToolsSafetyOptions } from "./vehicle-safety.js";
 export { PiVehicleInvocationError } from "./vehicle-safety-classification.js";
 
 export interface PiVehicleIdentity {
@@ -159,27 +170,14 @@ export type PiVehicleInteractiveFollowUp = (
 ) => Promise<PiVehicleFollowUpResult | undefined>;
 
 /**
- * Every field below is optional and additive: omitting it preserves pre-existing behavior
- * exactly, for every consumer that hasn't opted in. Each field's own comment documents the
- * real incident/gap it closes and what enabling it changes -- not what omitting it preserves,
- * since that's this one invariant, true of the whole interface, not worth restating per field.
+ * registerVehicleTools()'s human-TUI rendering options, grouped out of RegisterVehicleToolsOptions's
+ * own flat option list. Stays co-located here (rather than moving into vehicle-render.ts, the way
+ * RegisterVehicleToolsApprovalOptions/RegisterVehicleToolsJobOptions moved into their own owning
+ * modules) because two of its own field types -- VehicleToolRenderers, PiVehiclePresentationContract
+ * -- are themselves natively defined in this file; moving this group without also moving those two
+ * interfaces would just relocate the cycle risk rather than remove it.
  */
-export interface RegisterVehicleToolsOptions {
-	readonly permissions?: readonly string[];
-	readonly principal?: VehiclePrincipal;
-	readonly resolveInvocation?: PiVehicleInvocationResolver;
-	/**
-	 * Fires after a successful invoke(), before the tool result is returned -- for a
-	 * consumer-local side effect the operation's own output has no way to carry (e.g. a
-	 * same-process Pi extension event bus notification a sibling extension observes; a
-	 * remote HTTP Vehicle consumer has no such bus, so this is deliberately host-local,
-	 * not part of the operation's own transport-neutral contract). Never aborts the tool
-	 * call: an error here is swallowed, matching the same "best-effort broadcast" contract
-	 * a direct pi.events.emit() call would carry on its own.
-	 */
-	readonly onInvoked?: (request: PiVehicleInvocationRequest, output: unknown) => void | Promise<void>;
-	readonly toolName?: (descriptor: VehicleOperationDescriptor, versioned: boolean) => string;
-	readonly closeClientOnSessionShutdown?: boolean;
+export interface RegisterVehicleToolsRenderingOptions {
 	/**
 	 * Per-operation renderCall/renderResult override. Returning undefined (or
 	 * omitting this option entirely) falls back to the generic Vehicle
@@ -203,10 +201,89 @@ export interface RegisterVehicleToolsOptions {
 	 * Omit this for the bounded generic vehicle.tool-details/v1 projector/renderer pair.
 	 */
 	readonly presentations?: (descriptor: VehicleOperationDescriptor) => PiVehiclePresentationContract | undefined;
-	/** Independent UTF-8 transcript budget. Defaults to 16 KiB; unrelated to transport and presentation-detail bounds. */
-	readonly modelContentMaxBytes?: number;
 	/** Human-selected glyph strategy for the generic renderer's progress bars. Geometry/math is unchanged. */
 	readonly progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle;
+	/**
+	 * Opt-in coverage audit: the real fix for a renderer-coverage gap silently degrading to
+	 * raw JSON forever, discovered live (papyrus's tasks.mutation_status had no curated
+	 * renderer, 15 of 41 tasks.* operations total). `operations` declares every operation name
+	 * this Vehicle's own `renderers`/`presentations` factory genuinely curates (renders as
+	 * something other than the generic Vehicle fallback) -- a static, explicit declaration
+	 * rather than trying to shape-probe a renderer's own runtime behavior, which would be
+	 * neither simple nor deterministic. Every manifest operation NOT in that set is reported
+	 * once, at registration time, to onGap (defaulting to a console.warn naming the vehicle and
+	 * every gap operation) -- turning a permanently invisible degradation into a visible signal
+	 * the moment a new/renamed operation ships without a curated renderer. The improved generic
+	 * fallback (vehicle-render.ts's recordEnvelope/multiArrayEnvelope) already renders many
+	 * "uncovered" shapes reasonably -- this audit is about visibility into what's ACTUALLY still
+	 * uncovered, not a claim that every gap is bad.
+	 */
+	readonly renderCoverage?: {
+		readonly operations: readonly string[];
+		readonly onGap?: (vehicleName: string, gaps: readonly string[]) => void;
+	};
+	/**
+	 * A closed Registry/Strategy alternative to the generic renderer's own open shape-probing
+	 * chain (vehicle-render.ts's singleArrayEnvelope/multiArrayEnvelope/recordEnvelope/... chain):
+	 * keyed by descriptor.name, each entry gets first refusal on rendering that operation's own
+	 * output, ahead of every generic shape guess. Unlike `renderers` (a full renderCall/renderResult
+	 * override that replaces the generic renderer entirely, including its projected-presentation
+	 * and partial-progress handling), a renderPresenters entry only customizes the final
+	 * output-to-Component step -- everything else (error rendering, partial progress, the
+	 * vehicle.tool-details/v1 projected-presentation path) still goes through the shared generic
+	 * renderer unchanged. Returning undefined from a presenter falls through to the generic
+	 * shape-probing chain, so a presenter never has to handle every possible shape its own
+	 * operation could produce. The real value: build this map via `satisfies
+	 * Record<YourOperationNameUnion, VehiclePresenter>` and the compiler itself rejects a
+	 * manifest operation with no assigned presenter -- exhaustiveness renderCoverage's own runtime
+	 * audit can only ever report on after the fact, never enforce ahead of time.
+	 */
+	readonly renderPresenters?: Readonly<Record<string, VehiclePresenter>>;
+}
+
+/**
+ * Every field below is optional and additive: omitting it preserves pre-existing behavior
+ * exactly, for every consumer that hasn't opted in. Each field's own comment documents the
+ * real incident/gap it closes and what enabling it changes -- not what omitting it preserves,
+ * since that's this one invariant, true of the whole interface, not worth restating per field.
+ *
+ * The `rendering`/`safety`/`approval`/`jobs` groups below are the current, preferred shape for
+ * the option clusters each one covers -- each field they replace still works flat exactly as
+ * before (`@deprecated` marks it, normalizeRegisterVehicleToolsOptions() merges both shapes
+ * before anything reads `options` internally, grouped taking precedence when both are set for
+ * the same underlying setting), so no existing consumer needs to migrate before upgrading.
+ */
+export interface RegisterVehicleToolsOptions {
+	readonly permissions?: readonly string[];
+	readonly principal?: VehiclePrincipal;
+	readonly resolveInvocation?: PiVehicleInvocationResolver;
+	/**
+	 * Fires after a successful invoke(), before the tool result is returned -- for a
+	 * consumer-local side effect the operation's own output has no way to carry (e.g. a
+	 * same-process Pi extension event bus notification a sibling extension observes; a
+	 * remote HTTP Vehicle consumer has no such bus, so this is deliberately host-local,
+	 * not part of the operation's own transport-neutral contract). Never aborts the tool
+	 * call: an error here is swallowed, matching the same "best-effort broadcast" contract
+	 * a direct pi.events.emit() call would carry on its own.
+	 */
+	readonly onInvoked?: (request: PiVehicleInvocationRequest, output: unknown) => void | Promise<void>;
+	readonly toolName?: (descriptor: VehicleOperationDescriptor, versioned: boolean) => string;
+	readonly closeClientOnSessionShutdown?: boolean;
+	/** @deprecated Use `rendering.renderers` instead -- see RegisterVehicleToolsRenderingOptions. */
+	readonly renderers?: (descriptor: VehicleOperationDescriptor) => VehicleToolRenderers | undefined;
+	/** @deprecated Use `rendering.presentations` instead -- see RegisterVehicleToolsRenderingOptions. */
+	readonly presentations?: (descriptor: VehicleOperationDescriptor) => PiVehiclePresentationContract | undefined;
+	/** Independent UTF-8 transcript budget. Defaults to 16 KiB; unrelated to transport and presentation-detail bounds. */
+	readonly modelContentMaxBytes?: number;
+	/** @deprecated Use `rendering.progressBarGlyphs` instead -- see RegisterVehicleToolsRenderingOptions. */
+	readonly progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle;
+	/** @deprecated Use `rendering.renderCoverage` instead -- see RegisterVehicleToolsRenderingOptions. */
+	readonly renderCoverage?: {
+		readonly operations: readonly string[];
+		readonly onGap?: (vehicleName: string, gaps: readonly string[]) => void;
+	};
+	/** @deprecated Use `rendering.renderPresenters` instead -- see RegisterVehicleToolsRenderingOptions. */
+	readonly renderPresenters?: Readonly<Record<string, VehiclePresenter>>;
 	/** Per-operation escape hatch for a client-local interactive step after a successful invoke() -- see PiVehicleInteractiveFollowUp. */
 	readonly interactiveFollowUps?: (descriptor: VehicleOperationDescriptor) => PiVehicleInteractiveFollowUp | undefined;
 	/**
@@ -215,46 +292,15 @@ export interface RegisterVehicleToolsOptions {
 	 * batch it alongside other tool calls and let those run before the human sees the prompt.
 	 */
 	readonly executionMode?: (descriptor: VehicleOperationDescriptor) => ToolExecutionMode | undefined;
-	/**
-	 * Mirrors the server's own VehicleRegistry.configureApprovals()
-	 * requireApprovalForEffects set (see vehicle-server) so /safety's "ask"
-	 * classification matches reality -- purely advisory here: the server
-	 * enforces its own copy regardless of what this option says. Defaults to
-	 * DEFAULT_APPROVAL_EFFECTS, the same default the server itself uses.
-	 */
+	/** @deprecated Use `safety.requireApprovalForEffects` instead -- see RegisterVehicleToolsSafetyOptions (vehicle-safety.ts). */
 	readonly requireApprovalForEffects?: readonly VehicleEffect[];
-	/**
-	 * A human's own /safety overrides, consulted ahead of the effect-level default and the
-	 * permission-based check for both tool visibility (see syncManagedActiveTools below) and
-	 * the local pre-invoke approval gate (see createTool's execute()).
-	 */
+	/** @deprecated Use `safety.safetyPolicyStore` instead -- see RegisterVehicleToolsSafetyOptions (vehicle-safety.ts). */
 	readonly safetyPolicyStore?: VehicleSafetyPolicyStore;
-	/**
-	 * Host used for local approval HITL. `overlay` (default) blocks in a popup over
-	 * scrollback; `integrated` replaces Pi's editor while preserving its draft,
-	 * scrollback, and footer. RPC/headless contexts retain the native confirm fallback.
-	 */
+	/** @deprecated Use `approval.approvalPresentation` instead -- see RegisterVehicleToolsApprovalOptions (vehicle-local-approval.ts). */
 	readonly approvalPresentation?: PiHitlPresentation;
-	/**
-	 * Per-operation override for the local approval prompt's own title/message, shown by the
-	 * approval-required retry dance's optional synchronous fast path (requestLocalApproval)
-	 * and by the local /safety "ask" gate. Returning undefined (or omitting this option
-	 * entirely, or the callback returning undefined for a given descriptor) falls back to
-	 * the generic `Approve ${displayLabel}?` / raw-JSON-input prompt, unchanged.
-	 *
-	 * Exists for the same reason `renderers` exists for tool call/result rendering: a
-	 * consumer with real UX investment in one operation's approval copy (e.g. a
-	 * human-readable command preview, or a specific warning that applies only to one
-	 * dangerous input shape) can supply it here instead of every caller seeing a raw JSON
-	 * dump of the input. Does not change the server-side approval-required/capability
-	 * protocol at all -- purely the local prompt's own copy.
-	 */
+	/** @deprecated Use `approval.approvalPrompt` instead -- see RegisterVehicleToolsApprovalOptions (vehicle-local-approval.ts). */
 	readonly approvalPrompt?: (descriptor: VehicleOperationDescriptor, input: unknown) => { title: string; message: string } | undefined;
-	/**
-	 * Overrides the actual local-approval HITL mechanism itself -- distinct from approvalPrompt
-	 * above, which only ever customizes the plain yes/no prompt's title/message text. See
-	 * LocalApprovalRequester's own doc comment.
-	 */
+	/** @deprecated Use `approval.requestApproval` instead -- see RegisterVehicleToolsApprovalOptions (vehicle-local-approval.ts). */
 	readonly requestApproval?: LocalApprovalRequester;
 	/**
 	 * Survives a restart/reload while the daemon is unreachable: a successful manifest() fetch is
@@ -293,51 +339,46 @@ export interface RegisterVehicleToolsOptions {
 	 * calls it.
 	 */
 	readonly shell?: VehicleShellOptions;
-	/**
-	 * How often invokeVehicleOperation polls a background-capable operation's Vehicle Job
-	 * (tailJob + pollJob) while it's still running -- unrelated to the tool call's own
-	 * unchanged single-call surface (see the module doc comment above runVehicleJobToCompletion).
-	 * Defaults to 500ms. Only ever consulted for an operation whose descriptor declares
-	 * `background` AND whose client exposes submitJob -- every other operation is invoked exactly
-	 * as before, one live client.invoke() call, this option never read.
-	 */
+	/** @deprecated Use `jobs.jobPollIntervalMs` instead -- see RegisterVehicleToolsJobOptions (vehicle-job-polling.ts). */
 	readonly jobPollIntervalMs?: number;
-	/**
-	 * Opt-in coverage audit: the real fix for a renderer-coverage gap silently degrading to
-	 * raw JSON forever, discovered live (papyrus's tasks.mutation_status had no curated
-	 * renderer, 15 of 41 tasks.* operations total). `operations` declares every operation name
-	 * this Vehicle's own `renderers`/`presentations` factory genuinely curates (renders as
-	 * something other than the generic Vehicle fallback) -- a static, explicit declaration
-	 * rather than trying to shape-probe a renderer's own runtime behavior, which would be
-	 * neither simple nor deterministic. Every manifest operation NOT in that set is reported
-	 * once, at registration time, to onGap (defaulting to a console.warn naming the vehicle and
-	 * every gap operation) -- turning a permanently invisible degradation into a visible signal
-	 * the moment a new/renamed operation ships without a curated renderer. The improved generic
-	 * fallback (vehicle-render.ts's recordEnvelope/multiArrayEnvelope) already renders many
-	 * "uncovered" shapes reasonably -- this audit is about visibility into what's ACTUALLY still
-	 * uncovered, not a claim that every gap is bad.
-	 */
-	readonly renderCoverage?: {
-		readonly operations: readonly string[];
-		readonly onGap?: (vehicleName: string, gaps: readonly string[]) => void;
+	/** Rendering/presentation options -- see RegisterVehicleToolsRenderingOptions above. */
+	readonly rendering?: RegisterVehicleToolsRenderingOptions;
+	/** Safety-classification options -- see RegisterVehicleToolsSafetyOptions (vehicle-safety.ts). */
+	readonly safety?: RegisterVehicleToolsSafetyOptions;
+	/** Local-approval-prompt options -- see RegisterVehicleToolsApprovalOptions (vehicle-local-approval.ts). */
+	readonly approval?: RegisterVehicleToolsApprovalOptions;
+	/** Vehicle Jobs polling options -- see RegisterVehicleToolsJobOptions (vehicle-job-polling.ts). */
+	readonly jobs?: RegisterVehicleToolsJobOptions;
+}
+
+/**
+ * Merges the `rendering`/`safety`/`approval`/`jobs` grouped option shapes onto
+ * RegisterVehicleToolsOptions's own flat fields -- the single place both shapes are reconciled,
+ * so every existing internal `options.xyz` read elsewhere in this file (and in
+ * vehicle-safety-classification.ts, which also reads a few of them) keeps working completely
+ * unchanged, whichever shape a caller actually supplied. Per-field precedence: the grouped value
+ * wins when both are set for the same underlying setting, since the group is the newer, preferred
+ * shape -- a caller migrating incrementally is assumed to be moving TOWARD the group, not away
+ * from it. Called once at the top of every real entry point (registerVehicleTools,
+ * refreshVehicleToolAvailability, buildInvocationContext) rather than at each of the ~11
+ * individual read sites, so this reconciliation logic exists in exactly one place.
+ */
+function normalizeRegisterVehicleToolsOptions(options: RegisterVehicleToolsOptions): RegisterVehicleToolsOptions {
+	if (!options.rendering && !options.safety && !options.approval && !options.jobs) return options;
+	return {
+		...options,
+		renderers: options.rendering?.renderers ?? options.renderers,
+		presentations: options.rendering?.presentations ?? options.presentations,
+		progressBarGlyphs: options.rendering?.progressBarGlyphs ?? options.progressBarGlyphs,
+		renderCoverage: options.rendering?.renderCoverage ?? options.renderCoverage,
+		renderPresenters: options.rendering?.renderPresenters ?? options.renderPresenters,
+		safetyPolicyStore: options.safety?.safetyPolicyStore ?? options.safetyPolicyStore,
+		requireApprovalForEffects: options.safety?.requireApprovalForEffects ?? options.requireApprovalForEffects,
+		approvalPresentation: options.approval?.approvalPresentation ?? options.approvalPresentation,
+		approvalPrompt: options.approval?.approvalPrompt ?? options.approvalPrompt,
+		requestApproval: options.approval?.requestApproval ?? options.requestApproval,
+		jobPollIntervalMs: options.jobs?.jobPollIntervalMs ?? options.jobPollIntervalMs,
 	};
-	/**
-	 * A closed Registry/Strategy alternative to the generic renderer's own open shape-probing
-	 * chain (vehicle-render.ts's singleArrayEnvelope/multiArrayEnvelope/recordEnvelope/... chain):
-	 * keyed by descriptor.name, each entry gets first refusal on rendering that operation's own
-	 * output, ahead of every generic shape guess. Unlike `renderers` (a full renderCall/renderResult
-	 * override that replaces the generic renderer entirely, including its projected-presentation
-	 * and partial-progress handling), a renderPresenters entry only customizes the final
-	 * output-to-Component step -- everything else (error rendering, partial progress, the
-	 * vehicle.tool-details/v1 projected-presentation path) still goes through the shared generic
-	 * renderer unchanged. Returning undefined from a presenter falls through to the generic
-	 * shape-probing chain, so a presenter never has to handle every possible shape its own
-	 * operation could produce. The real value: build this map via `satisfies
-	 * Record<YourOperationNameUnion, VehiclePresenter>` and the compiler itself rejects a
-	 * manifest operation with no assigned presenter -- exhaustiveness renderCoverage's own runtime
-	 * audit can only ever report on after the fact, never enforce ahead of time.
-	 */
-	readonly renderPresenters?: Readonly<Record<string, VehiclePresenter>>;
 }
 
 export interface RegisteredPiVehicleTool {
@@ -483,7 +524,8 @@ export interface InvocationContext {
 	readonly presentationProjector: PiVehiclePresentationProjector | undefined;
 }
 
-export async function buildInvocationContext(params: VehicleOperationInvocationParams): Promise<InvocationContext> {
+export async function buildInvocationContext(rawParams: VehicleOperationInvocationParams): Promise<InvocationContext> {
+	const params: VehicleOperationInvocationParams = { ...rawParams, options: normalizeRegisterVehicleToolsOptions(rawParams.options) };
 	const { manifest, descriptor, toolName, toolCallId, input, context, signal, onUpdate, options } = params;
 	const presentationProjector = params.presentationProjector ?? options.presentations?.(descriptor)?.projector;
 	const identity = vehicleIdentity(manifest, descriptor, toolCallId);
@@ -826,8 +868,9 @@ function reportRenderCoverageGaps(manifest: VehicleManifest, renderCoverage: Reg
 export async function registerVehicleTools(
 	pi: ExtensionAPI,
 	client: VehicleClient,
-	options: RegisterVehicleToolsOptions = {},
+	rawOptions: RegisterVehicleToolsOptions = {},
 ): Promise<RegisteredPiVehicle> {
+	const options = normalizeRegisterVehicleToolsOptions(rawOptions);
 	const { manifest, stale } = await resolveManifestForRegistration(client, options.manifestCache, options.handshake);
 	const projected = projectedNames(manifest, options.toolName ?? defaultToolName);
 	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
@@ -923,8 +966,9 @@ export async function refreshVehicleToolAvailability(
 	pi: ExtensionAPI,
 	client: VehicleClient,
 	registered: RegisteredPiVehicle,
-	options: RegisterVehicleToolsOptions = {},
+	rawOptions: RegisterVehicleToolsOptions = {},
 ): Promise<RegisteredPiVehicle> {
+	const options = normalizeRegisterVehicleToolsOptions(rawOptions);
 	const manifest = await client.manifest();
 	await persistManifestCache(options.manifestCache, manifest);
 	const projected = projectedNames(manifest, options.toolName ?? defaultToolName);

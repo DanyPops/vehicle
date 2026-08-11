@@ -22,6 +22,22 @@ import { sleep } from "./vehicle-pi-primitives.js";
  */
 export const DEFAULT_JOB_POLL_INTERVAL_MS = 500;
 
+/**
+ * registerVehicleTools()'s Vehicle Jobs polling options, grouped out of
+ * RegisterVehicleToolsOptions's own flat option list (see vehicle-pi.ts).
+ */
+export interface RegisterVehicleToolsJobOptions {
+	/**
+	 * How often invokeVehicleOperation polls a background-capable operation's Vehicle Job
+	 * (tailJob + pollJob) while it's still running -- unrelated to the tool call's own
+	 * unchanged single-call surface (see the module doc comment above runVehicleJobToCompletion).
+	 * Defaults to 500ms. Only ever consulted for an operation whose descriptor declares
+	 * `background` AND whose client exposes submitJob -- every other operation is invoked exactly
+	 * as before, one live client.invoke() call, this option never read.
+	 */
+	readonly jobPollIntervalMs?: number;
+}
+
 async function runVehicleJobToCompletion(
 	client: VehicleClient,
 	descriptor: VehicleOperationDescriptor,

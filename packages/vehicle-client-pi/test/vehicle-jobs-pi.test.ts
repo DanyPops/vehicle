@@ -38,7 +38,11 @@ function operation(overrides: Partial<VehicleManifestOperation> = {}): VehicleMa
 		limits,
 		errors: [],
 		available: true,
-		background: { supported: true, defaultWakeBudget: { maxCount: 50, maxBytes: 50_000 }, maxWakeBudget: { maxCount: 50, maxBytes: 50_000 } },
+		background: {
+			supported: true,
+			defaultWakeBudget: { maxCount: 50, maxBytes: 50_000 },
+			maxWakeBudget: { maxCount: 50, maxBytes: 50_000 },
+		},
 		...overrides,
 	};
 }
@@ -103,7 +107,10 @@ class FakeJobClient implements VehicleClient {
 	}
 
 	async tailJob(_jobId: string, cursor = 0): Promise<VehicleJobTailResult> {
-		return { entries: this.progressEntries.slice(cursor).map((progress, i) => ({ seq: cursor + i + 1, at: 0, progress })), cursor: this.progressEntries.length };
+		return {
+			entries: this.progressEntries.slice(cursor).map((progress, i) => ({ seq: cursor + i + 1, at: 0, progress })),
+			cursor: this.progressEntries.length,
+		};
 	}
 
 	async cancelJob(jobId: string): Promise<void> {
@@ -151,6 +158,27 @@ describe("invokeVehicleOperation: background-capable operation runs as a Vehicle
 		expect(client.invokeCalls).toHaveLength(0);
 		expect(client.submitCalls).toHaveLength(1);
 		expect(client.submitCalls[0]?.name).toBe("ci.wait");
+		expect((result.details as { output: unknown }).output).toEqual({ status: "success" });
+	});
+
+	it("options.jobs.jobPollIntervalMs behaves identically to the flat options.jobPollIntervalMs field", async () => {
+		const descriptor = operation();
+		const client = new FakeJobClient(manifestOf(descriptor));
+		client.succeed({ status: "success" });
+
+		const result = await invokeVehicleOperation({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "ci_wait",
+			toolCallId: "call-1",
+			input: { runId: "42" },
+			context: fakeContext(),
+			options: { jobs: { jobPollIntervalMs: 1 } },
+		});
+
+		expect(client.invokeCalls).toHaveLength(0);
+		expect(client.submitCalls).toHaveLength(1);
 		expect((result.details as { output: unknown }).output).toEqual({ status: "success" });
 	});
 

@@ -1633,6 +1633,92 @@ describe("registerVehicleTools", () => {
 	});
 });
 
+// RegisterVehicleToolsOptions's grouped shape (rendering/safety/approval/jobs), an additive
+// alternative to the flat fields above -- normalizeRegisterVehicleToolsOptions merges both
+// shapes before anything reads `options` internally, so each group must behave identically to
+// its flat counterpart, and the grouped value must win whenever both are supplied together.
+describe("RegisterVehicleToolsOptions grouped shape (rendering/safety/approval/jobs)", () => {
+	it("rendering.renderCoverage behaves identically to the flat renderCoverage field", async () => {
+		const client = new FakeClient(manifest([operation("tasks.create"), operation("tasks.mutation_status"), operation("tasks.run_gates")]));
+		const { pi } = fakePi();
+		const onGap = mock((_vehicleName: string, _gaps: readonly string[]) => {});
+		await registerVehicleTools(pi, client, { rendering: { renderCoverage: { operations: ["tasks.create"], onGap } } });
+		expect(onGap).toHaveBeenCalledTimes(1);
+		expect(onGap).toHaveBeenCalledWith("test-vehicle", ["tasks.mutation_status", "tasks.run_gates"]);
+	});
+
+	it("safety.safetyPolicyStore behaves identically to the flat safetyPolicyStore field", async () => {
+		const descriptor = operation("category.remove");
+		const client = new FakeClient(manifest([descriptor]));
+		const safetyPolicyStore = await VehicleSafetyPolicyStore.restore();
+		await safetyPolicyStore.set("test-vehicle", "category.remove", "ask");
+
+		await expect(
+			invokeVehicleOperation({
+				client,
+				manifest: client.value,
+				descriptor,
+				toolName: "web_category",
+				toolCallId: "call-1",
+				input: { value: "x" },
+				context: fakeContext({ hasUI: false }),
+				options: { safety: { safetyPolicyStore } },
+			}),
+		).rejects.toThrow(PiVehicleInvocationError);
+		expect(client.calls).toHaveLength(0);
+	});
+
+	it("approval.approvalPrompt behaves identically to the flat approvalPrompt field", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {
+			approval: {
+				approvalPrompt: (descriptor, input) =>
+					descriptor.name === "risk.destructive"
+						? { title: "Run the dangerous thing?", message: `About to run with ${JSON.stringify(input)}` }
+						: undefined,
+			},
+		});
+
+		const confirmCalls: Array<{ title: string; message: string }> = [];
+		await execute(tools[0]!, { value: "go" }, undefined, undefined, {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string, message: string) => {
+					confirmCalls.push({ title, message });
+					return true;
+				},
+			},
+		});
+
+		expect(confirmCalls).toEqual([{ title: "Run the dangerous thing?", message: 'About to run with {"value":"go"}' }]);
+	});
+
+	it("the grouped value wins when both the group and its flat counterpart are supplied together", async () => {
+		const descriptor = operation("category.remove");
+		const client = new FakeClient(manifest([descriptor]));
+		const groupStore = await VehicleSafetyPolicyStore.restore();
+		await groupStore.set("test-vehicle", "category.remove", "ask");
+		const flatStore = await VehicleSafetyPolicyStore.restore(); // left at its "allow" default -- no override recorded
+
+		// If the flat field won, this would proceed to invoke() normally (no override => "allow").
+		// The grouped field winning is what makes this reject instead.
+		await expect(
+			invokeVehicleOperation({
+				client,
+				manifest: client.value,
+				descriptor,
+				toolName: "web_category",
+				toolCallId: "call-1",
+				input: { value: "x" },
+				context: fakeContext({ hasUI: false }),
+				options: { safetyPolicyStore: flatStore, safety: { safetyPolicyStore: groupStore } },
+			}),
+		).rejects.toThrow(PiVehicleInvocationError);
+		expect(client.calls).toHaveLength(0);
+	});
+});
+
 describe("refreshVehicleToolAvailability", () => {
 	it("activates a tool whose operation just became available, without re-registering it", async () => {
 		const client = new FakeClient(manifest([operation("jira.search", 1, { available: false })]));

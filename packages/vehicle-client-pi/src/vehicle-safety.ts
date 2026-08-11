@@ -125,6 +125,30 @@ export function createFileVehicleSafetyPersistence(options: CreateFileVehicleSaf
 }
 
 /**
+ * registerVehicleTools()/refreshVehicleToolAvailability()'s safety-classification options,
+ * grouped out of RegisterVehicleToolsOptions's own flat option list (see vehicle-pi.ts) --
+ * moved here rather than into vehicle-safety-classification.ts because that file already
+ * imports RegisterVehicleToolsOptions FROM vehicle-pi.ts, and a type flowing back the other
+ * direction would create a real circular import; this file has no dependency on vehicle-pi.ts
+ * at all, so the grouping can live here safely instead.
+ */
+export interface RegisterVehicleToolsSafetyOptions {
+	/**
+	 * A human's own /safety overrides, consulted ahead of the effect-level default and the
+	 * permission-based check for both tool visibility (see syncManagedActiveTools) and the
+	 * local pre-invoke approval gate (see createTool's execute()).
+	 */
+	readonly safetyPolicyStore?: VehicleSafetyPolicyStore;
+	/**
+	 * Mirrors the server's own VehicleRegistry.configureApprovals() requireApprovalForEffects set
+	 * (see vehicle-server) so /safety's "ask" classification matches reality -- purely advisory
+	 * here: the server enforces its own copy regardless of what this option says. Defaults to
+	 * DEFAULT_APPROVAL_EFFECTS, the same default the server itself uses.
+	 */
+	readonly requireApprovalForEffects?: readonly VehicleEffect[];
+}
+
+/**
  * In-memory overrides, optionally durable via a VehicleSafetyPersistenceAdapter.
  * get() is always synchronous (a plain Map lookup) so registerVehicleTools/
  * refreshVehicleToolAvailability and the approval-gate check in vehicle-pi.ts
