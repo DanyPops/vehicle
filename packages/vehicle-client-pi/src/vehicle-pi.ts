@@ -1,4 +1,3 @@
-import { MutationOutcomeUnknownError, PreDispatchConnectionError } from "@danypops/vehicle-client/daemon-client";
 import type {
 	AtomicJsonFsAdapter,
 	JsonValue,
@@ -6,21 +5,13 @@ import type {
 	VehicleContentBlock,
 	VehicleEffect,
 	VehicleFailure,
-	VehicleIdempotency,
 	VehicleInvocationOptions,
 	VehicleManifest,
 	VehicleManifestOperation,
 	VehicleOperationDescriptor,
 	VehiclePrincipal,
 } from "@danypops/vehicle-core";
-import {
-	boundedCauseMessage,
-	createAtomicJsonWriter,
-	extractVehicleContent,
-	isVehicleError,
-	VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
-	VehicleError,
-} from "@danypops/vehicle-core";
+import { VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME } from "@danypops/vehicle-core";
 import type {
 	AgentToolUpdateCallback,
 	ExtensionAPI,
@@ -30,10 +21,27 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { ProgressBarGlyphStyle, ProgressBarGlyphs } from "malevich-tui-components";
 import type { TSchema } from "typebox";
-import { publishVehicleActivity } from "./activity-broker.js";
-import { reportClassificationFailure } from "./client-diagnostics.js";
-import { type PiApprovalAnswer, type PiHitlPresentation, requestPiApproval } from "./hitl-prompt.js";
+import type { PiHitlPresentation } from "./hitl-prompt.js";
 import { guardExtensionRuntimeInitialized, syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
+import { DEFAULT_JOB_POLL_INTERVAL_MS, invokeOrRunAsJob } from "./vehicle-job-polling.js";
+import { type LocalApprovalRequester, requestLocalApproval } from "./vehicle-local-approval.js";
+import {
+	persistManifestCache,
+	type RegisterVehicleToolsHandshakeOptions,
+	resolveManifestForRegistration,
+} from "./vehicle-manifest-handshake.js";
+import {
+	boundVehicleModelContent,
+	defaultToolName,
+	displayLabel,
+	formatJson,
+	modelContentFor,
+	operationKey,
+	permissionsSatisfied,
+	publishOperationActivity,
+	sleep,
+	vehicleIdentity,
+} from "./vehicle-pi-primitives.js";
 import { renderVehicleCall, renderVehicleResult } from "./vehicle-render.js";
 import {
 	assertJsonSafePresentation,
@@ -41,8 +49,14 @@ import {
 	projectGenericVehiclePresentation,
 	projectGenericVehicleProgress,
 } from "./vehicle-render-model.js";
-import { classifyVehicleOperationSafety, type VehicleSafetyPolicyStore, type VehicleSafetyState } from "./vehicle-safety.js";
-import { registerVehicleSafetyContributor } from "./vehicle-safety-registry.js";
+import type { VehicleSafetyPolicyStore, VehicleSafetyState } from "./vehicle-safety.js";
+import {
+	approvalRequestId,
+	contributeToSafetyRegistry,
+	PiVehicleInvocationError,
+	resolveSafetyState,
+	sanitizedFailure,
+} from "./vehicle-safety-classification.js";
 import {
 	applyVehicleShellActivation,
 	refreshVehicleShellManagedTools,
@@ -51,6 +65,14 @@ import {
 	type VehicleShellOptions,
 } from "./vehicle-shell.js";
 import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
+
+export type { LocalApprovalPrompt, LocalApprovalRequester, LocalApprovalRequestParams } from "./vehicle-local-approval.js";
+export type { RegisterVehicleToolsHandshakeOptions } from "./vehicle-manifest-handshake.js";
+export {
+	boundVehicleModelContent,
+	DEFAULT_MODEL_CONTENT_MAX_BYTES,
+} from "./vehicle-pi-primitives.js";
+export { PiVehicleInvocationError } from "./vehicle-safety-classification.js";
 
 export interface PiVehicleIdentity {
 	readonly name: string;
@@ -314,17 +336,6 @@ export interface RegisterVehicleToolsOptions {
 	};
 }
 
-export interface RegisterVehicleToolsHandshakeOptions {
-	/** Total attempts at the initial manifest fetch, including the first. Defaults to 4. */
-	readonly attempts?: number;
-	/** Delay before the second attempt. Defaults to 50ms. */
-	readonly initialDelayMs?: number;
-	/** No retry delay is ever allowed to exceed this. Defaults to 500ms. */
-	readonly maxDelayMs?: number;
-	/** Multiplier applied to the delay after each failed attempt. Defaults to 2.5. */
-	readonly growFactor?: number;
-}
-
 export interface RegisteredPiVehicleTool {
 	readonly toolName: string;
 	readonly operationName: string;
@@ -347,363 +358,12 @@ export interface RegisteredPiVehicle {
 	readonly shell?: VehicleShellHandle;
 }
 
-/** sanitizedFailure()'s own fallback code for a raw transport-level throw -- carries zero information on its own (every failure is "a vehicle client failed"), unlike a real domain code (not-found, validation, deadline-exceeded, ...) which is worth showing as-is. */
-const GENERIC_TRANSPORT_FAILURE_CODE = "vehicle-client-failed";
-
-/**
- * Renders failure.details' own primitive fields (e.g. a capacity failure's { actualBytes,
- * maxBytes }) into the same parenthesized annotation causeMessage already gets -- undefined for
- * anything else (no details, a non-object, an array, or an object with no primitive fields),
- * since an arbitrary nested JsonValue isn't safe to inline into a one-line error message.
- */
-function formatFailureDetails(details: VehicleFailure["details"]): string | undefined {
-	if (details === undefined || details === null || typeof details !== "object" || Array.isArray(details)) return undefined;
-	const parts = Object.entries(details)
-		.filter((entry): entry is [string, string | number | boolean] => {
-			const value = entry[1];
-			return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
-		})
-		.map(([key, value]) => `${key}=${value}`);
-	return parts.length === 0 ? undefined : parts.join(", ");
-}
-
-export class PiVehicleInvocationError extends Error {
-	constructor(
-		readonly failure: VehicleFailure,
-		/** The failing Vehicle's own manifest name (e.g. "papyrus") -- substituted for the generic transport-failure code so the visible message says which backend failed instead of repeating a label that's true of every such failure. */
-		vehicleName?: string,
-	) {
-		// causeMessage and details.{actualBytes,maxBytes} etc. were captured but never shown -- Pi
-		// surfaces this .message, not .failure, so a capacity failure otherwise gives no way to know
-		// how far over the cap the real payload was or what limit would fit.
-		const label = failure.code === GENERIC_TRANSPORT_FAILURE_CODE && vehicleName ? vehicleName : failure.code;
-		const annotations = [failure.causeMessage, formatFailureDetails(failure.details)].filter((part): part is string => part !== undefined);
-		const annotation = annotations.length === 0 ? "" : ` (${annotations.join("; ")})`;
-		super(`${label}: ${failure.message}${annotation}`);
-		this.name = "PiVehicleInvocationError";
-	}
-}
-
 /** A fail-closed local projection error. The operation already succeeded; raw output is intentionally not persisted as fallback. */
 export class PiVehiclePresentationProjectionError extends Error {
 	constructor(operation: string, cause: unknown) {
 		super(`Could not project bounded presentation details for ${operation}`, { cause });
 		this.name = "PiVehiclePresentationProjectionError";
 	}
-}
-
-/** How long a local HITL prompt stays open before auto-denying -- deliberately shorter than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses server-side while still mid-prompt locally. */
-const LOCAL_APPROVAL_PROMPT_TIMEOUT_MS = 2 * 60_000;
-
-function defaultToolName(descriptor: VehicleOperationDescriptor, versioned: boolean): string {
-	const base = descriptor.name
-		.toLowerCase()
-		.replace(/[^a-z0-9_]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
-	if (!base) throw new Error(`Vehicle operation ${descriptor.name}@${descriptor.version} has no valid Pi tool name`);
-	return versioned ? `${base}_v${descriptor.version}` : base;
-}
-
-function operationKey(descriptor: Pick<VehicleOperationDescriptor, "name" | "version">): string {
-	return `${descriptor.name}@${descriptor.version}`;
-}
-
-/**
- * Same superset check VehicleRegistry.invoke() already enforces at
- * invoke-time -- this is that same rule applied one step earlier, to tool
- * *visibility*, so a caller never sees a tool it has no permissions to call
- * in the first place. An operation with no declared permissions is always
- * satisfied, matching the registry's own "missing.length === 0" logic.
- */
-function permissionsSatisfied(required: readonly string[], granted: readonly string[] | undefined): boolean {
-	if (required.length === 0) return true;
-	const grantedSet = new Set(granted ?? []);
-	return required.every((permission) => grantedSet.has(permission));
-}
-
-function resolveSafetyState(
-	manifestName: string,
-	descriptor: VehicleManifestOperation,
-	options: RegisterVehicleToolsOptions,
-): VehicleSafetyState {
-	return classifyVehicleOperationSafety({
-		permissionsSatisfied: permissionsSatisfied(descriptor.permissions, options.permissions),
-		effect: descriptor.effect,
-		approvalRequired: descriptor.approvalRequired,
-		requireApprovalForEffects: options.requireApprovalForEffects ? new Set(options.requireApprovalForEffects) : undefined,
-		override: options.safetyPolicyStore?.get(manifestName, descriptor.name),
-	});
-}
-
-/**
- * Unconditional, matching the Activity Broker's own convention -- /safety
- * sees every Vehicle a session has registered without any extension needing
- * to wire itself in separately. Re-registering under the same manifest name
- * (a refresh) simply replaces the prior contributor's resolve() closure.
- */
-function contributeToSafetyRegistry(manifest: VehicleManifest, tools: readonly RegisteredPiVehicleTool[]): void {
-	registerVehicleSafetyContributor({
-		source: manifest.name,
-		resolve: () => ({
-			vehicleName: manifest.name,
-			tools: tools.map((tool) => ({
-				toolName: tool.toolName,
-				operationName: tool.operationName,
-				effect: tool.effect,
-				state: tool.safetyState,
-			})),
-		}),
-	});
-}
-
-function displayLabel(descriptor: VehicleOperationDescriptor): string {
-	return descriptor.name
-		.split(/[^a-zA-Z0-9]+/)
-		.filter(Boolean)
-		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(" ");
-}
-
-function formatJson(value: unknown): string {
-	const text = JSON.stringify(value, null, 2);
-	if (text === undefined) throw new Error("Vehicle returned a non-JSON result");
-	return text;
-}
-
-export const DEFAULT_MODEL_CONTENT_MAX_BYTES = 16 * 1024;
-const textEncoder = new TextEncoder();
-// biome-ignore lint/complexity/useRegexLiterals: a constructor avoids control-character lint on the equivalent literal.
-const ANSI_ESCAPE_PATTERN = new RegExp("\\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\\u0007]*(?:\\u0007|\\u001B\\\\))", "g");
-
-function utf8Bytes(text: string): number {
-	return textEncoder.encode(text).byteLength;
-}
-
-function truncateUtf8(text: string, maxBytes: number): string {
-	if (maxBytes <= 0) return "";
-	if (utf8Bytes(text) <= maxBytes) return text;
-	let low = 0;
-	let high = text.length;
-	while (low < high) {
-		const middle = Math.ceil((low + high) / 2);
-		if (utf8Bytes(text.slice(0, middle)) <= maxBytes) low = middle;
-		else high = middle - 1;
-	}
-	let end = low;
-	if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
-	return text.slice(0, end);
-}
-
-/** Applies the Pi transcript budget to semantic blocks and JSON fallback alike, stripping terminal-only ANSI first. */
-export function boundVehicleModelContent(
-	content: readonly VehicleContentBlock[],
-	maxBytes = DEFAULT_MODEL_CONTENT_MAX_BYTES,
-): readonly VehicleContentBlock[] {
-	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("modelContentMaxBytes must be a positive integer");
-	const clean = content.map((block) => ({ type: "text" as const, text: block.text.replace(ANSI_ESCAPE_PATTERN, "") }));
-	const totalBytes = clean.reduce((total, block) => total + utf8Bytes(block.text), 0);
-	if (totalBytes <= maxBytes) return clean;
-
-	const joined = clean.map((block) => block.text).join("\n\n");
-	let retained = Math.max(0, maxBytes - 96);
-	let prefix = truncateUtf8(joined, retained);
-	for (let attempt = 0; attempt < 4; attempt++) {
-		const omittedBytes = Math.max(0, utf8Bytes(joined) - utf8Bytes(prefix));
-		const notice = `\n\n[Vehicle model content truncated: omitted ${omittedBytes} UTF-8 bytes; complete=false]`;
-		retained = Math.max(0, maxBytes - utf8Bytes(notice));
-		prefix = truncateUtf8(joined, retained);
-		if (utf8Bytes(prefix) + utf8Bytes(notice) <= maxBytes) return [{ type: "text", text: `${prefix}${notice}` }];
-	}
-	const notice = `[Vehicle model content truncated; complete=false]`;
-	return [{ type: "text", text: truncateUtf8(notice, maxBytes) }];
-}
-
-function modelContentFor(output: unknown, maxBytes: number | undefined): readonly VehicleContentBlock[] {
-	const content = extractVehicleContent(output) ?? [{ type: "text" as const, text: formatJson(output) }];
-	return boundVehicleModelContent(content, maxBytes ?? DEFAULT_MODEL_CONTENT_MAX_BYTES);
-}
-
-function vehicleIdentity(manifest: VehicleManifest, descriptor: VehicleOperationDescriptor, toolCallId: string): PiVehicleIdentity {
-	return {
-		name: manifest.name,
-		version: manifest.version,
-		operation: descriptor.name,
-		operationVersion: descriptor.version,
-		toolCallId,
-	};
-}
-
-/**
- * Side-channel telemetry only -- a true no-op unless some other extension has
- * called registerActivityBroker() (see activity-broker.ts). Never gated
- * behind a RegisterVehicleToolsOptions flag: the broker's own absence is
- * already the opt-in mechanism, matching vstack's own unconditional-call
- * convention this primitive is ported from.
- */
-function publishOperationActivity(
-	kind: "started" | "completed" | "failed",
-	identity: PiVehicleIdentity,
-	descriptor: VehicleOperationDescriptor,
-	details?: Record<string, unknown>,
-): void {
-	publishVehicleActivity({
-		type: `vehicle.operation.${kind}`,
-		source: "vehicle",
-		severity: kind === "failed" ? "error" : kind === "completed" ? "success" : "info",
-		importance:
-			kind === "started" ? "noisy" : descriptor.effect === "destructive" || descriptor.effect === "open-world" ? "important" : "normal",
-		summary: `${operationKey(descriptor)} ${kind}`,
-		refs: {
-			vehicleName: identity.name,
-			operation: identity.operation,
-			operationVersion: identity.operationVersion,
-			toolCallId: identity.toolCallId,
-		},
-		details: { effect: descriptor.effect, ...details },
-		ts: new Date().toISOString(),
-	});
-}
-
-/** vehicle-core, vehicle-client/daemon-client, and this module's own PiVehicleInvocationError are always real classes in a correctly resolved install -- but a real live incident (a broken/duplicated dependency resolution putting one of them at `undefined`) turned every classification below into an uncaught `TypeError: Right-hand side of 'instanceof' is not an object`, crashing every single Vehicle error response, not just the one that first hit it. Treating a non-function right-hand side as simply "doesn't match" instead of throwing is the actual fix; classifyKnownFailure's own outer try/catch below is defense-in-depth for anything else this narrow guard doesn't cover (e.g. a poisoned prototype chain on `error` itself). */
-function safeInstanceOf(value: unknown, ctor: unknown): boolean {
-	return typeof ctor === "function" && value instanceof ctor;
-}
-
-/** The code sanitizedFailure() itself falls back to only when its own classification logic threw internally -- distinguishable from GENERIC_TRANSPORT_FAILURE_CODE (a real transport failure) so a caller/log can tell "the vehicle client has an internal bug" apart from "the network/daemon failed". Always paired with reportClassificationFailure so the failure is actually diagnosable, not just silently downgraded. */
-const CLASSIFICATION_FAILURE_CODE = "vehicle-client-classification-failed";
-
-/**
- * Real gap fixed here (papyrus task d0eb81b7): a MutationOutcomeUnknownError is thrown
- * uniformly by createReconnectingVehicleClient's callOnce() for EVERY invoke(), regardless of
- * the operation's own declared idempotency.mode -- a deliberate, documented choice at that
- * generic wire-level layer, which has no visibility into any one operation's semantics. This
- * function DOES have that visibility (the caller already resolved `descriptor`), so it's the
- * right place to correct the caller-facing symptom: a `mode: "safe"` operation (a plain read,
- * e.g. tasks.run_gates) that hits this exact ambiguous-transport-failure path was previously
- * indistinguishable from a genuine mutation -- same non-retryable classification, same message
- * implying an idempotency-key-backed receipt exists to inspect, even though a safe operation
- * never files one and never needs to. There is zero duplicate-side-effect risk in simply
- * retrying a safe operation directly, so it's marked retryable here and told so accurately.
- */
-function classifyKnownFailure(error: unknown, idempotencyMode?: VehicleIdempotency["mode"]): VehicleFailure | undefined {
-	// isVehicleError(), not `safeInstanceOf(error, VehicleError)`: the latter is a plain `instanceof`
-	// check, which fails whenever the error was constructed against a *different* physical
-	// @danypops/vehicle-core copy than the one this module imported -- a realistic outcome of
-	// ordinary semver-range drift across sibling packages in a real dependency tree (confirmed
-	// live: web-spider's own RemoteVehicleClient and vehicle-client-pi ended up with two vehicle-core
-	// installs). isVehicleError() uses vehicle-core's own Symbol.for(...) global-registry brand
-	// specifically so this recognizes a real VehicleError across duplicated installs; `instanceof`
-	// silently fell through to the generic, detail-free "vehicle-client-failed" fallback instead,
-	// discarding a real failure's own code/category/details.
-	if (isVehicleError(error)) return (error as VehicleError).toFailure();
-	if (safeInstanceOf(error, PiVehicleInvocationError)) return (error as PiVehicleInvocationError).failure;
-	if (safeInstanceOf(error, MutationOutcomeUnknownError) || safeInstanceOf(error, PreDispatchConnectionError)) {
-		const typed = error as MutationOutcomeUnknownError | PreDispatchConnectionError;
-		const causeMessage = boundedCauseMessage(typed.cause);
-		const isPreDispatch = safeInstanceOf(error, PreDispatchConnectionError);
-		const isAmbiguousSafeRead = !isPreDispatch && idempotencyMode === "safe";
-		return {
-			code: typed.code,
-			category: "unavailable",
-			message: isAmbiguousSafeRead
-				? `a safe, read-only operation's result could not be confirmed due to a transport failure -- safe to retry directly, no idempotency key needed${typed.operationId ? ` (${typed.operationId})` : ""}: ${typed.cause instanceof Error ? typed.cause.message : String(typed.cause)}`
-				: typed.message,
-			retryable: isPreDispatch || isAmbiguousSafeRead,
-			...(typed.operationId ? { details: { operationId: typed.operationId } } : {}),
-			...(causeMessage ? { causeMessage } : {}),
-		};
-	}
-	return undefined;
-}
-
-function sanitizedFailure(error: unknown, idempotencyMode?: VehicleIdempotency["mode"]): VehicleFailure {
-	try {
-		const known = classifyKnownFailure(error, idempotencyMode);
-		if (known) return known;
-	} catch (internalFailure) {
-		reportClassificationFailure(error, internalFailure);
-		return {
-			code: CLASSIFICATION_FAILURE_CODE,
-			category: "unavailable",
-			message: "Vehicle client failed to classify an invocation error (see vehicle-client-pi diagnostics)",
-			retryable: false,
-		};
-	}
-	// This branch only ever sees a raw transport-level throw (a stale/dead connection, a fetch()
-	// failure, a stream read error) -- never a domain rejection, which VehicleError already carries
-	// its own opt-in exposeCause for. Node's fetch() populates a TypeError's .cause with the real
-	// underlying reason (ECONNREFUSED, ECONNRESET, a DNS failure); a real live incident was
-	// diagnosable only as the opaque top-level "fetch failed" until this was captured.
-	const causeMessage = error instanceof Error ? boundedCauseMessage(error.cause) : undefined;
-	return {
-		code: GENERIC_TRANSPORT_FAILURE_CODE,
-		category: "unavailable",
-		message: error instanceof Error ? error.message : "Vehicle client invocation failed",
-		retryable: false,
-		...(causeMessage === undefined ? {} : { causeMessage }),
-	};
-}
-
-function approvalRequestId(failure: VehicleFailure): string | undefined {
-	const details = failure.details;
-	if (typeof details !== "object" || details === null || Array.isArray(details)) return undefined;
-	const requestId = (details as { requestId?: unknown }).requestId;
-	return typeof requestId === "string" ? requestId : undefined;
-}
-
-/**
- * The resolved title/message a local approval prompt is about to show -- either options.approvalPrompt's
- * own override, or the generic `Approve ${displayLabel}?` / raw-JSON-input default. Always fully resolved
- * by the time a LocalApprovalRequester sees it, unlike RegisterVehicleToolsOptions.approvalPrompt's own
- * return type, which is allowed to say undefined for "use the default".
- */
-export interface LocalApprovalPrompt {
-	readonly title: string;
-	readonly message: string;
-}
-
-export interface LocalApprovalRequestParams {
-	readonly descriptor: VehicleOperationDescriptor;
-	readonly input: unknown;
-	readonly signal?: AbortSignal;
-	readonly presentation?: PiHitlPresentation;
-	readonly prompt: LocalApprovalPrompt;
-}
-
-/**
- * Overrides the actual local-approval HITL mechanism itself -- distinct from options.approvalPrompt,
- * which only ever customizes the plain yes/no prompt's title/message text. A consumer wanting a
- * genuinely richer interaction (e.g. Approve/Deny presented via requestPiAskPrompt instead of
- * requestPiApproval's fixed two-item select, so a searchable/multi-option/freeform-reason shape is
- * possible) supplies this instead. Same contract as requestPiApproval itself: null (or a resolved
- * `{ approved: false }`) means denied; requestLocalApproval's own callers already treat any
- * non-approved answer, including null, identically.
- */
-export type LocalApprovalRequester = (context: ExtensionContext, params: LocalApprovalRequestParams) => Promise<PiApprovalAnswer | null>;
-
-/**
- * The local, fast-path half of the Approval Gate: VehicleRegistry always
- * records an approval.requested event first (durable, works even with no
- * UI at all); this is the optional synchronous prompt layered on top when
- * ctx.hasUI says one is actually possible. Denies (never throws) on any
- * failure -- a UI error must fail closed, not silently grant.
- */
-async function requestLocalApproval(
-	context: ExtensionContext,
-	descriptor: VehicleOperationDescriptor,
-	input: unknown,
-	signal: AbortSignal | undefined,
-	presentation: PiHitlPresentation | undefined,
-	promptOverride: { title: string; message: string } | undefined,
-	requester: LocalApprovalRequester | undefined,
-): Promise<PiApprovalAnswer | null> {
-	const { title, message } = promptOverride ?? {
-		title: `Approve ${displayLabel(descriptor)}?`,
-		message: `${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
-	};
-	if (requester) return requester(context, { descriptor, input, signal, presentation, prompt: { title, message } });
-	return requestPiApproval(context, { title, message, presentation, signal, timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS });
 }
 
 /**
@@ -801,99 +461,6 @@ export interface VehicleOperationInvocationResult {
  * shape while still calling through the same policy layer
  * registerVehicleTools() uses internally.
  */
-const DEFAULT_JOB_POLL_INTERVAL_MS = 500;
-
-/**
- * Runs a background-capable operation (descriptor.background.supported) to completion via Vehicle
- * Jobs -- submitJob once, then tailJob/pollJob in a loop until it settles -- instead of one
- * live client.invoke() held open for the operation's whole duration. Deliberately internal-polling,
- * not a separate submit/poll/cancel tool surface exposed to the model: invokeVehicleOperation's own
- * caller (createTool's execute()) sees no difference in shape from a plain invoke() call -- same
- * onProgress callback semantics (one call per new tail entry), same thrown-VehicleError-on-failure
- * contract, same final output. This is is the recommended default from this feature's own design
- * doc: an operation moving onto Jobs should be invisible to the model, not surface new tool calls
- * it has to learn to sequence itself.
- *
- * Falls back to a plain client.invoke() (via invokeOrRunAsJob, this function's own caller) whenever
- * the operation isn't background-capable, or the client doesn't expose submitJob at all -- so a
- * client that never wired up Vehicle Jobs (an older daemon, a minimal test double) degrades to
- * exactly today's behavior, not a hard failure.
- */
-async function runVehicleJobToCompletion(
-	client: VehicleClient,
-	descriptor: VehicleOperationDescriptor,
-	input: unknown,
-	invocation: VehicleInvocationOptions,
-	pollIntervalMs: number,
-): Promise<unknown> {
-	const { jobId } = await client.submitJob!(descriptor.name, descriptor.version, input, {
-		permissions: invocation.permissions,
-		principal: invocation.principal,
-		idempotencyKey: invocation.idempotencyKey,
-		expectedRevision: invocation.expectedRevision,
-		approvalCapability: invocation.approvalCapability,
-		correlationId: invocation.correlationId,
-		callerSessionId: invocation.callerSessionId,
-		callerProjectRoot: invocation.callerProjectRoot,
-	});
-
-	// The caller's own signal (deadline, an explicit cancel) still has to actually stop the job
-	// server-side -- Jobs run with no deadline of their own (see VehicleJobStore.submit's own doc
-	// comment), so nothing else would ever cancel it just because this loop stops polling.
-	const onAbort = (): void => void client.cancelJob?.(jobId);
-	invocation.signal?.addEventListener("abort", onAbort, { once: true });
-
-	try {
-		let cursor = 0;
-		for (;;) {
-			if (client.tailJob) {
-				const tail = await client.tailJob(jobId, cursor);
-				for (const entry of tail.entries) invocation.onProgress?.(entry.progress);
-				cursor = tail.cursor;
-			}
-
-			const snapshot = await client.pollJob!(jobId);
-			if (snapshot.status === "succeeded") return snapshot.output;
-			if (snapshot.status === "running") {
-				await sleep(pollIntervalMs);
-				continue;
-			}
-
-			// failed or canceled -- reconstruct the exact VehicleError a live invoke() would have
-			// thrown, so every existing catch site downstream (sanitizedFailure, the approval-retry
-			// dance) keeps working completely unchanged.
-			const failure =
-				snapshot.error ??
-				(snapshot.status === "canceled"
-					? { code: "job-canceled", category: "cancelled" as const, message: `Job ${jobId} was canceled`, retryable: false }
-					: { code: "job-failed", category: "internal" as const, message: `Job ${jobId} failed with no further detail`, retryable: false });
-			throw new VehicleError(failure.code, failure.message, {
-				category: failure.category,
-				retryable: failure.retryable,
-				retryAfterMs: failure.retryAfterMs,
-				details: failure.details,
-				operationId: failure.operationId,
-			});
-		}
-	} finally {
-		invocation.signal?.removeEventListener("abort", onAbort);
-	}
-}
-
-/** Dispatches to a Vehicle Job when both the operation and the client support it, otherwise a plain live invoke() -- the one seam every call site in invokeVehicleOperation goes through instead of calling client.invoke() directly. */
-function invokeOrRunAsJob(
-	client: VehicleClient,
-	descriptor: VehicleOperationDescriptor,
-	input: unknown,
-	invocation: VehicleInvocationOptions,
-	pollIntervalMs: number,
-): Promise<unknown> {
-	if (descriptor.background?.supported && client.submitJob && client.pollJob) {
-		return runVehicleJobToCompletion(client, descriptor, input, invocation, pollIntervalMs);
-	}
-	return client.invoke(descriptor.name, descriptor.version, input, invocation);
-}
-
 export async function invokeVehicleOperation(params: VehicleOperationInvocationParams): Promise<VehicleOperationInvocationResult> {
 	const { client, manifest, descriptor, toolName, toolCallId, input, context, signal, onUpdate, options } = params;
 	const presentationProjector = params.presentationProjector ?? options.presentations?.(descriptor)?.projector;
@@ -1135,93 +702,6 @@ function activateForeignVehicleOperation(
 	assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
 	pi.registerTool(createTool(vehicle.client, vehicle.manifest, descriptor, toolName, options));
 	return toolName;
-}
-
-/**
- * A live client.manifest() call is the source of truth whenever it succeeds --
- * on success, best-effort persists it to options.manifestCache for next time
- * (a failed cache write never fails registration). On failure, falls back to
- * the cached manifest if one exists (marking the result stale); with no cache
- * configured, or nothing cached yet, rethrows the original failure unchanged --
- * identical to registerVehicleTools' behavior before manifestCache existed.
- */
-const DEFAULT_HANDSHAKE_ATTEMPTS = 4;
-const DEFAULT_HANDSHAKE_INITIAL_DELAY_MS = 50;
-const DEFAULT_HANDSHAKE_MAX_DELAY_MS = 500;
-const DEFAULT_HANDSHAKE_GROW_FACTOR = 2.5;
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Jittered exponential backoff, same shape as connectPushChannel's own reconnect delay (vehicle-client/daemon-client.ts): +/-20% jitter prevents several concurrent Pi sessions from retrying a just-restarted daemon in lockstep. */
-function handshakeRetryDelayMs(attemptJustFailed: number, options: RegisterVehicleToolsHandshakeOptions | undefined): number {
-	const initialDelayMs = options?.initialDelayMs ?? DEFAULT_HANDSHAKE_INITIAL_DELAY_MS;
-	const maxDelayMs = options?.maxDelayMs ?? DEFAULT_HANDSHAKE_MAX_DELAY_MS;
-	const growFactor = options?.growFactor ?? DEFAULT_HANDSHAKE_GROW_FACTOR;
-	const raw = Math.min(initialDelayMs * growFactor ** (attemptJustFailed - 1), maxDelayMs);
-	return raw * (0.8 + Math.random() * 0.4);
-}
-
-/**
- * Retries client.manifest() itself, bounded, before resolveManifestForRegistration ever falls
- * back to a stale cache or rethrows -- see RegisterVehicleToolsOptions.handshake for why this
- * exists. A transient failure (the daemon mid-restart) recovers here without ever touching the
- * cache-fallback/throw path below; only a failure that outlasts every attempt reaches it.
- */
-async function fetchManifestWithHandshakeRetry(
-	client: VehicleClient,
-	handshake: RegisterVehicleToolsHandshakeOptions | undefined,
-): Promise<VehicleManifest> {
-	const attempts = Math.max(1, handshake?.attempts ?? DEFAULT_HANDSHAKE_ATTEMPTS);
-	for (let attempt = 1; attempt <= attempts; attempt++) {
-		try {
-			return await client.manifest();
-		} catch (error) {
-			if (attempt === attempts) throw error;
-			await sleep(handshakeRetryDelayMs(attempt, handshake));
-		}
-	}
-	// Unreachable: the loop above always either returns or throws on its final attempt.
-	throw new Error("fetchManifestWithHandshakeRetry: exhausted attempts without a terminal result");
-}
-
-async function resolveManifestForRegistration(
-	client: VehicleClient,
-	manifestCache: RegisterVehicleToolsOptions["manifestCache"],
-	handshake: RegisterVehicleToolsOptions["handshake"],
-): Promise<{ manifest: VehicleManifest; stale: boolean }> {
-	try {
-		const manifest = await fetchManifestWithHandshakeRetry(client, handshake);
-		if (manifestCache) {
-			try {
-				await createAtomicJsonWriter({ fs: manifestCache.fs }).write(manifestCache.filePath, manifest);
-			} catch {
-				// Best-effort: a failed cache write must never fail a successful registration/refresh.
-			}
-		}
-		return { manifest, stale: false };
-	} catch (error) {
-		if (!manifestCache) throw error;
-		let cached: unknown;
-		try {
-			cached = await createAtomicJsonWriter({ fs: manifestCache.fs }).read(manifestCache.filePath);
-		} catch {
-			cached = undefined;
-		}
-		if (cached === undefined) throw error;
-		return { manifest: cached as VehicleManifest, stale: true };
-	}
-}
-
-/** Best-effort cache refresh after a real live fetch -- never used to mask a failed live fetch (refreshVehicleToolAvailability's whole point is verifying against the daemon, so it keeps throwing on failure, matching its behavior before manifestCache existed; pi-status-refresh's own safeRefresh already tolerates that). */
-async function persistManifestCache(manifestCache: RegisterVehicleToolsOptions["manifestCache"], manifest: VehicleManifest): Promise<void> {
-	if (!manifestCache) return;
-	try {
-		await createAtomicJsonWriter({ fs: manifestCache.fs }).write(manifestCache.filePath, manifest);
-	} catch {
-		// Best-effort: a failed cache write must never fail a successful refresh.
-	}
 }
 
 /**
