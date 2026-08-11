@@ -345,7 +345,13 @@ describe("VehicleIdempotencyPolicy: persistence and restore", () => {
 		const policy = new VehicleIdempotencyPolicy({ persistence });
 		const registry = registryWithPolicy(policy, handler.binding);
 
-		registry.invoke("test.persist-pending", 1, {}, { idempotencyKey: "req-1" }); // never resolved -- simulates the daemon dying mid-request
+		// Never resolved -- simulates the daemon dying mid-request. The registry's own real 1000ms
+		// deadline WILL eventually reject this (LIMITS.defaultTimeoutMs above) since nothing ever
+		// settles the handler; swallow that expected, eventual rejection explicitly so it can't
+		// surface ~1s later as an unhandled rejection blamed on whatever unrelated test happens to
+		// be running at that moment (confirmed live: intermittently misattributed to a
+		// process-supervisor.test.ts test in CI).
+		registry.invoke("test.persist-pending", 1, {}, { idempotencyKey: "req-1" }).catch(() => {});
 		await policy.flushPersistence();
 
 		const restoredPolicy = new VehicleIdempotencyPolicy({ persistence });
