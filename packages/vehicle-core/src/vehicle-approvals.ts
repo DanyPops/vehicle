@@ -7,7 +7,22 @@
  * atomic-json.ts already uses for fs access.
  */
 import type { VehicleEffect, VehiclePrincipal } from "./vehicle-contract.js";
-import { defineVehicleEvent, defineVehicleSchema } from "./vehicle-contract.js";
+import { defineVehicleEvent, defineVehicleSchema, VEHICLE_EFFECTS } from "./vehicle-contract.js";
+
+/** A sha256 hex digest: exactly 64 lowercase hex characters -- matches hashApprovalInput's own (vehicle-server) output shape. */
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
+
+function isVehicleEffect(value: unknown): value is VehicleEffect {
+	return typeof value === "string" && (VEHICLE_EFFECTS as readonly string[]).includes(value);
+}
+
+function isVehiclePrincipal(value: unknown): value is VehiclePrincipal {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Record<string, unknown>;
+	if (typeof candidate.id !== "string") return false;
+	if (candidate.claims === undefined) return true;
+	return typeof candidate.claims === "object" && candidate.claims !== null && !Array.isArray(candidate.claims);
+}
 
 /** Set once at registry-configuration time (VehicleRegistry.configureApprovals()); never on a per-invoke basis. */
 export const DEFAULT_APPROVAL_EFFECTS: readonly VehicleEffect[] = ["destructive", "open-world"];
@@ -74,7 +89,8 @@ const requestedPayloadSchema = defineVehicleSchema<VehicleApprovalRequest>({
 			requestId: { type: "string" },
 			operationName: { type: "string" },
 			operationVersion: { type: "number" },
-			effect: { type: "string" },
+			effect: { type: "string", enum: [...VEHICLE_EFFECTS] },
+			principal: { type: "object" },
 			requestedAt: { type: "number" },
 			expiresAt: { type: "number" },
 			inputHash: { type: "string" },
@@ -89,12 +105,20 @@ const requestedPayloadSchema = defineVehicleSchema<VehicleApprovalRequest>({
 			typeof row.requestId !== "string" ||
 			typeof row.operationName !== "string" ||
 			typeof row.operationVersion !== "number" ||
-			typeof row.effect !== "string" ||
+			!Number.isInteger(row.operationVersion) ||
+			row.operationVersion < 1 ||
+			!isVehicleEffect(row.effect) ||
 			typeof row.requestedAt !== "number" ||
+			!Number.isFinite(row.requestedAt) ||
 			typeof row.expiresAt !== "number" ||
-			typeof row.inputHash !== "string"
+			!Number.isFinite(row.expiresAt) ||
+			typeof row.inputHash !== "string" ||
+			!SHA256_HEX_PATTERN.test(row.inputHash)
 		) {
 			return { success: false, issues: [{ path: [], message: "invalid approval request payload" }] };
+		}
+		if (row.principal !== undefined && !isVehiclePrincipal(row.principal)) {
+			return { success: false, issues: [{ path: ["principal"], message: "invalid approval request principal" }] };
 		}
 		return { success: true, value: row as unknown as VehicleApprovalRequest };
 	},
@@ -119,9 +143,16 @@ const resolvedPayloadSchema = defineVehicleSchema<VehicleApprovalOutcome>({
 		if (
 			typeof row.requestId !== "string" ||
 			(row.decision !== "granted" && row.decision !== "denied") ||
-			typeof row.decidedAt !== "number"
+			typeof row.decidedAt !== "number" ||
+			!Number.isFinite(row.decidedAt)
 		) {
 			return { success: false, issues: [{ path: [], message: "invalid approval outcome payload" }] };
+		}
+		if (row.decidedBy !== undefined && typeof row.decidedBy !== "string") {
+			return { success: false, issues: [{ path: ["decidedBy"], message: "decidedBy must be a string" }] };
+		}
+		if (row.comment !== undefined && typeof row.comment !== "string") {
+			return { success: false, issues: [{ path: ["comment"], message: "comment must be a string" }] };
 		}
 		return { success: true, value: row as unknown as VehicleApprovalOutcome };
 	},

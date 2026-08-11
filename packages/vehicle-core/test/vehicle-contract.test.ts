@@ -126,6 +126,59 @@ describe("defineLooseObjectSchema", () => {
 			additionalProperties: false,
 		});
 	});
+
+	it("rejects a property whose runtime value doesn't match its declared type -- the published jsonSchema type is enforced, not just documentation", () => {
+		const schema = defineLooseObjectSchema({ count: { type: "number" } });
+		expect(schema.safeParse({ count: "5" })).toEqual({
+			success: false,
+			issues: [{ path: ["count"], message: "count must be of type number" }],
+		});
+		expect(schema.safeParse({ count: 5 })).toEqual({ success: true, value: { count: 5 } });
+	});
+
+	it("rejects NaN/Infinity for a declared 'number' property -- a wrong type in disguise, not a valid number", () => {
+		const schema = defineLooseObjectSchema({ count: { type: "number" } });
+		expect(schema.safeParse({ count: Number.NaN }).success).toBe(false);
+		expect(schema.safeParse({ count: Number.POSITIVE_INFINITY }).success).toBe(false);
+	});
+
+	it("rejects a fractional value for a declared 'integer' property, accepting only a real integer", () => {
+		const schema = defineLooseObjectSchema({ count: { type: "integer" } });
+		expect(schema.safeParse({ count: 1.5 })).toEqual({
+			success: false,
+			issues: [{ path: ["count"], message: "count must be of type integer" }],
+		});
+		expect(schema.safeParse({ count: 1 })).toEqual({ success: true, value: { count: 1 } });
+	});
+
+	it("validates boolean, object, and array declared types for real", () => {
+		const schema = defineLooseObjectSchema({ flag: { type: "boolean" }, meta: { type: "object" }, tags: { type: "array" } });
+		expect(schema.safeParse({ flag: "yes" }).success).toBe(false);
+		expect(schema.safeParse({ meta: [] }).success).toBe(false); // an array is not a plain object
+		expect(schema.safeParse({ tags: {} }).success).toBe(false);
+		expect(schema.safeParse({ flag: true, meta: { a: 1 }, tags: [1, 2] })).toEqual({
+			success: true,
+			value: { flag: true, meta: { a: 1 }, tags: [1, 2] },
+		});
+	});
+
+	it("skips the type check entirely when the field is absent (not required), same as the existing enum-skip behavior", () => {
+		const schema = defineLooseObjectSchema({ count: { type: "number" } });
+		expect(schema.safeParse({})).toEqual({ success: true, value: {} });
+	});
+
+	it("rejects a property the schema never declared -- additionalProperties: false is enforced for real, not just advertised", () => {
+		const schema = defineLooseObjectSchema({ id: { type: "string" } }, ["id"]);
+		expect(schema.safeParse({ id: "abc", extra: "surprise" })).toEqual({
+			success: false,
+			issues: [{ path: ["extra"], message: "extra is not a recognized property" }],
+		});
+	});
+
+	it("still accepts a well-formed input with no extra properties, unaffected by the new checks", () => {
+		const schema = defineLooseObjectSchema({ id: { type: "string" }, count: { type: "number" } }, ["id"]);
+		expect(schema.safeParse({ id: "abc", count: 3 })).toEqual({ success: true, value: { id: "abc", count: 3 } });
+	});
 });
 
 describe("passthroughVehicleSchema", () => {

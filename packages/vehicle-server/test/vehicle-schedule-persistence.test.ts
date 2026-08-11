@@ -97,4 +97,34 @@ describe("createFileVehicleSchedulePersistence", () => {
 		const persistence = createFileVehicleSchedulePersistence({ filePath: "/state/schedules.json", fs });
 		await expect(persistence.load()).resolves.toBeUndefined();
 	});
+
+	it("load() discards an entry whose trigger is shaped right but carries a non-finite or non-positive value -- a corrupted trigger is exactly as unusable as a missing field", async () => {
+		for (const trigger of [
+			{ kind: "every", intervalMs: Number.NaN },
+			{ kind: "every", intervalMs: -1 },
+			{ kind: "every", intervalMs: 0 },
+			{ kind: "at", at: Number.POSITIVE_INFINITY },
+		]) {
+			const fs = createFakeFs();
+			fs.files.set(
+				"/state/schedules.json",
+				JSON.stringify({
+					version: 1,
+					savedAt: 1,
+					entries: [
+						{
+							scheduleId: "sched-1",
+							owner: "test-owner",
+							trigger,
+							action: { kind: "operation", name: "test.tick", version: 1, input: {} },
+							createdAt: 1,
+							nextFireAt: 1,
+						},
+					],
+				}),
+			);
+			const persistence = createFileVehicleSchedulePersistence({ filePath: "/state/schedules.json", fs });
+			await expect(persistence.load()).resolves.toBeUndefined();
+		}
+	});
 });

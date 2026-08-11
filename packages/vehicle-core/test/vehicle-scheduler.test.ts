@@ -1,5 +1,33 @@
 import { describe, expect, it } from "bun:test";
-import { initialFireAt, nextFireAtAfterFire, nextFireAtAfterRestore, VehicleScheduleLimitExceeded } from "../src/vehicle-scheduler.ts";
+import {
+	initialFireAt,
+	isValidVehicleScheduleTrigger,
+	nextFireAtAfterFire,
+	nextFireAtAfterRestore,
+	VehicleScheduleInvalidTriggerError,
+	VehicleScheduleLimitExceeded,
+} from "../src/vehicle-scheduler.ts";
+
+describe("isValidVehicleScheduleTrigger", () => {
+	it("accepts a real positive-finite 'at' or 'every' trigger", () => {
+		expect(isValidVehicleScheduleTrigger({ kind: "at", at: 5_000 })).toBe(true);
+		expect(isValidVehicleScheduleTrigger({ kind: "every", intervalMs: 10_000 })).toBe(true);
+	});
+
+	it("rejects a non-finite 'at' or 'intervalMs' -- NaN/Infinity would poison every arithmetic function downstream", () => {
+		expect(isValidVehicleScheduleTrigger({ kind: "at", at: Number.NaN })).toBe(false);
+		expect(isValidVehicleScheduleTrigger({ kind: "at", at: Number.POSITIVE_INFINITY })).toBe(false);
+		expect(isValidVehicleScheduleTrigger({ kind: "every", intervalMs: Number.NaN })).toBe(false);
+		expect(isValidVehicleScheduleTrigger({ kind: "every", intervalMs: Number.POSITIVE_INFINITY })).toBe(false);
+	});
+
+	it("rejects a zero or negative 'at' or 'intervalMs' -- a zero/negative interval would refire immediately forever", () => {
+		expect(isValidVehicleScheduleTrigger({ kind: "at", at: 0 })).toBe(false);
+		expect(isValidVehicleScheduleTrigger({ kind: "at", at: -1 })).toBe(false);
+		expect(isValidVehicleScheduleTrigger({ kind: "every", intervalMs: 0 })).toBe(false);
+		expect(isValidVehicleScheduleTrigger({ kind: "every", intervalMs: -1_000 })).toBe(false);
+	});
+});
 
 describe("initialFireAt", () => {
 	it("a one-shot 'at' trigger fires at its own declared time, independent of now", () => {
@@ -8,6 +36,12 @@ describe("initialFireAt", () => {
 
 	it("a recurring 'every' trigger's first fire is now + intervalMs", () => {
 		expect(initialFireAt({ kind: "every", intervalMs: 10_000 }, 1_000)).toBe(11_000);
+	});
+
+	it("throws VehicleScheduleInvalidTriggerError for a non-finite or non-positive trigger, rather than silently computing a poisoned fire time", () => {
+		expect(() => initialFireAt({ kind: "every", intervalMs: Number.NaN }, 1_000)).toThrow(VehicleScheduleInvalidTriggerError);
+		expect(() => initialFireAt({ kind: "every", intervalMs: -1 }, 1_000)).toThrow(VehicleScheduleInvalidTriggerError);
+		expect(() => initialFireAt({ kind: "at", at: Number.NaN }, 1_000)).toThrow(VehicleScheduleInvalidTriggerError);
 	});
 });
 

@@ -50,8 +50,33 @@ export class VehicleScheduleLimitExceeded extends Error {
 	}
 }
 
-/** The first fire time for a freshly created schedule. */
+/** Raised for a trigger whose own numeric field is non-finite, zero, or negative -- see isValidVehicleScheduleTrigger. A typed failure a caller can recognize by class, the same discoverability VehicleScheduleLimitExceeded already gives the capacity case. */
+export class VehicleScheduleInvalidTriggerError extends Error {
+	constructor(readonly trigger: VehicleScheduleTrigger) {
+		super(`Invalid Vehicle schedule trigger: ${JSON.stringify(trigger)}`);
+		this.name = "VehicleScheduleInvalidTriggerError";
+	}
+}
+
+/**
+ * Real validation for a VehicleScheduleTrigger's own numeric field -- `kind`/`at`/`intervalMs` are
+ * plain TypeScript types, never runtime-checked before this, so a wire or persisted trigger with a
+ * non-finite or non-positive value silently corrupted every arithmetic function below it:
+ * `now + NaN` poisons nextFireAt forever, `now + 0` or a negative intervalMs fires an "every"
+ * schedule again immediately on every tick (a respawn-storm-shaped bug), and a non-finite `at`
+ * breaks every `> now` comparison nextFireAtAfterRestore relies on. Both `at` and `intervalMs` are
+ * required to be a real, positive, finite number -- a wall-clock fire time or interval of zero,
+ * negative, NaN, or Infinity is never a legitimate schedule, only ever a wire/persistence defect.
+ */
+export function isValidVehicleScheduleTrigger(trigger: VehicleScheduleTrigger): boolean {
+	if (trigger.kind === "at") return Number.isFinite(trigger.at) && trigger.at > 0;
+	if (trigger.kind === "every") return Number.isFinite(trigger.intervalMs) && trigger.intervalMs > 0;
+	return false;
+}
+
+/** The first fire time for a freshly created schedule. Throws VehicleScheduleInvalidTriggerError if `trigger` isn't valid -- see isValidVehicleScheduleTrigger; callers at a real wire/persistence boundary should validate (and reject/discard) before ever reaching here, this is a last-resort guard against a caller that skipped that. */
 export function initialFireAt(trigger: VehicleScheduleTrigger, now: number): number {
+	if (!isValidVehicleScheduleTrigger(trigger)) throw new VehicleScheduleInvalidTriggerError(trigger);
 	return trigger.kind === "at" ? trigger.at : now + trigger.intervalMs;
 }
 

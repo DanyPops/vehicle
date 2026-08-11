@@ -8,7 +8,7 @@
  * snapshot.
  */
 import type { AtomicJsonFsAdapter, VehicleScheduleAction, VehicleScheduledEntry, VehicleScheduleTrigger } from "@danypops/vehicle-core";
-import { createAtomicJsonWriter } from "@danypops/vehicle-core";
+import { createAtomicJsonWriter, isValidVehicleScheduleTrigger } from "@danypops/vehicle-core";
 
 export interface VehicleSchedulePersistedSnapshot {
 	readonly version: 1;
@@ -22,12 +22,20 @@ export interface VehicleSchedulePersistenceAdapter {
 	load(): Promise<VehicleSchedulePersistedSnapshot | undefined>;
 }
 
+/**
+ * Shape AND value validity: a candidate whose `at`/`intervalMs` is non-finite, zero, or negative is
+ * exactly as unusable as one with the wrong field entirely -- see vehicle-core's own
+ * isValidVehicleScheduleTrigger for why (a corrupted persisted value silently poisons every fire-
+ * time computation downstream). Discarded here the same way any other malformed persisted record
+ * is: load() drops the whole snapshot rather than ever restoring a broken timer.
+ */
 function isVehicleScheduleTrigger(value: unknown): value is VehicleScheduleTrigger {
 	if (typeof value !== "object" || value === null) return false;
 	const candidate = value as Record<string, unknown>;
-	if (candidate.kind === "at") return typeof candidate.at === "number";
-	if (candidate.kind === "every") return typeof candidate.intervalMs === "number";
-	return false;
+	if (candidate.kind === "at" && typeof candidate.at !== "number") return false;
+	if (candidate.kind === "every" && typeof candidate.intervalMs !== "number") return false;
+	if (candidate.kind !== "at" && candidate.kind !== "every") return false;
+	return isValidVehicleScheduleTrigger(candidate as VehicleScheduleTrigger);
 }
 
 function isVehicleScheduleAction(value: unknown): value is VehicleScheduleAction {
