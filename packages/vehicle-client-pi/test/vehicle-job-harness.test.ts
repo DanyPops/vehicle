@@ -13,7 +13,16 @@ import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-wo
 import { Type } from "typebox";
 
 /**
- * Reproduces pi-pipes' real ci.wait bug against the actual vehicle-server
+ * Domain-neutral rename of this file's original ci-wait-job-harness.test.ts (pi-pipes' own ci.wait
+ * was the motivating bug, but this vehicle repo's own tests have no business naming a consumer's
+ * operation) -- kept once Vehicle Jobs' real wiring landed (runVehicleJobToCompletion in
+ * vehicle-pi.ts, exercised directly by vehicle-jobs-pi.test.ts, plus vehicle-client's own
+ * vehicle-jobs.test.ts local/HTTP parity suite) as an additional, lower-level demonstration: hand-
+ * registered submit/poll/tail/cancel tools via @danypops/pi-extension-harness, the explicit-tool-
+ * shape alternative invokeVehicleOperation's own doc comment mentions but does NOT use by default
+ * (internal polling behind an unchanged tool surface is the recommended, and now real, default).
+ *
+ * Reproduces pi-pipes' real historical ci.wait bug against the actual vehicle-server
  * VehicleRegistry (not a reimplementation): a longRunning: true operation's
  * own limits.maxTimeoutMs still hard-clamps invoke(), because longRunning
  * is descriptor metadata invoke() never reads. Then proves the framework's
@@ -64,19 +73,19 @@ function controllableWaitHandler() {
 }
 
 function registryWithOwner(): VehicleRegistry {
-	return new VehicleRegistry({ name: "ci-wait-harness", version: "1.0.0", description: "ci.wait job harness under test." });
+	return new VehicleRegistry({ name: "job-watch-harness", version: "1.0.0", description: "job.watch job harness under test." });
 }
 
-describe("ci.wait: reproduces the real invoke()-deadline-clamp bug", () => {
+describe("job.watch: reproduces the real invoke()-deadline-clamp bug", () => {
 	// Clamps regardless of the requested deadline, and really does abort a still-running handler.
 	it("clamps a longRunning invoke() to its own maxTimeoutMs", async () => {
 		const registry = registryWithOwner();
 		const wait = controllableWaitHandler();
 		const operation = defineVehicleOperation({
-			name: "ci.wait.legacy",
+			name: "job.watch.legacy",
 			version: 1,
 			description:
-				"The exact shape pipes-vehicle.ts registers ci.wait under today: longRunning: true sharing the generic read-operation LIMITS.",
+				"The exact shape pipes-vehicle.ts registers job.watch under today: longRunning: true sharing the generic read-operation LIMITS.",
 			input: runInput,
 			output: passthroughVehicleSchema,
 			effect: "read",
@@ -89,11 +98,11 @@ describe("ci.wait: reproduces the real invoke()-deadline-clamp bug", () => {
 			bindVehicleOperation(operation, () => wait.handler as never),
 		);
 
-		// Caller asks for far longer than maxTimeoutMs -- exactly ci_wait(timeoutS: 900) against
+		// Caller asks for far longer than maxTimeoutMs -- exactly a ci_wait(timeoutS: 900)-shaped call against
 		// a 30s-capped operation. effectiveDeadline() clamps to now + maxTimeoutMs regardless.
 		const requestedDeadline = Date.now() + 10_000;
 		const failure = await registry
-			.invoke("ci.wait.legacy", 1, { runId: "1" }, { deadline: requestedDeadline })
+			.invoke("job.watch.legacy", 1, { runId: "1" }, { deadline: requestedDeadline })
 			.catch((error: unknown) => error);
 
 		expect(isVehicleError(failure)).toBe(true);
@@ -105,27 +114,27 @@ describe("ci.wait: reproduces the real invoke()-deadline-clamp bug", () => {
 	});
 });
 
-/** Registers the job-backed ci_wait_* tools a real pi-pipes extension would expose once ci.wait moves onto Vehicle Jobs. */
-function registerCiWaitJobTools(pi: ExtensionAPI, jobStore: VehicleJobStore): void {
+/** Registers job-backed job_* tools by hand, the explicit-tool-shape alternative to invokeVehicleOperation's own default internal-polling behavior (see this file's own header comment). */
+function registerJobTools(pi: ExtensionAPI, jobStore: VehicleJobStore): void {
 	const textResult = (details: unknown): AgentToolResult<unknown> => ({
 		content: [{ type: "text", text: JSON.stringify(details) }],
 		details,
 	});
 
 	const submitTool: ToolDefinition = {
-		name: "ci_wait_submit",
-		label: "ci wait submit",
+		name: "job_submit",
+		label: "job submit",
 		description: "Starts watching a run in the background; returns a jobId immediately, never blocking on the run itself.",
 		parameters: Type.Object({ runId: Type.String() }),
 		async execute(_toolCallId, params: { runId: string }) {
-			const { jobId } = jobStore.submit("ci.wait", 1, { runId: params.runId }, { wakeBudget: JOB_WAKE_BUDGET });
+			const { jobId } = jobStore.submit("job.watch", 1, { runId: params.runId }, { wakeBudget: JOB_WAKE_BUDGET });
 			return textResult({ jobId });
 		},
 	};
 
 	const pollTool: ToolDefinition = {
-		name: "ci_wait_poll",
-		label: "ci wait poll",
+		name: "job_poll",
+		label: "job poll",
 		description: "Never blocks -- current job status, plus output/error once terminal.",
 		parameters: Type.Object({ jobId: Type.String() }),
 		async execute(_toolCallId, params: { jobId: string }) {
@@ -134,8 +143,8 @@ function registerCiWaitJobTools(pi: ExtensionAPI, jobStore: VehicleJobStore): vo
 	};
 
 	const tailTool: ToolDefinition = {
-		name: "ci_wait_tail",
-		label: "ci wait tail",
+		name: "job_tail",
+		label: "job tail",
 		description: "Progress entries since a cursor, plus the next cursor. Never blocks.",
 		parameters: Type.Object({ jobId: Type.String(), cursor: Type.Optional(Type.Number()) }),
 		async execute(_toolCallId, params: { jobId: string; cursor?: number }) {
@@ -144,8 +153,8 @@ function registerCiWaitJobTools(pi: ExtensionAPI, jobStore: VehicleJobStore): vo
 	};
 
 	const cancelTool: ToolDefinition = {
-		name: "ci_wait_cancel",
-		label: "ci wait cancel",
+		name: "job_cancel",
+		label: "job cancel",
 		description: "Best-effort cancellation of a still-running watch.",
 		parameters: Type.Object({ jobId: Type.String() }),
 		async execute(_toolCallId, params: { jobId: string }) {
@@ -157,14 +166,14 @@ function registerCiWaitJobTools(pi: ExtensionAPI, jobStore: VehicleJobStore): vo
 	for (const tool of [submitTool, pollTool, tailTool, cancelTool]) pi.registerTool(tool as ToolDefinition);
 }
 
-describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadline clamp", () => {
-	function harnessWithJobBackedCiWait() {
+describe("job.watch as a Vehicle Job: submit/poll/tail/cancel never hit any deadline clamp", () => {
+	function harnessWithJobBackedOperation() {
 		const registry = registryWithOwner();
 		const wait = controllableWaitHandler();
 		const operation = defineVehicleOperation({
-			name: "ci.wait",
+			name: "job.watch",
 			version: 1,
-			description: "ci.wait, moved onto Vehicle Jobs: submit/poll/tail/cancel by id instead of one blocking invoke().",
+			description: "job.watch, moved onto Vehicle Jobs: submit/poll/tail/cancel by id instead of one blocking invoke().",
 			input: runInput,
 			output: passthroughVehicleSchema,
 			effect: "read",
@@ -179,16 +188,16 @@ describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadli
 		);
 		const jobStore = new VehicleJobStore(registry);
 
-		const harness = createExtensionHarness((pi) => registerCiWaitJobTools(pi, jobStore));
+		const harness = createExtensionHarness((pi) => registerJobTools(pi, jobStore));
 		return { harness, wait, jobStore };
 	}
 
 	// No wait for the handler; no deadline to clamp.
-	it("ci_wait_submit returns a jobId immediately", async () => {
-		const { harness, wait } = harnessWithJobBackedCiWait();
+	it("job_submit returns a jobId immediately", async () => {
+		const { harness, wait } = harnessWithJobBackedOperation();
 		await harness.boot();
 
-		const submitted = (await harness.invokeTool("ci_wait_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
+		const submitted = (await harness.invokeTool("job_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
 		expect(typeof submitted.details.jobId).toBe("string");
 		await wait.started; // the job really did start running server-side
 
@@ -197,22 +206,22 @@ describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadli
 	});
 
 	// Neither call ever times out.
-	it("ci_wait_poll reports running, then succeeded with the handler's real output", async () => {
-		const { harness, wait } = harnessWithJobBackedCiWait();
+	it("job_poll reports running, then succeeded with the handler's real output", async () => {
+		const { harness, wait } = harnessWithJobBackedOperation();
 		await harness.boot();
 
-		const submitted = (await harness.invokeTool("ci_wait_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
+		const submitted = (await harness.invokeTool("job_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
 		const jobId = submitted.details.jobId;
 		await wait.started;
 
-		const runningPoll = (await harness.invokeTool("ci_wait_poll", { jobId })) as AgentToolResult<{ status: string }>;
+		const runningPoll = (await harness.invokeTool("job_poll", { jobId })) as AgentToolResult<{ status: string }>;
 		expect(runningPoll.details.status).toBe("running");
 
 		wait.succeed({ status: "success", conclusion: "success" });
 		await Promise.resolve(); // let the job's own .then() finalize before polling again
 		await Promise.resolve();
 
-		const terminalPoll = (await harness.invokeTool("ci_wait_poll", { jobId })) as AgentToolResult<{
+		const terminalPoll = (await harness.invokeTool("job_poll", { jobId })) as AgentToolResult<{
 			status: string;
 			output?: unknown;
 		}>;
@@ -222,18 +231,18 @@ describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadli
 		await harness.shutdown();
 	});
 
-	it("ci_wait_tail accumulates every progress tick, cursor advancing each time", async () => {
-		const { harness, wait } = harnessWithJobBackedCiWait();
+	it("job_tail accumulates every progress tick, cursor advancing each time", async () => {
+		const { harness, wait } = harnessWithJobBackedOperation();
 		await harness.boot();
 
-		const submitted = (await harness.invokeTool("ci_wait_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
+		const submitted = (await harness.invokeTool("job_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
 		const jobId = submitted.details.jobId;
 		await wait.started;
 
 		wait.tick({ status: "queued" });
 		wait.tick({ status: "in_progress" });
 
-		const firstTail = (await harness.invokeTool("ci_wait_tail", { jobId })) as AgentToolResult<{
+		const firstTail = (await harness.invokeTool("job_tail", { jobId })) as AgentToolResult<{
 			entries: { seq: number; progress: unknown }[];
 			cursor: number;
 		}>;
@@ -241,7 +250,7 @@ describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadli
 		expect(firstTail.details.cursor).toBe(2);
 
 		wait.tick({ status: "in_progress" }); // identical to the last tick -- default "transition" notify mode dedups it
-		const secondTail = (await harness.invokeTool("ci_wait_tail", {
+		const secondTail = (await harness.invokeTool("job_tail", {
 			jobId,
 			cursor: firstTail.details.cursor,
 		})) as AgentToolResult<{ entries: unknown[]; cursor: number }>;
@@ -252,15 +261,15 @@ describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadli
 		await harness.shutdown();
 	});
 
-	it("ci_wait_cancel stops a still-running watch instead of waiting it out", async () => {
-		const { harness, wait } = harnessWithJobBackedCiWait();
+	it("job_cancel stops a still-running watch instead of waiting it out", async () => {
+		const { harness, wait } = harnessWithJobBackedOperation();
 		await harness.boot();
 
-		const submitted = (await harness.invokeTool("ci_wait_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
+		const submitted = (await harness.invokeTool("job_submit", { runId: "42" })) as AgentToolResult<{ jobId: string }>;
 		const jobId = submitted.details.jobId;
 		await wait.started;
 
-		await harness.invokeTool("ci_wait_cancel", { jobId });
+		await harness.invokeTool("job_cancel", { jobId });
 		// The store's own AbortController fires synchronously; finalize() runs off the handler's
 		// rejection once it actually observes the abort -- simulate that observation here since
 		// this fixture's handler doesn't itself read the signal.
@@ -268,7 +277,7 @@ describe("ci.wait as a Vehicle Job: submit/poll/tail/cancel never hit any deadli
 		await Promise.resolve();
 		await Promise.resolve();
 
-		const poll = (await harness.invokeTool("ci_wait_poll", { jobId })) as AgentToolResult<{
+		const poll = (await harness.invokeTool("job_poll", { jobId })) as AgentToolResult<{
 			status: string;
 			terminationReason?: string;
 		}>;

@@ -24,6 +24,10 @@ import type {
 	VehicleEventHandler,
 	VehicleFailureCategory,
 	VehicleInvocationOptions,
+	VehicleJobSnapshot,
+	VehicleJobSubmitOptions,
+	VehicleJobSubmitResult,
+	VehicleJobTailResult,
 	VehicleManifest,
 	VehicleRecovery,
 	VehicleSubscription,
@@ -219,6 +223,44 @@ export class RemoteVehicleClient implements VehicleClient {
 	close(): Promise<void> {
 		this.closed = true;
 		return Promise.resolve();
+	}
+
+	/** Vehicle Jobs -- see VehicleClient's own doc comment. Mirrors invoke()'s own request/error conventions (Bearer auth, JSON body, VehicleError round trip). */
+	async submitJob(name: string, version: number, input: unknown, options: VehicleJobSubmitOptions = {}): Promise<VehicleJobSubmitResult> {
+		this.ensureOpen();
+		return this.postJobRequest<VehicleJobSubmitResult>("/vehicle/jobs/submit", { name, version, input, ...options });
+	}
+
+	async pollJob(jobId: string): Promise<VehicleJobSnapshot> {
+		this.ensureOpen();
+		return this.postJobRequest<VehicleJobSnapshot>("/vehicle/jobs/poll", { jobId });
+	}
+
+	async tailJob(jobId: string, cursor = 0): Promise<VehicleJobTailResult> {
+		this.ensureOpen();
+		return this.postJobRequest<VehicleJobTailResult>("/vehicle/jobs/tail", { jobId, cursor });
+	}
+
+	async steerJob(jobId: string, input: unknown): Promise<void> {
+		this.ensureOpen();
+		await this.postJobRequest<void>("/vehicle/jobs/steer", { jobId, input });
+	}
+
+	async cancelJob(jobId: string): Promise<void> {
+		this.ensureOpen();
+		await this.postJobRequest<void>("/vehicle/jobs/cancel", { jobId });
+	}
+
+	private async postJobRequest<Output>(path: string, body: Record<string, unknown>): Promise<Output> {
+		const response = await this.fetchImpl(`${this.options.baseUrl}${path}`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${this.options.token}`, "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		if (response.status === 204) return undefined as Output;
+		const payload = (await response.json().catch(() => undefined)) as (Output & { error?: FailurePayload }) | undefined;
+		if (!response.ok) throw this.errorFromPayload(payload as { error?: FailurePayload } | undefined);
+		return payload as Output;
 	}
 
 	private async invokePlain<Output>(body: Record<string, unknown>, signal: AbortSignal | undefined): Promise<Output> {

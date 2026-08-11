@@ -8,55 +8,26 @@ import {
 	VehicleError,
 	type VehicleFailure,
 	type VehicleJobEvictionCandidate,
-	type VehicleJobNotifyMode,
+	type VehicleJobSnapshot,
 	type VehicleJobStatus,
 	VehicleJobSteerChannel,
+	type VehicleJobSubmitOptions,
+	type VehicleJobTailResult,
 	type VehicleJobTerminationReason,
 	type VehicleJobWakeBudget,
-	type VehicleJobWakeEntry,
 	VehicleJobWakeLog,
 	type VehicleJobWakeLogReader,
 	type VehicleOperationContext,
-	type VehiclePrincipal,
 	vehicleJobIdentityMatches,
 } from "@danypops/vehicle-core";
 import type { VehicleJobPersistedSnapshot, VehicleJobPersistenceAdapter } from "./vehicle-job-persistence.js";
 import type { VehicleRegistry } from "./vehicle-registry.js";
 
-export interface VehicleJobSubmitOptions {
-	readonly permissions?: readonly string[];
-	readonly principal?: VehiclePrincipal;
-	readonly idempotencyKey?: string;
-	readonly expectedRevision?: string | number;
-	readonly approvalCapability?: string;
-	readonly correlationId?: string;
-	readonly callerSessionId?: string;
-	readonly callerProjectRoot?: string;
-	/** Defaults to "transition". */
-	readonly notifyMode?: VehicleJobNotifyMode;
-	/** Defaults to background.defaultWakeBudget; clamped to background.maxWakeBudget either way. */
-	readonly wakeBudget?: VehicleJobWakeBudget;
-	/** No default -- unset means the job runs until it settles or is canceled. */
-	readonly maxLifetimeMs?: number;
-}
-
-export interface VehicleJobSnapshot {
-	readonly jobId: string;
-	readonly operationName: string;
-	readonly operationVersion: number;
-	readonly status: VehicleJobStatus;
-	readonly createdAt: number;
-	readonly updatedAt: number;
-	readonly delivered: boolean;
-	readonly terminationReason?: VehicleJobTerminationReason;
-	readonly output?: unknown;
-	readonly error?: VehicleFailure;
-}
-
-export interface VehicleJobTailResult {
-	readonly entries: readonly VehicleJobWakeEntry[];
-	readonly cursor: number;
-}
+// VehicleJobSubmitOptions/VehicleJobSnapshot/VehicleJobTailResult now live in vehicle-core (see its
+// own doc comment) so vehicle-client's job-capable clients share one definition with this store
+// instead of a second, structurally-identical copy -- re-exported here for every existing importer
+// of these three names from @danypops/vehicle-server or @danypops/vehicle-server/jobs.
+export type { VehicleJobSnapshot, VehicleJobSubmitOptions, VehicleJobTailResult };
 
 export interface VehicleJobStoreOptions {
 	/** Defaults to Date.now. */

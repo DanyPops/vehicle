@@ -12,11 +12,23 @@ import type {
 	VehicleClient,
 	VehicleEventHandler,
 	VehicleInvocationOptions,
+	VehicleJobSnapshot,
+	VehicleJobSubmitOptions,
+	VehicleJobSubmitResult,
+	VehicleJobTailResult,
 	VehicleManifest,
 	VehicleSubscription,
 } from "@danypops/vehicle-core";
 import { VehicleError } from "@danypops/vehicle-core";
+import type { VehicleJobStore } from "@danypops/vehicle-server/jobs";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
+
+export interface LocalVehicleClientOptions {
+	/** Opts this client into Vehicle Jobs (submitJob/pollJob/tailJob/steerJob/cancelJob) -- built on this
+	 * same registry. Omitted (the default) means every job method throws jobs-not-configured, matching
+	 * RemoteVehicleClient's own 404 when its daemon never wired one up. */
+	jobStore?: VehicleJobStore;
+}
 
 /**
  * A `VehicleClient` that calls a same-process VehicleRegistry directly, no
@@ -27,8 +39,14 @@ import type { VehicleRegistry } from "@danypops/vehicle-server";
  */
 export class LocalVehicleClient implements VehicleClient {
 	private closed = false;
+	private readonly jobStore?: VehicleJobStore;
 
-	constructor(private readonly registry: VehicleRegistry) {}
+	constructor(
+		private readonly registry: VehicleRegistry,
+		options: LocalVehicleClientOptions = {},
+	) {
+		this.jobStore = options.jobStore;
+	}
 
 	// async, not a plain function returning Promise.resolve(...) -- ensureOpen()'s
 	// synchronous throw must become a rejected promise like every other
@@ -54,9 +72,44 @@ export class LocalVehicleClient implements VehicleClient {
 		return { close: unsubscribe };
 	}
 
+	/** Vehicle Jobs -- see VehicleClient's own doc comment. Delegates directly to this client's own jobStore, no wire involved, same as invoke() delegating to the registry. */
+	async submitJob(name: string, version: number, input: unknown, options?: VehicleJobSubmitOptions): Promise<VehicleJobSubmitResult> {
+		this.ensureOpen();
+		return this.requireJobStore().submit(name, version, input, options);
+	}
+
+	async pollJob(jobId: string): Promise<VehicleJobSnapshot> {
+		this.ensureOpen();
+		return this.requireJobStore().poll(jobId);
+	}
+
+	async tailJob(jobId: string, cursor = 0): Promise<VehicleJobTailResult> {
+		this.ensureOpen();
+		return this.requireJobStore().tail(jobId, cursor);
+	}
+
+	async steerJob(jobId: string, input: unknown): Promise<void> {
+		this.ensureOpen();
+		this.requireJobStore().steer(jobId, input);
+	}
+
+	async cancelJob(jobId: string): Promise<void> {
+		this.ensureOpen();
+		this.requireJobStore().cancel(jobId);
+	}
+
 	close(): Promise<void> {
 		this.closed = true;
 		return Promise.resolve();
+	}
+
+	private requireJobStore(): VehicleJobStore {
+		if (!this.jobStore) {
+			throw new VehicleError("jobs-not-configured", "This LocalVehicleClient was constructed without a VehicleJobStore", {
+				category: "unavailable",
+			});
+		}
+		return this.jobStore;
 	}
 
 	private ensureOpen(): void {

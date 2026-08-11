@@ -18,7 +18,7 @@ import {
 	extractVehicleContent,
 	isVehicleError,
 	VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
-	type VehicleError,
+	VehicleError,
 } from "@danypops/vehicle-core";
 import type {
 	AgentToolUpdateCallback,
@@ -282,6 +282,15 @@ export interface RegisterVehicleToolsOptions {
 	 * existing consumer that hasn't opted in.
 	 */
 	readonly shell?: VehicleShellOptions;
+	/**
+	 * How often invokeVehicleOperation polls a background-capable operation's Vehicle Job
+	 * (tailJob + pollJob) while it's still running -- unrelated to the tool call's own
+	 * unchanged single-call surface (see the module doc comment above runVehicleJobToCompletion).
+	 * Defaults to 500ms. Only ever consulted for an operation whose descriptor declares
+	 * `background` AND whose client exposes submitJob -- every other operation is invoked exactly
+	 * as before, one live client.invoke() call, this option never read.
+	 */
+	readonly jobPollIntervalMs?: number;
 }
 
 export interface RegisterVehicleToolsHandshakeOptions {
@@ -754,6 +763,99 @@ export interface VehicleOperationInvocationResult {
  * shape while still calling through the same policy layer
  * registerVehicleTools() uses internally.
  */
+const DEFAULT_JOB_POLL_INTERVAL_MS = 500;
+
+/**
+ * Runs a background-capable operation (descriptor.background.supported) to completion via Vehicle
+ * Jobs -- submitJob once, then tailJob/pollJob in a loop until it settles -- instead of one
+ * live client.invoke() held open for the operation's whole duration. Deliberately internal-polling,
+ * not a separate submit/poll/cancel tool surface exposed to the model: invokeVehicleOperation's own
+ * caller (createTool's execute()) sees no difference in shape from a plain invoke() call -- same
+ * onProgress callback semantics (one call per new tail entry), same thrown-VehicleError-on-failure
+ * contract, same final output. This is is the recommended default from this feature's own design
+ * doc: an operation moving onto Jobs should be invisible to the model, not surface new tool calls
+ * it has to learn to sequence itself.
+ *
+ * Falls back to a plain client.invoke() (via invokeOrRunAsJob, this function's own caller) whenever
+ * the operation isn't background-capable, or the client doesn't expose submitJob at all -- so a
+ * client that never wired up Vehicle Jobs (an older daemon, a minimal test double) degrades to
+ * exactly today's behavior, not a hard failure.
+ */
+async function runVehicleJobToCompletion(
+	client: VehicleClient,
+	descriptor: VehicleOperationDescriptor,
+	input: unknown,
+	invocation: VehicleInvocationOptions,
+	pollIntervalMs: number,
+): Promise<unknown> {
+	const { jobId } = await client.submitJob!(descriptor.name, descriptor.version, input, {
+		permissions: invocation.permissions,
+		principal: invocation.principal,
+		idempotencyKey: invocation.idempotencyKey,
+		expectedRevision: invocation.expectedRevision,
+		approvalCapability: invocation.approvalCapability,
+		correlationId: invocation.correlationId,
+		callerSessionId: invocation.callerSessionId,
+		callerProjectRoot: invocation.callerProjectRoot,
+	});
+
+	// The caller's own signal (deadline, an explicit cancel) still has to actually stop the job
+	// server-side -- Jobs run with no deadline of their own (see VehicleJobStore.submit's own doc
+	// comment), so nothing else would ever cancel it just because this loop stops polling.
+	const onAbort = (): void => void client.cancelJob?.(jobId);
+	invocation.signal?.addEventListener("abort", onAbort, { once: true });
+
+	try {
+		let cursor = 0;
+		for (;;) {
+			if (client.tailJob) {
+				const tail = await client.tailJob(jobId, cursor);
+				for (const entry of tail.entries) invocation.onProgress?.(entry.progress);
+				cursor = tail.cursor;
+			}
+
+			const snapshot = await client.pollJob!(jobId);
+			if (snapshot.status === "succeeded") return snapshot.output;
+			if (snapshot.status === "running") {
+				await sleep(pollIntervalMs);
+				continue;
+			}
+
+			// failed or canceled -- reconstruct the exact VehicleError a live invoke() would have
+			// thrown, so every existing catch site downstream (sanitizedFailure, the approval-retry
+			// dance) keeps working completely unchanged.
+			const failure =
+				snapshot.error ??
+				(snapshot.status === "canceled"
+					? { code: "job-canceled", category: "cancelled" as const, message: `Job ${jobId} was canceled`, retryable: false }
+					: { code: "job-failed", category: "internal" as const, message: `Job ${jobId} failed with no further detail`, retryable: false });
+			throw new VehicleError(failure.code, failure.message, {
+				category: failure.category,
+				retryable: failure.retryable,
+				retryAfterMs: failure.retryAfterMs,
+				details: failure.details,
+				operationId: failure.operationId,
+			});
+		}
+	} finally {
+		invocation.signal?.removeEventListener("abort", onAbort);
+	}
+}
+
+/** Dispatches to a Vehicle Job when both the operation and the client support it, otherwise a plain live invoke() -- the one seam every call site in invokeVehicleOperation goes through instead of calling client.invoke() directly. */
+function invokeOrRunAsJob(
+	client: VehicleClient,
+	descriptor: VehicleOperationDescriptor,
+	input: unknown,
+	invocation: VehicleInvocationOptions,
+	pollIntervalMs: number,
+): Promise<unknown> {
+	if (descriptor.background?.supported && client.submitJob && client.pollJob) {
+		return runVehicleJobToCompletion(client, descriptor, input, invocation, pollIntervalMs);
+	}
+	return client.invoke(descriptor.name, descriptor.version, input, invocation);
+}
+
 export async function invokeVehicleOperation(params: VehicleOperationInvocationParams): Promise<VehicleOperationInvocationResult> {
 	const { client, manifest, descriptor, toolName, toolCallId, input, context, signal, onUpdate, options } = params;
 	const presentationProjector = params.presentationProjector ?? options.presentations?.(descriptor)?.projector;
@@ -822,9 +924,10 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 		}
 	}
 
+	const jobPollIntervalMs = options.jobPollIntervalMs ?? DEFAULT_JOB_POLL_INTERVAL_MS;
 	let output: unknown;
 	try {
-		output = await client.invoke(descriptor.name, descriptor.version, input, baseInvocation);
+		output = await invokeOrRunAsJob(client, descriptor, input, baseInvocation, jobPollIntervalMs);
 	} catch (error) {
 		const failure = sanitizedFailure(error);
 		// The registry (once configureApprovals() is enabled there) records a
@@ -873,7 +976,13 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 		try {
-			output = await client.invoke(descriptor.name, descriptor.version, input, { ...baseInvocation, approvalCapability: capability });
+			output = await invokeOrRunAsJob(
+				client,
+				descriptor,
+				input,
+				{ ...baseInvocation, approvalCapability: capability },
+				jobPollIntervalMs,
+			);
 		} catch (retryError) {
 			const retryFailure = sanitizedFailure(retryError);
 			publishOperationActivity("failed", identity, descriptor, { code: retryFailure.code });

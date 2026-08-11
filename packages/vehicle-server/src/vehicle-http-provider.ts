@@ -9,7 +9,7 @@
  * (VehicleRegistry) export -- a consumer that only builds/tests a registry
  * has no reason to pull in HTTP request/response plumbing.
  * Daemon-side raw TypeScript, not part of any Pi-loaded compiled surface.
- * Three routes:
+ * Core routes:
  *   GET  /vehicle/manifest        -> the registry's current VehicleManifest
  *   POST /vehicle/invoke          -> invoke one operation; JSON by default,
  *                                    Server-Sent Events when the request
@@ -18,21 +18,46 @@
  *                                    response can only carry a final result)
  *   POST /vehicle/cancel          -> best-effort cancellation of a still-
  *                                    in-flight operationId
+ * Vehicle Jobs routes (only served when `jobStore` is configured; 404
+ * otherwise -- a host that never opts into background execution pays
+ * nothing extra and a client can't accidentally submit into a void):
+ *   POST /vehicle/jobs/submit     -> submit a background-capable operation,
+ *                                    returns { jobId } immediately
+ *   POST /vehicle/jobs/poll       -> current VehicleJobSnapshot by jobId,
+ *                                    never blocks
+ *   POST /vehicle/jobs/tail       -> progress entries since a cursor, plus
+ *                                    the next cursor, never blocks
+ *   POST /vehicle/jobs/steer      -> pushes new input to a running job's
+ *                                    handler
+ *   POST /vehicle/jobs/cancel     -> best-effort cancellation of a still-
+ *                                    running job by jobId (distinct from
+ *                                    /vehicle/cancel's operationId, which
+ *                                    only ever addresses a live invoke())
  *
  * Local/HTTP parity: every VehicleInvocationOptions field LocalVehicleClient
  * accepts is threaded through the wire body; the same VehicleError shape
  * comes back as a JSON `error` field with an HTTP status derived from its
  * category, so RemoteVehicleClient reconstructs the identical VehicleError
- * a local caller would have seen.
+ * a local caller would have seen. The same parity holds for jobs: every
+ * VehicleJobSubmitOptions field is threaded through, and job errors
+ * (job-not-found, job-steer-queue-full, ...) round-trip the same way.
  */
 import { randomUUID } from "node:crypto";
-import type { VehicleFailure, VehicleFailureCategory, VehicleInvocationOptions, VehiclePrincipal } from "@danypops/vehicle-core";
+import type {
+	VehicleFailure,
+	VehicleFailureCategory,
+	VehicleInvocationOptions,
+	VehicleJobSubmitOptions,
+	VehiclePrincipal,
+} from "@danypops/vehicle-core";
 import { isVehicleError } from "@danypops/vehicle-core";
 import { errorResponse, jsonResponse, requireBearerToken } from "./http.js";
 import type { Logger } from "./logging.js";
+import type { VehicleJobStore } from "./vehicle-job-store.js";
 import type { VehicleRegistry } from "./vehicle-registry.js";
 
 const UNAUTHORIZED_RESPONSE: Response = errorResponse("unauthorized", 401);
+const JOBS_NOT_SUPPORTED_RESPONSE: Response = errorResponse("Vehicle Jobs are not supported by this daemon", 404);
 
 const NOOP_LOGGER: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -48,6 +73,13 @@ export interface VehicleHttpProviderOptions {
 	 * returns, unrecoverable from any log. Pass a real logger to keep it.
 	 */
 	logger?: Logger;
+	/**
+	 * Opts this daemon into serving the /vehicle/jobs/* routes at all -- omitted (the default)
+	 * means every job route 404s, matching a host that never wired one up not paying any extra
+	 * surface. A host with background-capable operations passes its own VehicleJobStore, built on
+	 * this same `registry`.
+	 */
+	jobStore?: VehicleJobStore;
 }
 
 interface InvokeRequestBody {
@@ -139,6 +171,25 @@ export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fet
 
 			if (request.method === "POST" && url.pathname === "/vehicle/invoke") {
 				return handleInvoke(request, options.registry, inFlight, logger);
+			}
+
+			if (url.pathname.startsWith("/vehicle/jobs/")) {
+				if (!options.jobStore) return JOBS_NOT_SUPPORTED_RESPONSE;
+				if (request.method !== "POST") return errorResponse("not found", 404);
+				switch (url.pathname) {
+					case "/vehicle/jobs/submit":
+						return handleJobSubmit(request, options.jobStore);
+					case "/vehicle/jobs/poll":
+						return handleJobPoll(request, options.jobStore);
+					case "/vehicle/jobs/tail":
+						return handleJobTail(request, options.jobStore);
+					case "/vehicle/jobs/steer":
+						return handleJobSteer(request, options.jobStore);
+					case "/vehicle/jobs/cancel":
+						return handleJobCancel(request, options.jobStore);
+					default:
+						return errorResponse("not found", 404);
+				}
 			}
 
 			return errorResponse("not found", 404);
@@ -274,4 +325,109 @@ function streamInvoke(
 		},
 	});
 	return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+}
+
+interface JobSubmitRequestBody {
+	name?: unknown;
+	version?: unknown;
+	input?: unknown;
+	permissions?: unknown;
+	principal?: unknown;
+	idempotencyKey?: unknown;
+	expectedRevision?: unknown;
+	approvalCapability?: unknown;
+	correlationId?: unknown;
+	callerSessionId?: unknown;
+	callerProjectRoot?: unknown;
+	notifyMode?: unknown;
+	wakeBudget?: unknown;
+	maxLifetimeMs?: unknown;
+}
+
+function jobFailureResponse(error: unknown): Response {
+	const failure = toFailurePayload(error);
+	return jsonResponse({ error: failure }, { status: statusForCategory(failure.category) });
+}
+
+async function parseJsonBody<T>(request: Request): Promise<{ ok: true; body: T } | { ok: false; response: Response }> {
+	try {
+		return { ok: true, body: (await request.json()) as T };
+	} catch {
+		return { ok: false, response: errorResponse("invalid JSON body", 400) };
+	}
+}
+
+async function handleJobSubmit(request: Request, jobStore: VehicleJobStore): Promise<Response> {
+	const parsed = await parseJsonBody<JobSubmitRequestBody>(request);
+	if (!parsed.ok) return parsed.response;
+	const body = parsed.body;
+	if (typeof body.name !== "string" || typeof body.version !== "number") {
+		return errorResponse("name and version are required", 400);
+	}
+	const submitOptions: VehicleJobSubmitOptions = {
+		permissions: Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
+		principal: (body.principal as VehiclePrincipal | undefined) ?? undefined,
+		idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
+		expectedRevision: body.expectedRevision as string | number | undefined,
+		approvalCapability: typeof body.approvalCapability === "string" ? body.approvalCapability : undefined,
+		correlationId: typeof body.correlationId === "string" ? body.correlationId : undefined,
+		callerSessionId: typeof body.callerSessionId === "string" ? body.callerSessionId : undefined,
+		callerProjectRoot: typeof body.callerProjectRoot === "string" ? body.callerProjectRoot : undefined,
+		notifyMode: body.notifyMode as VehicleJobSubmitOptions["notifyMode"],
+		wakeBudget: body.wakeBudget as VehicleJobSubmitOptions["wakeBudget"],
+		maxLifetimeMs: typeof body.maxLifetimeMs === "number" ? body.maxLifetimeMs : undefined,
+	};
+	try {
+		const result = jobStore.submit(body.name, body.version, body.input, submitOptions);
+		return jsonResponse(result);
+	} catch (error) {
+		return jobFailureResponse(error);
+	}
+}
+
+async function handleJobPoll(request: Request, jobStore: VehicleJobStore): Promise<Response> {
+	const parsed = await parseJsonBody<{ jobId?: unknown }>(request);
+	if (!parsed.ok) return parsed.response;
+	if (typeof parsed.body.jobId !== "string") return errorResponse("jobId is required", 400);
+	try {
+		return jsonResponse(jobStore.poll(parsed.body.jobId));
+	} catch (error) {
+		return jobFailureResponse(error);
+	}
+}
+
+async function handleJobTail(request: Request, jobStore: VehicleJobStore): Promise<Response> {
+	const parsed = await parseJsonBody<{ jobId?: unknown; cursor?: unknown }>(request);
+	if (!parsed.ok) return parsed.response;
+	if (typeof parsed.body.jobId !== "string") return errorResponse("jobId is required", 400);
+	const cursor = typeof parsed.body.cursor === "number" ? parsed.body.cursor : 0;
+	try {
+		return jsonResponse(jobStore.tail(parsed.body.jobId, cursor));
+	} catch (error) {
+		return jobFailureResponse(error);
+	}
+}
+
+async function handleJobSteer(request: Request, jobStore: VehicleJobStore): Promise<Response> {
+	const parsed = await parseJsonBody<{ jobId?: unknown; input?: unknown }>(request);
+	if (!parsed.ok) return parsed.response;
+	if (typeof parsed.body.jobId !== "string") return errorResponse("jobId is required", 400);
+	try {
+		jobStore.steer(parsed.body.jobId, parsed.body.input);
+		return new Response(null, { status: 204 });
+	} catch (error) {
+		return jobFailureResponse(error);
+	}
+}
+
+async function handleJobCancel(request: Request, jobStore: VehicleJobStore): Promise<Response> {
+	const parsed = await parseJsonBody<{ jobId?: unknown }>(request);
+	if (!parsed.ok) return parsed.response;
+	if (typeof parsed.body.jobId !== "string") return errorResponse("jobId is required", 400);
+	try {
+		jobStore.cancel(parsed.body.jobId);
+		return new Response(null, { status: 204 });
+	} catch (error) {
+		return jobFailureResponse(error);
+	}
 }
