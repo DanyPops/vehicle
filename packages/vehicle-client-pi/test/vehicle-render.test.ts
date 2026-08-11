@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { VehicleEffect, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import { initTheme, Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Box, visibleWidth } from "@earendil-works/pi-tui";
+import { statelessComponent } from "malevich-tui-components";
 import { humanizeOperationName, pickIdentityArgument, renderVehicleCall, renderVehicleResult } from "../src/vehicle-render.ts";
 import { projectGenericVehiclePresentation } from "../src/vehicle-render-model.ts";
 
@@ -884,5 +885,75 @@ describe("renderVehicleResult", () => {
 		const lines = box.render(80);
 		expect(lines.length).toBeGreaterThan(0);
 		for (const line of lines) expect(visibleWidth(line)).toBe(80);
+	});
+
+	describe("renderPresenters (closed Registry/Strategy, opt-in)", () => {
+		it("a presenter registered for this operation's name renders instead of the generic shape-probing chain", () => {
+			const component = renderVehicleResult(
+				descriptor("read", { name: "my.custom_op" }),
+				{ content: [{ type: "text", text: "fallback" }], details: { output: { curated: true } } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+				undefined,
+				{ "my.custom_op": () => statelessComponent(() => ["CUSTOM PRESENTER RENDERED"]) },
+			);
+			expect(component.render(80).join("\n")).toBe("CUSTOM PRESENTER RENDERED");
+		});
+
+		it("an operation absent from the registry falls through to the generic chain, completely unaffected", () => {
+			const withoutRegistry = renderVehicleResult(
+				descriptor("read", { name: "issue.list" }),
+				{ content: [{ type: "text", text: "fallback" }], details: { output: { plain: "value" } } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+			);
+			const withUnrelatedRegistry = renderVehicleResult(
+				descriptor("read", { name: "issue.list" }),
+				{ content: [{ type: "text", text: "fallback" }], details: { output: { plain: "value" } } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+				undefined,
+				{ "a.totally.different.operation": () => statelessComponent(() => ["SHOULD NEVER RENDER"]) },
+			);
+			expect(withUnrelatedRegistry.render(80).join("\n")).toBe(withoutRegistry.render(80).join("\n"));
+		});
+
+		it("a presenter returning undefined (declines this particular output) falls through to the generic chain too", () => {
+			const withoutRegistry = renderVehicleResult(
+				descriptor("read", { name: "my.op" }),
+				{ content: [{ type: "text", text: "fallback" }], details: { output: "a plain string" } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+			);
+			const withDecliningPresenter = renderVehicleResult(
+				descriptor("read", { name: "my.op" }),
+				{ content: [{ type: "text", text: "fallback" }], details: { output: "a plain string" } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+				undefined,
+				{ "my.op": () => undefined },
+			);
+			expect(withDecliningPresenter.render(80).join("\n")).toBe(withoutRegistry.render(80).join("\n"));
+		});
+
+		it("a presenter wins even when the generic chain would have guessed a completely different rendering", () => {
+			// Two genuine domain arrays -- the generic chain would render this as two labeled
+			// sections (multiArrayEnvelope). A presenter for this operation overrides that entirely.
+			const component = renderVehicleResult(
+				descriptor("read", { name: "my.multi_array_op" }),
+				{ content: [{ type: "text", text: "fallback" }], details: { output: { added: [1, 2], removed: [3, 4] } } },
+				{ isPartial: false, expanded: false },
+				fakeTheme,
+				resultContext(),
+				undefined,
+				{ "my.multi_array_op": () => statelessComponent(() => ["PRESENTER WINS"]) },
+			);
+			expect(component.render(80).join("\n")).toBe("PRESENTER WINS");
+		});
 	});
 });

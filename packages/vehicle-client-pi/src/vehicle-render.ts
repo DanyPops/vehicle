@@ -588,13 +588,27 @@ function renderModelContentFallback(result: AgentToolResult<unknown>, options: T
 	});
 }
 
+/**
+ * A closed, compiler-verifiable alternative to the shape-probing chain below: a consumer types
+ * its own operation-name union and builds a `satisfies Record<OperationName, VehiclePresenter>`
+ * map (see RegisterVehicleToolsOptions.renderPresenters in vehicle-pi.ts), so TypeScript itself
+ * rejects a manifest operation with no assigned presenter at compile time, rather than that gap
+ * only ever being discoverable at runtime (which is all the opt-in renderCoverage diagnostic can
+ * do). Returning undefined means "this presenter doesn't have anything special for this output",
+ * falling through to the generic shape-probing chain -- a presenter is never required to handle
+ * every possible output shape for its own operation, only the ones worth curating.
+ */
+export type VehiclePresenter = (output: unknown, options: ToolRenderResultOptions, theme: Theme) => Component | undefined;
+
 export function renderVehicleResult(
-	_descriptor: VehicleOperationDescriptor,
+	descriptor: VehicleOperationDescriptor,
 	result: AgentToolResult<unknown>,
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	context: RenderResultContext,
 	progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle,
+	/** Keyed by descriptor.name (not versioned -- a presenter targets the operation's stable identity, matching renderCoverage's own operations list). Omitted (the default) preserves today's behavior for every existing consumer exactly. */
+	presenters?: Readonly<Record<string, VehiclePresenter>>,
 ): Component {
 	const details = result.details as { output?: unknown; progress?: unknown; presentation?: unknown } | undefined;
 	const projected = details && Object.hasOwn(details, "presentation") ? parseGenericVehiclePresentation(details.presentation) : undefined;
@@ -619,6 +633,16 @@ export function renderVehicleResult(
 
 	// Compatibility window for historical session rows persisted before vehicle.tool-details/v1.
 	const output = details.output;
+
+	// A registered presenter, if any, always gets first refusal -- a consumer with real domain
+	// knowledge of its own operation is more authoritative than any generic shape guess below,
+	// including the bare-scalar checks that immediately follow.
+	const presenter = presenters?.[descriptor.name];
+	if (presenter) {
+		const rendered = presenter(output, options, theme);
+		if (rendered) return rendered;
+	}
+
 	// A bare scalar previously fell to JSON.stringify below -- harmless for a number/boolean
 	// (identical to String()) but visibly wrong for a string, which JSON-quotes and
 	// backslash-escapes it (e.g. tasks.context's plain-text plan summary).

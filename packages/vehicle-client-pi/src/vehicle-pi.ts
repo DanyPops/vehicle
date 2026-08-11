@@ -42,7 +42,7 @@ import {
 	sleep,
 	vehicleIdentity,
 } from "./vehicle-pi-primitives.js";
-import { renderVehicleCall, renderVehicleResult } from "./vehicle-render.js";
+import { renderVehicleCall, renderVehicleResult, type VehiclePresenter } from "./vehicle-render.js";
 import {
 	assertJsonSafePresentation,
 	DEFAULT_PRESENTATION_MAX_BYTES,
@@ -334,6 +334,24 @@ export interface RegisterVehicleToolsOptions {
 		readonly operations: readonly string[];
 		readonly onGap?: (vehicleName: string, gaps: readonly string[]) => void;
 	};
+	/**
+	 * A closed Registry/Strategy alternative to the generic renderer's own open shape-probing
+	 * chain (vehicle-render.ts's singleArrayEnvelope/multiArrayEnvelope/recordEnvelope/... chain):
+	 * keyed by descriptor.name, each entry gets first refusal on rendering that operation's own
+	 * output, ahead of every generic shape guess. Unlike `renderers` (a full renderCall/renderResult
+	 * override that replaces the generic renderer entirely, including its projected-presentation
+	 * and partial-progress handling), a renderPresenters entry only customizes the final
+	 * output-to-Component step -- everything else (error rendering, partial progress, the
+	 * vehicle.tool-details/v1 projected-presentation path) still goes through the shared generic
+	 * renderer unchanged. Returning undefined from a presenter falls through to the generic
+	 * shape-probing chain, so a presenter never has to handle every possible shape its own
+	 * operation could produce. The real value: build this map via `satisfies
+	 * Record<YourOperationNameUnion, VehiclePresenter>` and the compiler itself rejects a
+	 * manifest operation with no assigned presenter -- exhaustiveness renderCoverage's own runtime
+	 * audit can only ever report on after the fact, never enforce ahead of time. Omitted (the
+	 * default) preserves today's generic-chain-only behavior exactly, for every existing consumer.
+	 */
+	readonly renderPresenters?: Readonly<Record<string, VehiclePresenter>>;
 }
 
 export interface RegisteredPiVehicleTool {
@@ -655,7 +673,7 @@ function createTool(
 			presentation?.renderResult ??
 			overrides?.renderResult ??
 			((result, resultOptions, theme, context) =>
-				renderVehicleResult(descriptor, result, resultOptions, theme, context, options.progressBarGlyphs)),
+				renderVehicleResult(descriptor, result, resultOptions, theme, context, options.progressBarGlyphs, options.renderPresenters)),
 		async execute(toolCallId, input, signal, onUpdate, context) {
 			const result = await invokeVehicleOperation({
 				client,
