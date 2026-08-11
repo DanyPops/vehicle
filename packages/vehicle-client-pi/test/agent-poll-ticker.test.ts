@@ -273,6 +273,75 @@ describe("reportAgentPollTick", () => {
 		};
 		expect(() => reportAgentPollTick(ticker, [], notifier)).not.toThrow();
 	});
+
+	describe("options.isIdle -- gating the entire tick on the agent genuinely not being mid-turn", () => {
+		it("ticks normally (backward compatible) when isIdle is omitted entirely", () => {
+			const ticker = new AgentPollTicker<Row>({
+				key: (r) => r.id,
+				buildVanishedMessage: (keys) => `gone: ${keys.join(",")}`,
+				now: () => 0,
+			});
+			const notifier = fakeNotifier();
+			reportAgentPollTick(ticker, [row("a")], notifier);
+			reportAgentPollTick(ticker, [], notifier);
+			expect(notifier.calls).toHaveLength(1);
+		});
+
+		it("ticks normally when isIdle returns true", () => {
+			const ticker = new AgentPollTicker<Row>({
+				key: (r) => r.id,
+				buildVanishedMessage: (keys) => `gone: ${keys.join(",")}`,
+				now: () => 0,
+			});
+			const notifier = fakeNotifier();
+			reportAgentPollTick(ticker, [row("a")], notifier, { isIdle: () => true });
+			reportAgentPollTick(ticker, [], notifier, { isIdle: () => true });
+			expect(notifier.calls).toHaveLength(1);
+		});
+
+		it("skips the entire tick -- never calls the notifier -- when isIdle returns false, even for a genuinely vanished row", () => {
+			const ticker = new AgentPollTicker<Row>({
+				key: (r) => r.id,
+				buildVanishedMessage: (keys) => `gone: ${keys.join(",")}`,
+				now: () => 0,
+			});
+			const notifier = fakeNotifier();
+			reportAgentPollTick(ticker, [row("a")], notifier, { isIdle: () => true }); // baseline, while idle
+			reportAgentPollTick(ticker, [], notifier, { isIdle: () => false }); // vanished mid-turn -- must stay silent
+			expect(notifier.calls).toEqual([]);
+		});
+
+		it("a tick skipped mid-turn leaves the ticker's own diff baseline untouched, so the vanish is still reported once idle genuinely returns", () => {
+			const ticker = new AgentPollTicker<Row>({
+				key: (r) => r.id,
+				buildVanishedMessage: (keys) => `gone: ${keys.join(",")}`,
+				now: () => 0,
+			});
+			const notifier = fakeNotifier();
+			reportAgentPollTick(ticker, [row("a")], notifier, { isIdle: () => true }); // baseline, while idle
+			reportAgentPollTick(ticker, [], notifier, { isIdle: () => false }); // vanished mid-turn -- skipped entirely, not just undelivered
+			expect(notifier.calls).toEqual([]);
+			reportAgentPollTick(ticker, [], notifier, { isIdle: () => true }); // idle again -- the diff resumes and reports it fresh
+			expect(notifier.calls).toHaveLength(1);
+			expect(notifier.calls[0]?.content).toContain("gone: a");
+		});
+
+		it("never re-fires a reminder for a row that only ever appeared present during a skipped mid-turn tick", () => {
+			let now = 0;
+			const ticker = new AgentPollTicker<Row>({
+				key: (r) => r.id,
+				buildVanishedMessage: () => "gone",
+				buildReminderMessage: (rows) => `still running: ${rows.map((r) => r.id).join(",")}`,
+				reminderIntervalMs: 1_000,
+				now: () => now,
+			});
+			const notifier = fakeNotifier();
+			reportAgentPollTick(ticker, [row("a")], notifier, { isIdle: () => true }); // baseline, while idle
+			now = 2_000; // past the reminder throttle
+			reportAgentPollTick(ticker, [row("a")], notifier, { isIdle: () => false }); // still running, but mid-turn -- must not remind
+			expect(notifier.calls).toEqual([]);
+		});
+	});
 });
 
 describe("createAgentNotifier", () => {

@@ -161,14 +161,29 @@ export function createAgentNotifier(pi: ExtensionAPI): AgentNotifier {
  * to pi.sendMessage() rather than pi.sendUserMessage() -- see this file's own top doc comment for
  * why that default no longer needs to be "steer" (sendUserMessage's own always-triggers-a-turn
  * footgun this default used to work around).
+ *
+ * `options.isIdle`, when given, gates the ENTIRE tick -- not just delivery -- on the agent
+ * genuinely not being mid-turn (a real ExtensionContext.isIdle() reading, not a guess). A poll
+ * landing while a tool call is still executing sees data that can go stale within moments;
+ * skipping ticker.tick() itself (not merely queuing its result for later) means the diff cleanly
+ * resumes against a known-stable baseline once idle returns, instead of either committing a
+ * mid-turn read to the ticker's own vanish/reminder bookkeeping or queuing a message about
+ * something the agent has no live context for by the time "followUp" actually delivers it.
+ * Confirmed live: a background poll ticking on its own fixed interval regardless of turn state
+ * queued a "this job just finished" notification for a job that died entirely within one long
+ * blocking turn (see pi-pipes' own job-ticker.ts flap report). Omitted (the default) preserves
+ * every existing caller's own prior always-tick behavior unchanged -- opt in by passing a real
+ * `() => ctx.isIdle()` at the call site once that caller's own poll loop can reach an
+ * ExtensionContext to ask.
  */
 export function reportAgentPollTick<Row>(
 	ticker: AgentPollTicker<Row>,
 	rows: readonly Row[],
 	notifier: AgentNotifier | undefined,
-	options: { deliverAs?: "steer" | "followUp" } = {},
+	options: { deliverAs?: "steer" | "followUp"; isIdle?: () => boolean } = {},
 ): void {
 	if (!notifier) return;
+	if (options.isIdle && !options.isIdle()) return;
 	let message: string | undefined;
 	try {
 		message = ticker.tick(rows);
