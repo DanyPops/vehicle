@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import diagnosticsChannel from "node:diagnostics_channel";
 import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import { MutationOutcomeUnknownError, PreDispatchConnectionError } from "@danypops/vehicle-client/daemon-client";
@@ -1446,6 +1446,69 @@ describe("registerVehicleTools", () => {
 		const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(256);
 		expect(text).toContain("complete=false");
+	});
+
+	describe("renderCoverage", () => {
+		it("omitted (the default) runs no audit at all -- zero behavior change", async () => {
+			const client = new FakeClient(manifest([operation("tasks.mutation_status")]));
+			const { pi } = fakePi();
+			const warn = spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				await registerVehicleTools(pi, client, {});
+				expect(warn).not.toHaveBeenCalled();
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it("reports no gap when every manifest operation is declared covered", async () => {
+			const client = new FakeClient(manifest([operation("tasks.create"), operation("tasks.list")]));
+			const { pi } = fakePi();
+			const onGap = mock(() => {});
+			await registerVehicleTools(pi, client, { renderCoverage: { operations: ["tasks.create", "tasks.list"], onGap } });
+			expect(onGap).not.toHaveBeenCalled();
+		});
+
+		it("reports every manifest operation absent from the declared covered set, by name, once", async () => {
+			const client = new FakeClient(
+				manifest([operation("tasks.create"), operation("tasks.mutation_status"), operation("tasks.run_gates")]),
+			);
+			const { pi } = fakePi();
+			const onGap = mock((_vehicleName: string, _gaps: readonly string[]) => {});
+			await registerVehicleTools(pi, client, { renderCoverage: { operations: ["tasks.create"], onGap } });
+			expect(onGap).toHaveBeenCalledTimes(1);
+			expect(onGap).toHaveBeenCalledWith("test-vehicle", ["tasks.mutation_status", "tasks.run_gates"]);
+		});
+
+		it("falls back to a console.warn naming the vehicle and every gap when onGap is omitted", async () => {
+			const client = new FakeClient(manifest([operation("tasks.mutation_status")]));
+			const { pi } = fakePi();
+			const warn = spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				await registerVehicleTools(pi, client, { renderCoverage: { operations: [] } });
+				expect(warn).toHaveBeenCalledTimes(1);
+				const message = warn.mock.calls[0]?.[0] as string;
+				expect(message).toContain("test-vehicle");
+				expect(message).toContain("tasks.mutation_status");
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it("a throwing onGap never breaks real tool registration -- a diagnostic, not a gate", async () => {
+			const client = new FakeClient(manifest([operation("tasks.mutation_status")]));
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, client, {
+				renderCoverage: {
+					operations: [],
+					onGap: () => {
+						throw new Error("boom");
+					},
+				},
+			});
+			expect(tools).toHaveLength(1);
+			expect(tools[0]!.name).toBe("tasks_mutation_status");
+		});
 	});
 });
 

@@ -291,6 +291,26 @@ export interface RegisterVehicleToolsOptions {
 	 * as before, one live client.invoke() call, this option never read.
 	 */
 	readonly jobPollIntervalMs?: number;
+	/**
+	 * Opt-in coverage audit: the real fix for a renderer-coverage gap silently degrading to
+	 * raw JSON forever, discovered live (papyrus's tasks.mutation_status had no curated
+	 * renderer, 15 of 41 tasks.* operations total). `operations` declares every operation name
+	 * this Vehicle's own `renderers`/`presentations` factory genuinely curates (renders as
+	 * something other than the generic Vehicle fallback) -- a static, explicit declaration
+	 * rather than trying to shape-probe a renderer's own runtime behavior, which would be
+	 * neither simple nor deterministic. Every manifest operation NOT in that set is reported
+	 * once, at registration time, to onGap (defaulting to a console.warn naming the vehicle and
+	 * every gap operation) -- turning a permanently invisible degradation into a visible signal
+	 * the moment a new/renamed operation ships without a curated renderer. Omitted (the default)
+	 * runs no audit at all -- zero behavior change for every existing consumer that hasn't
+	 * opted in. The improved generic fallback (vehicle-render.ts's recordEnvelope/
+	 * multiArrayEnvelope) already renders many "uncovered" shapes reasonably -- this audit is
+	 * about visibility into what's ACTUALLY still uncovered, not a claim that every gap is bad.
+	 */
+	readonly renderCoverage?: {
+		readonly operations: readonly string[];
+		readonly onGap?: (vehicleName: string, gaps: readonly string[]) => void;
+	};
 }
 
 export interface RegisterVehicleToolsHandshakeOptions {
@@ -976,13 +996,7 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 		try {
-			output = await invokeOrRunAsJob(
-				client,
-				descriptor,
-				input,
-				{ ...baseInvocation, approvalCapability: capability },
-				jobPollIntervalMs,
-			);
+			output = await invokeOrRunAsJob(client, descriptor, input, { ...baseInvocation, approvalCapability: capability }, jobPollIntervalMs);
 		} catch (retryError) {
 			const retryFailure = sanitizedFailure(retryError);
 			publishOperationActivity("failed", identity, descriptor, { code: retryFailure.code });
@@ -1226,6 +1240,27 @@ async function persistManifestCache(manifestCache: RegisterVehicleToolsOptions["
  * }
  * ```
  */
+
+/** Default onGap: one console.warn line naming the vehicle and every gap operation, so an
+ * un-audited operation is at minimum visible in whatever logs this process already writes
+ * to, without requiring a consumer to supply its own logger just to see anything at all. */
+function defaultRenderCoverageGapLogger(vehicleName: string, gaps: readonly string[]): void {
+	console.warn(`[${vehicleName}] operation(s) with no curated renderer (falls back to the generic Vehicle fallback): ${gaps.join(", ")}`);
+}
+
+/** Never throws -- a coverage audit is a diagnostic, not a gate; a bug in the audit itself
+ * must never prevent real registration from completing. */
+function reportRenderCoverageGaps(manifest: VehicleManifest, renderCoverage: RegisterVehicleToolsOptions["renderCoverage"]): void {
+	if (!renderCoverage) return;
+	try {
+		const covered = new Set(renderCoverage.operations);
+		const gaps = manifest.operations.map((operation) => operation.name).filter((name) => !covered.has(name));
+		if (gaps.length > 0) (renderCoverage.onGap ?? defaultRenderCoverageGapLogger)(manifest.name, gaps);
+	} catch {
+		// A broken audit must never break real tool registration.
+	}
+}
+
 export async function registerVehicleTools(
 	pi: ExtensionAPI,
 	client: VehicleClient,
@@ -1235,6 +1270,7 @@ export async function registerVehicleTools(
 	const projected = projectedNames(manifest, options.toolName ?? defaultToolName);
 	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
 	assertNamesAvailable(projected, runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
+	reportRenderCoverageGaps(manifest, options.renderCoverage);
 
 	for (const { descriptor, toolName } of projected) {
 		pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
