@@ -61,7 +61,7 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	const envPrefix = sortedEnvEntries(vehicle)
 		.map(([key, value]) => `set ${key}=${value}&& `)
 		.join("");
-	const argumentsText = `/d /s /c "set DAEMON_KIT_LAUNCH_PROVENANCE=service&& ${envPrefix}${commandText}"`;
+	const argumentsText = `/d /s /c "set VEHICLE_LAUNCH_PROVENANCE=service&& ${envPrefix}${commandText}"`;
 	const lines = [
 		'<?xml version="1.0" encoding="UTF-8"?>',
 		'<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',

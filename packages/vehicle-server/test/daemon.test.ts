@@ -38,9 +38,9 @@ function trivialApp() {
 
 describe("readLaunchProvenance / resolveIdleBudgetMs", () => {
 	it('reads a known provenance value from env, and "unknown" for anything else', () => {
-		expect(readLaunchProvenance({ DAEMON_KIT_LAUNCH_PROVENANCE: "auto-spawn" })).toBe("auto-spawn");
-		expect(readLaunchProvenance({ DAEMON_KIT_LAUNCH_PROVENANCE: "service" })).toBe("service");
-		expect(readLaunchProvenance({ DAEMON_KIT_LAUNCH_PROVENANCE: "garbage" })).toBe("unknown");
+		expect(readLaunchProvenance({ VEHICLE_LAUNCH_PROVENANCE: "auto-spawn" })).toBe("auto-spawn");
+		expect(readLaunchProvenance({ VEHICLE_LAUNCH_PROVENANCE: "service" })).toBe("service");
+		expect(readLaunchProvenance({ VEHICLE_LAUNCH_PROVENANCE: "garbage" })).toBe("unknown");
 		expect(readLaunchProvenance({})).toBe("unknown");
 	});
 
@@ -311,7 +311,7 @@ describe("startDaemon", () => {
 			handlePath,
 			lockPath,
 			buildApp: trivialApp,
-			env: { DAEMON_KIT_LAUNCH_PROVENANCE: "service" },
+			env: { VEHICLE_LAUNCH_PROVENANCE: "service" },
 			logger,
 			lockReclaim: {
 				isPidAlive: () => holderAlive,
@@ -338,7 +338,7 @@ describe("startDaemon", () => {
 				handlePath,
 				lockPath,
 				buildApp: trivialApp,
-				env: { DAEMON_KIT_LAUNCH_PROVENANCE: "service" },
+				env: { VEHICLE_LAUNCH_PROVENANCE: "service" },
 				lockReclaim: { isPidAlive: () => true, kill },
 			}),
 		).rejects.toBeInstanceOf(DaemonAlreadyRunningError);
@@ -359,7 +359,7 @@ describe("startDaemon", () => {
 				handlePath,
 				lockPath,
 				buildApp: trivialApp,
-				env: { DAEMON_KIT_LAUNCH_PROVENANCE: "auto-spawn" },
+				env: { VEHICLE_LAUNCH_PROVENANCE: "auto-spawn" },
 			}),
 		).rejects.toBeInstanceOf(DaemonAlreadyRunningError);
 	});
@@ -379,7 +379,7 @@ describe("startDaemon", () => {
 			daemonLabel: "Acme",
 			handlePath: join(dir, "service", "handle.json"),
 			buildApp: trivialApp,
-			env: { DAEMON_KIT_LAUNCH_PROVENANCE: "service" },
+			env: { VEHICLE_LAUNCH_PROVENANCE: "service" },
 		});
 		expect(serviceDaemon.idleBudgetMs).toBe(0);
 		await serviceDaemon.stop();
@@ -388,7 +388,7 @@ describe("startDaemon", () => {
 			daemonLabel: "Acme",
 			handlePath: join(dir, "auto", "handle.json"),
 			buildApp: trivialApp,
-			env: { DAEMON_KIT_LAUNCH_PROVENANCE: "auto-spawn" },
+			env: { VEHICLE_LAUNCH_PROVENANCE: "auto-spawn" },
 		});
 		expect(daemon.idleBudgetMs).toBe(DEFAULT_AUTO_SPAWN_IDLE_BUDGET_MS);
 	});
@@ -399,7 +399,7 @@ describe("startDaemon", () => {
 			daemonLabel: "Acme",
 			handlePath: join(dir, "handle.json"),
 			buildApp: trivialApp,
-			env: { DAEMON_KIT_LAUNCH_PROVENANCE: "service" },
+			env: { VEHICLE_LAUNCH_PROVENANCE: "service" },
 			idleBudgetMs: 12_345,
 		});
 		expect(daemon.idleBudgetMs).toBe(12_345);

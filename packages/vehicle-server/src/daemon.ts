@@ -108,7 +108,7 @@ export interface RunningDaemon {
  * compiled standalone with no imports of its own by design (see its module
  * doc comment), so it cannot depend on this module.
  */
-export const LAUNCH_PROVENANCE_ENV_VAR = "DAEMON_KIT_LAUNCH_PROVENANCE";
+export const LAUNCH_PROVENANCE_ENV_VAR = "VEHICLE_LAUNCH_PROVENANCE";
 export type LaunchProvenance = "auto-spawn" | "service" | "unknown";
 
 export function readLaunchProvenance(env: Record<string, string | undefined> = process.env): LaunchProvenance {

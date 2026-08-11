@@ -601,20 +601,20 @@ describe("spawnDetachedDaemon", () => {
 				capturedEnv = options.env;
 			},
 		});
-		expect(capturedEnv).toEqual({ DAEMON_KIT_LAUNCH_PROVENANCE: "auto-spawn", FOO: "bar" });
+		expect(capturedEnv).toEqual({ VEHICLE_LAUNCH_PROVENANCE: "auto-spawn", FOO: "bar" });
 	});
 
-	it("lets a caller-supplied DAEMON_KIT_LAUNCH_PROVENANCE override the auto-spawn default", () => {
+	it("lets a caller-supplied VEHICLE_LAUNCH_PROVENANCE override the auto-spawn default", () => {
 		let capturedEnv: Record<string, string | undefined> | undefined;
 		spawnDetachedDaemon({
 			binPath: "/cli.ts",
 			platform: "linux",
-			env: { DAEMON_KIT_LAUNCH_PROVENANCE: "service" },
+			env: { VEHICLE_LAUNCH_PROVENANCE: "service" },
 			spawn: (_command, _args, options) => {
 				capturedEnv = options.env;
 			},
 		});
-		expect(capturedEnv?.DAEMON_KIT_LAUNCH_PROVENANCE).toBe("service");
+		expect(capturedEnv?.VEHICLE_LAUNCH_PROVENANCE).toBe("service");
 	});
 
 	it("defaults args to an empty array when omitted", () => {

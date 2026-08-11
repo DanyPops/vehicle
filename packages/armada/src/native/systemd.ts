@@ -47,7 +47,7 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 		"",
 		"[Service]",
 		"Type=simple",
-		'Environment="DAEMON_KIT_LAUNCH_PROVENANCE=service"',
+		'Environment="VEHICLE_LAUNCH_PROVENANCE=service"',
 		...sortedEnvEntries(vehicle).map(([key, value]) => `Environment=${quote(`${key}=${value}`)}`),
 		`ExecStart=${[vehicle.executable, ...vehicle.arguments].map(quote).join(" ")}`,
 	);

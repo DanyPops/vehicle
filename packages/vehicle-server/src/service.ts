@@ -71,7 +71,7 @@ function shellQuote(value: string): string {
 // service-launched daemon versus a bounded default for a lazily
 // auto-spawned one. Not imported across those modules: pi-client.ts is
 // compiled standalone with no imports of its own by design.
-const LAUNCH_PROVENANCE_ENV_VAR = "DAEMON_KIT_LAUNCH_PROVENANCE";
+const LAUNCH_PROVENANCE_ENV_VAR = "VEHICLE_LAUNCH_PROVENANCE";
 
 function withServiceProvenance(env: Record<string, string> | undefined): Record<string, string> {
 	return { [LAUNCH_PROVENANCE_ENV_VAR]: "service", ...env };
@@ -151,7 +151,7 @@ function escapeXml(value: string): string {
  * set environment variables for the process it launches, unlike systemd's
  * `Environment=` or launchd's `EnvironmentVariables` dict -- so a
  * Windows-service-installed daemon does not receive
- * DAEMON_KIT_LAUNCH_PROVENANCE="service" the way Linux/macOS ones do. It
+ * VEHICLE_LAUNCH_PROVENANCE="service" the way Linux/macOS ones do. It
  * reports "unknown" instead, which resolveIdleBudgetMs() (daemon.ts)
  * already treats the same as "auto-spawn": a bounded idle-shutdown budget
  * rather than always-on. In practice this is not a correctness gap --

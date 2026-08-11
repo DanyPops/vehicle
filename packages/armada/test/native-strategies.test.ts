@@ -42,7 +42,7 @@ describe("native service strategies", () => {
 		if (!outcome.ok) return;
 		expect(String(outcome.descriptor.identity)).toBe("armada-papyrus.service");
 		expect(outcome.descriptor.fileName).toBe("armada-papyrus.service");
-		expect(outcome.descriptor.content).toContain('Environment="DAEMON_KIT_LAUNCH_PROVENANCE=service"');
+		expect(outcome.descriptor.content).toContain('Environment="VEHICLE_LAUNCH_PROVENANCE=service"');
 		expect(outcome.descriptor.content).toContain('ExecStart="/opt/Armada Vehicle/papyrus" "serve" "a value"');
 		expect(outcome.descriptor.content).toContain("Restart=on-failure");
 		expect(outcome.descriptor.content).toContain("StartLimitIntervalSec=60");
@@ -136,7 +136,7 @@ describe("native service strategies", () => {
 		);
 		expect(outcome.ok).toBe(true);
 		if (!outcome.ok) return;
-		expect(outcome.descriptor.content).toContain('Environment="DAEMON_KIT_LAUNCH_PROVENANCE=service"');
+		expect(outcome.descriptor.content).toContain('Environment="VEHICLE_LAUNCH_PROVENANCE=service"');
 		expect(outcome.descriptor.content).toContain('Environment="PATH=/abs/bin:/usr/bin"');
 		expect(outcome.descriptor.content).toContain('Environment="PI_BIN=/abs/path/pi"');
 	});
@@ -145,7 +145,7 @@ describe("native service strategies", () => {
 		const outcome = launchdStrategy.generateDescriptor(vehicle({ restart: { policy: "never" }, env: { PI_BIN: "/abs/path/pi" } }));
 		expect(outcome.ok).toBe(true);
 		if (!outcome.ok) return;
-		expect(outcome.descriptor.content).toContain("<key>DAEMON_KIT_LAUNCH_PROVENANCE</key>");
+		expect(outcome.descriptor.content).toContain("<key>VEHICLE_LAUNCH_PROVENANCE</key>");
 		expect(outcome.descriptor.content).toContain("<key>PI_BIN</key>");
 		expect(outcome.descriptor.content).toContain("<string>/abs/path/pi</string>");
 	});
@@ -157,8 +157,8 @@ describe("native service strategies", () => {
 		expect(outcome.ok).toBe(true);
 		if (!outcome.ok) return;
 		expect(outcome.descriptor.content).toContain("set PI_BIN=C:\\pi\\pi.exe");
-		expect(outcome.descriptor.content).toContain("set DAEMON_KIT_LAUNCH_PROVENANCE=service");
-		expect(outcome.descriptor.content.indexOf("DAEMON_KIT_LAUNCH_PROVENANCE")).toBeLessThan(outcome.descriptor.content.indexOf("PI_BIN"));
+		expect(outcome.descriptor.content).toContain("set VEHICLE_LAUNCH_PROVENANCE=service");
+		expect(outcome.descriptor.content.indexOf("VEHICLE_LAUNCH_PROVENANCE")).toBeLessThan(outcome.descriptor.content.indexOf("PI_BIN"));
 	});
 
 	it("fails launchd generation when bounded restart semantics are requested", () => {
@@ -183,7 +183,7 @@ describe("native service strategies", () => {
 		expect(outcome.descriptor.fileName).toBe("dev.danypops.armada.papyrus.plist");
 		expect(outcome.descriptor.content).toContain("<string>a&amp;b</string>");
 		expect(outcome.descriptor.content).toContain("<key>RunAtLoad</key>");
-		expect(outcome.descriptor.content).toContain("<key>DAEMON_KIT_LAUNCH_PROVENANCE</key>");
+		expect(outcome.descriptor.content).toContain("<key>VEHICLE_LAUNCH_PROVENANCE</key>");
 		expect(outcome.diagnostics).toMatchObject([{ code: "NATIVE_RESOURCE_UNSUPPORTED_OPTIONAL", severity: "warning" }]);
 	});
 
@@ -196,7 +196,7 @@ describe("native service strategies", () => {
 		expect(String(outcome.descriptor.identity)).toBe("\\Armada\\papyrus");
 		expect(outcome.descriptor.fileName).toBe("papyrus.xml");
 		expect(outcome.descriptor.content).toContain("<Command>cmd.exe</Command>");
-		expect(outcome.descriptor.content).toContain("DAEMON_KIT_LAUNCH_PROVENANCE=service");
+		expect(outcome.descriptor.content).toContain("VEHICLE_LAUNCH_PROVENANCE=service");
 		expect(outcome.descriptor.content).toContain("C:\\Program Files\\Papyrus\\papyrus.exe");
 		expect(outcome.descriptor.content).toContain("<Count>3</Count>");
 		expect(outcome.descriptor.content).toContain("<Interval>PT1S</Interval>");

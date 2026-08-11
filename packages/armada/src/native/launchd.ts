@@ -45,7 +45,7 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 		"  <true/>",
 		"  <key>EnvironmentVariables</key>",
 		"  <dict>",
-		...keyValue("DAEMON_KIT_LAUNCH_PROVENANCE", "service").map((line) => `  ${line.trimStart()}`),
+		...keyValue("VEHICLE_LAUNCH_PROVENANCE", "service").map((line) => `  ${line.trimStart()}`),
 		...sortedEnvEntries(vehicle).flatMap(([key, value]) => keyValue(key, value).map((line) => `  ${line.trimStart()}`)),
 		"  </dict>",
 	];

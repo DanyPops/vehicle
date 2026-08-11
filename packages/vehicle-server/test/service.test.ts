@@ -49,7 +49,7 @@ describe("legacy descriptor rendering", () => {
 	it("still renders deterministic systemd, launchd, and Windows descriptors for inspection", () => {
 		const rendered = { ...SPEC, env: { ACME_MODE: "test" } };
 		expect(generateSystemdUnit(rendered)).toContain('ExecStart="/opt/acme/cli.ts" "serve"');
-		expect(generateSystemdUnit(rendered)).toContain('Environment="DAEMON_KIT_LAUNCH_PROVENANCE=service"');
+		expect(generateSystemdUnit(rendered)).toContain('Environment="VEHICLE_LAUNCH_PROVENANCE=service"');
 		expect(generateSystemdUnit(rendered)).toContain("Restart=always");
 		expect(generateLaunchdPlist(rendered)).toContain("com.danypops.acme");
 		expect(windowsRunCommand(rendered)).toBe('"/opt/acme/cli.ts" "serve"');
