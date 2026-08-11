@@ -201,6 +201,36 @@ function keybindingHint(theme: Theme, keybindings: KeybindingsManager, keybindin
 	return `${theme.fg("dim", formatKeyList(keybindings.getKeys(keybinding)))}${theme.fg("muted", ` ${description}`)}`;
 }
 
+/**
+ * A dim horizontal rule spanning the box's own inner width -- the visual boundary between the
+ * read-only prompt pane (question/context) and the interactive mode pane (select list/editor)
+ * below it, replacing what used to be a single blank spacer row. Exported for direct unit
+ * coverage of this one pure, generic rule (exact width, dash-only, dim-wrapped) independent of
+ * AskComponent's own much larger layout-budgeting logic.
+ */
+export function renderSectionSeparator(theme: Theme, width: number): string {
+	return theme.fg("dim", "─".repeat(Math.max(0, width)));
+}
+
+/**
+ * The gating rule for showing that separator -- deliberately mode-agnostic (takes only the
+ * already-computed row budget and the two panes' own rendered line counts, never `this.mode`
+ * or anything else mode-specific), so the SAME rule structurally applies whether the caller is
+ * the select branch or the freeform/comment branch of renderBudgetedLayout, rather than each
+ * branch needing its own copy that could drift. Exported for direct, exhaustive unit coverage of
+ * this one small rule in isolation -- an end-to-end render-based test can't cleanly distinguish
+ * this separator from a mode pane's own internal border (e.g. pi-tui's Editor also renders a
+ * plain, corner-less `"─".repeat(width)` line for its own top/bottom border), but this pure
+ * function has no such ambiguity.
+ */
+export function shouldShowSectionSeparator(
+	separatorRows: number,
+	promptPaneLines: readonly string[],
+	modeLines: readonly string[],
+): boolean {
+	return separatorRows > 0 && promptPaneLines.length > 0 && modeLines.length > 0;
+}
+
 function literalHint(theme: Theme, key: string, description: string): string {
 	return `${theme.fg("dim", key)}${theme.fg("muted", ` ${description}`)}`;
 }
@@ -788,9 +818,16 @@ class AskComponent extends Container {
 
 		const promptPaneLines = this.renderPromptPane(promptLines, promptBudget, innerWidth);
 		const helpLines = this.limitLines(helpFullLines, helpBudget, innerWidth, false);
+		// A blank spacer row read fine when the prompt pane was always short (the common case before
+		// overlay could show much more context above it -- see OVERLAY_MAX_HEIGHT_RATIO's own history).
+		// With a real multi-line ticket/PR body now routinely filling that pane, the blank row alone no
+		// longer read as a boundary -- confirmed live: the read-only context and the interactive
+		// Approve/Deny choices looked like one undifferentiated block of text. A drawn rule reads as a
+		// boundary regardless of how much is above it. Applies identically to both branches above
+		// (select and freeform/comment) since both funnel through this one shared assembly point.
 		const bodyLines = [
 			...promptPaneLines,
-			...(separatorRows > 0 && promptPaneLines.length > 0 && modeLines.length > 0 ? [""] : []),
+			...(shouldShowSectionSeparator(separatorRows, promptPaneLines, modeLines) ? [renderSectionSeparator(this.theme, innerWidth)] : []),
 			...modeLines,
 			...helpLines,
 		];

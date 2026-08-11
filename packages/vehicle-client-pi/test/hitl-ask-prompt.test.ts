@@ -6,9 +6,11 @@ import {
 	ensureTypingCourtesyTracking,
 	isLiveAskPending,
 	isRecentlyTyping,
+	renderSectionSeparator,
 	requestPiAskPrompt,
 	resetTypingCourtesyTrackingForTests,
 	setTypingCourtesyTimingForTests,
+	shouldShowSectionSeparator,
 	waitForTypingCourtesy,
 } from "../src/hitl-ask-prompt.ts";
 import { OVERLAY_MAX_HEIGHT_RATIO } from "../src/hitl-prompt.ts";
@@ -781,5 +783,129 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 			expect(hostedAt).toBeGreaterThanOrEqual(35);
 			expect(answer).toEqual({ content: "Ship Friday", selected: ["Ship Friday"] });
 		});
+	});
+});
+
+/**
+ * Testing strategy for this generic rule (deliberately two tiers, not one):
+ *
+ * 1. shouldShowSectionSeparator/renderSectionSeparator are pure functions of plain values (row
+ *    counts, line arrays, a width) with no dependency on `this.mode` or any other AskComponent
+ *    state -- exhaustive table-driven coverage here proves the rule is genuinely mode-agnostic
+ *    (the same function, same inputs -> same output, regardless of which branch of
+ *    renderBudgetedLayout calls it) far more directly than inferring it from rendered output.
+ *
+ * 2. A real end-to-end render (through requestPiAskPrompt/AskComponent) still matters -- it's
+ *    the only way to catch a wiring mistake (e.g. the right pure functions used, but with the
+ *    wrong arguments, or never called at all). Scoped to select mode only: pi-tui's own Editor
+ *    component (used by the freeform/comment modes) renders its own plain, corner-less
+ *    `"─".repeat(width)` border line, which an end-to-end assertion cannot distinguish from this
+ *    module's own separator by content shape alone -- exactly the ambiguity tier 1 exists to
+ *    route around instead of fighting.
+ */
+describe("shouldShowSectionSeparator: the generic (mode-agnostic) gating rule for the visual boundary between the prompt pane and the mode pane", () => {
+	it.each([
+		[1, ["question"], ["1. Approve"], true],
+		[0, ["question"], ["1. Approve"], false],
+		[1, [], ["1. Approve"], false],
+		[1, ["question"], [], false],
+		[0, [], [], false],
+		[2, ["question", "context line"], ["1. Approve", "2. Deny"], true],
+	] as const)(
+		"separatorRows=%p, promptPaneLines.length=%p's lines, modeLines=%p's lines -> %p",
+		(separatorRows, promptPaneLines, modeLines, expected) => {
+			expect(shouldShowSectionSeparator(separatorRows, promptPaneLines, modeLines)).toBe(expected);
+		},
+	);
+
+	it("is false for a negative separatorRows too -- only a genuinely positive budget counts, not merely non-zero", () => {
+		expect(shouldShowSectionSeparator(-1, ["question"], ["1. Approve"])).toBe(false);
+	});
+});
+
+describe("renderSectionSeparator: a dim horizontal rule, pure and generic in its own right", () => {
+	it("spans exactly the given width using only the dash character, wrapped through theme.fg('dim', ...)", () => {
+		const calls: Array<{ color: string; text: string }> = [];
+		const spyTheme = { ...theme, fg: (color: string, text: string) => (calls.push({ color, text }), text) } as Theme;
+		expect(renderSectionSeparator(spyTheme, 10)).toBe("──────────");
+		expect(calls).toEqual([{ color: "dim", text: "──────────" }]);
+	});
+
+	it.each([
+		[1, "─"],
+		[5, "─────"],
+		[0, ""],
+		[-1, ""],
+		[-100, ""],
+	])("width=%p -> %p (never throws or goes negative-length)", (width, expected) => {
+		expect(renderSectionSeparator(theme, width)).toBe(expected);
+	});
+});
+
+describe("the section separator, end to end through a real AskComponent (select mode only -- see the strategy note above for why)", () => {
+	/** A line that is purely a rule: optionally framed by the box's own "│ "/" │" padding, never the
+	 * outer box's own ╭/╮/╰/╯-cornered top/bottom border, and never real question/option text (which
+	 * always contains letters). Generic across whatever exact width the box happens to render at --
+	 * deliberately not tied to a hardcoded column count. */
+	const isSectionSeparatorLine = (line: string) => /^[│\s]*─{5,}[│\s]*$/.test(line);
+
+	async function captureIntegratedLines(
+		rows: number,
+		params: { question: string; context?: string; options: Array<{ title: string }> },
+	): Promise<string[]> {
+		const tui = { terminal: { rows }, requestRender: () => {} };
+		const base = interactiveCtx([]);
+		let component: { render: (w: number) => string[]; handleInput: (data: string) => void } | undefined;
+		const captureCtx = {
+			...base,
+			ui: {
+				...(base as any).ui,
+				setEditorComponent: (factory: any) => {
+					if (!factory) return;
+					component = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				},
+			},
+		} as unknown as ExtensionContext;
+		const pending = requestPiAskPrompt(captureCtx, { ...params, presentation: "integrated" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const lines = component!.render(100);
+		component!.handleInput(ESCAPE); // cancel without submitting -- the captured lines are already in hand
+		await pending;
+		return lines;
+	}
+
+	it("appears strictly between the context text and the select list when both are shown and there's room", async () => {
+		const lines = await captureIntegratedLines(40, {
+			question: "Approve?",
+			context: "Some background info about this request.",
+			options: [{ title: "Approve" }, { title: "Deny" }],
+		});
+		const contextIndex = lines.findIndex((line) => line.includes("Some background info about this request."));
+		const filterIndex = lines.findIndex((line) => line.includes("Filter:"));
+		const separatorIndex = lines.findIndex(isSectionSeparatorLine);
+		expect(contextIndex).toBeGreaterThanOrEqual(0);
+		expect(filterIndex).toBeGreaterThan(contextIndex);
+		expect(separatorIndex).toBeGreaterThan(contextIndex);
+		expect(separatorIndex).toBeLessThan(filterIndex);
+	});
+
+	it("never appears when the layout budget is too tight to afford one, rather than a stray dash-only line squeezed in anyway", async () => {
+		const lines = await captureIntegratedLines(8, {
+			question: "Approve?",
+			context: "Some background info about this request.",
+			options: [{ title: "Approve" }, { title: "Deny" }],
+		});
+		expect(lines.some(isSectionSeparatorLine)).toBe(false);
+	});
+
+	it("still appears with only a bare question and no context -- the question line alone is enough of a prompt pane to separate from the choices", async () => {
+		const lines = await captureIntegratedLines(40, { question: "Approve?", options: [{ title: "Approve" }, { title: "Deny" }] });
+		const questionIndex = lines.findIndex((line) => line.includes("Approve?"));
+		const filterIndex = lines.findIndex((line) => line.includes("Filter:"));
+		const separatorIndex = lines.findIndex(isSectionSeparatorLine);
+		expect(questionIndex).toBeGreaterThanOrEqual(0);
+		expect(filterIndex).toBeGreaterThan(questionIndex);
+		expect(separatorIndex).toBeGreaterThan(questionIndex);
+		expect(separatorIndex).toBeLessThan(filterIndex);
 	});
 });
