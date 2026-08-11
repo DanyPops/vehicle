@@ -26,6 +26,7 @@ export type VehicleCoreErrorCode =
 	| "handler-failed"
 	| "policy-failed"
 	| "idempotency-key-required"
+	| "idempotency-conflict"
 	| "client-closed"
 	| "operation-unavailable"
 	| "background-not-supported"
@@ -154,6 +155,27 @@ export class VehicleError extends Error {
 /** Recognizes VehicleError instances across duplicated package installations in one process. */
 export function isVehicleError(value: unknown): value is VehicleError {
 	return value instanceof Error && Reflect.get(value, VEHICLE_ERROR_BRAND) === true;
+}
+
+/**
+ * Reconstructs a throwable VehicleError from a previously-serialized VehicleFailure -- the inverse
+ * of VehicleError.prototype.toFailure(), needed anywhere a wire-safe failure gets replayed as a
+ * real rejection later (e.g. VehicleIdempotencyPolicy replaying a settled failed receipt to a
+ * second caller reusing the same idempotency key). Lossy on purpose: a VehicleFailure never
+ * carries the original `cause` (toFailure() already reduced it to an optional bounded
+ * causeMessage per the throw site's own exposeCause choice), so the reconstructed error has no
+ * cause at all rather than fabricating one -- a replayed failure only needs to match the original
+ * code/category/message/details a caller would react to, not its internal cause chain.
+ */
+export function vehicleErrorFromFailure(failure: VehicleFailure): VehicleError {
+	return new VehicleError(failure.code, failure.message, {
+		category: failure.category,
+		retryable: failure.retryable,
+		retryAfterMs: failure.retryAfterMs,
+		recovery: failure.recovery,
+		details: failure.details,
+		operationId: failure.operationId,
+	});
 }
 
 const MAX_CAUSE_MESSAGE_LENGTH = 500;

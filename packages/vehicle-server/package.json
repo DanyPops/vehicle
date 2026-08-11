@@ -68,6 +68,14 @@
 			"types": "./dist/vehicle-job-persistence.d.ts",
 			"default": "./dist/vehicle-job-persistence.js"
 		},
+		"./idempotency": {
+			"types": "./dist/vehicle-idempotency-policy.d.ts",
+			"default": "./dist/vehicle-idempotency-policy.js"
+		},
+		"./idempotency-persistence": {
+			"types": "./dist/vehicle-idempotency-persistence.d.ts",
+			"default": "./dist/vehicle-idempotency-persistence.js"
+		},
 		"./atomic-json": "./src/atomic-json-node.ts"
 	},
 	"scripts": {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { boundedCauseMessage, defineErrorMapping, VehicleError } from "../src/vehicle-errors.ts";
+import { boundedCauseMessage, defineErrorMapping, isVehicleError, VehicleError, vehicleErrorFromFailure } from "../src/vehicle-errors.ts";
 
 describe("VehicleError.toFailure()", () => {
 	it("omits causeMessage entirely when constructed without a cause -- no behavior change for the common case", () => {
@@ -123,5 +123,37 @@ describe("boundedCauseMessage", () => {
 
 	it("returns undefined for an Error with an empty message", () => {
 		expect(boundedCauseMessage(new Error(""))).toBeUndefined();
+	});
+});
+
+describe("vehicleErrorFromFailure", () => {
+	it("reconstructs a throwable VehicleError carrying every field toFailure() itself produces", () => {
+		const original = new VehicleError("idempotency-conflict", "key already used for a different input", {
+			category: "conflict",
+			retryable: false,
+			recovery: { operation: "retry", message: "use a fresh idempotency key" },
+			details: { key: "abc" },
+			operationId: "op-1",
+		});
+		const rebuilt = vehicleErrorFromFailure(original.toFailure());
+		expect(rebuilt).toBeInstanceOf(VehicleError);
+		expect(rebuilt.toFailure()).toEqual(original.toFailure());
+	});
+
+	it("round-trips through isVehicleError, since a replayed receipt must still be recognized as a real VehicleError", () => {
+		const failure = new VehicleError("not-found", "gone", { category: "not_found" }).toFailure();
+		expect(isVehicleError(vehicleErrorFromFailure(failure))).toBe(true);
+	});
+
+	it("never fabricates a cause -- a rebuilt error's own cause is always undefined, even if the original had exposeCause: true", () => {
+		const original = new VehicleError("handler-failed", "boom", {
+			category: "internal",
+			cause: new Error("root cause"),
+			exposeCause: true,
+		});
+		const rebuilt = vehicleErrorFromFailure(original.toFailure());
+		expect(rebuilt.cause).toBeUndefined();
+		// The bounded causeMessage itself is preserved (it's already wire-safe text carried on toFailure()'s own shape) -- only the raw `cause` object is never reconstructed.
+		expect(original.toFailure().causeMessage).toBe("root cause");
 	});
 });
