@@ -11,6 +11,7 @@ import {
 	setTypingCourtesyTimingForTests,
 	waitForTypingCourtesy,
 } from "../src/hitl-ask-prompt.ts";
+import { OVERLAY_MAX_HEIGHT_RATIO } from "../src/hitl-prompt.ts";
 
 const originalEnv = { ...process.env };
 // The ambient keystroke clock is module-level state (deliberately -- see ensureTypingCourtesyTracking's
@@ -298,10 +299,18 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 		await pendingOverlay;
 
 		// integrated stays near the documented ~50% ceiling (terminal.rows=40 -> ~19-20 body lines);
-		// overlay reaches for (near-)the full terminal instead (terminal.rows=40 -> ~38 body lines).
+		// overlay reaches for OVERLAY_MAX_HEIGHT_RATIO instead (terminal.rows=40 -> ~32 body lines) --
+		// the exact same ratio the real overlay host (pi-tui's compositeOverlays) enforces via
+		// DUAL_HOST_OVERLAY_OPTIONS' own maxHeight: "80%", not independently re-guessed. Asking for
+		// MORE than that real host ceiling is the actual regression this covers: pi-tui hard-truncates
+		// from the bottom of an overlay's render once it exceeds maxHeight (slice(0, maxHeight)),
+		// silently swallowing the component's own closing border along with everything past the cut --
+		// confirmed live when this ratio was briefly 1 (100%) instead of the correct 0.8.
+		const hostRealCeiling = Math.floor(40 * OVERLAY_MAX_HEIGHT_RATIO);
 		expect(integratedLines.length).toBeLessThanOrEqual(22);
-		expect(overlayLines.length).toBeGreaterThan(integratedLines.length * 1.5);
-		expect(overlayLines.length).toBeGreaterThanOrEqual(36);
+		expect(overlayLines.length).toBeGreaterThan(integratedLines.length * 1.3);
+		expect(overlayLines.length).toBeLessThanOrEqual(hostRealCeiling);
+		expect(overlayLines.length).toBe(hostRealCeiling);
 	});
 
 	it("multi-select: toggling two rows by digit then confirming returns both, comma-joined", async () => {

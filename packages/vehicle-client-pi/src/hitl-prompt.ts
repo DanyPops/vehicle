@@ -15,7 +15,25 @@ export type PiHitlPresentation = "integrated" | "overlay";
 
 const MAX_APPROVAL_COMMENT_CHARS = 2_000;
 
-const DUAL_HOST_OVERLAY_OPTIONS = { anchor: "center", width: "80%", minWidth: 40, maxHeight: "80%", margin: 1 } as const;
+/**
+ * The single source of truth for how much of the terminal an overlay-hosted HITL component may
+ * occupy -- shared with hitl-ask-prompt.ts's own height-budget calculation (getAskMaxRenderLinesForRows)
+ * so the two can never drift apart again. They drifted once already: AskComponent briefly computed
+ * its own render budget from 100% of terminal.rows (a plausible-looking but independent guess),
+ * overshooting this real, host-enforced ceiling -- pi-tui's own compositeOverlays() hard-truncates
+ * from the BOTTOM of whatever a component renders once it exceeds this (`overlayLines.slice(0, maxHeight)`,
+ * in @earendil-works/pi-tui's tui.js), silently swallowing the component's own closing border along
+ * with everything else past the cut. Confirmed live.
+ */
+export const OVERLAY_MAX_HEIGHT_RATIO = 0.8;
+
+const DUAL_HOST_OVERLAY_OPTIONS = {
+	anchor: "center",
+	width: "80%",
+	minWidth: 40,
+	maxHeight: `${OVERLAY_MAX_HEIGHT_RATIO * 100}%`,
+	margin: 1,
+} as const;
 
 /** Hosts any component built from (tui, theme, keybindings, done) in Pi's input editor, preserving
  * the human's outgoing draft verbatim -- the same wrapping both the approval prompt and the richer

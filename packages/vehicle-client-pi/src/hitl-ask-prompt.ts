@@ -32,7 +32,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { type PiAskPromptOption, renderSingleSelectRows } from "./hitl-ask-prompt-layout.js";
-import { hostDualPresentationComponent, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.js";
+import { hostDualPresentationComponent, OVERLAY_MAX_HEIGHT_RATIO, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.js";
 import { createMultiSelectList, type MultiSelectListItem, type MultiSelectList as SharedMultiSelectList } from "./multi-select-list.js";
 
 /** See pi-ask-user's identical safeMarkdownTheme() comment: a broken theme Proxy throws only on
@@ -245,13 +245,14 @@ type AskMode = "select" | "freeform" | "comment";
 // `integrated` docks in the input area: growing past this ceiling pushes the conversation
 // transcript above it out of view, so the scroll keys below do real work on a long question
 // instead of the picker consuming the terminal outright. `overlay` floats over the transcript
-// instead of displacing it -- that concern doesn't apply, so it gets the (near-)full terminal
-// instead (confirmed live: a real approval prompt's own multi-line body needed scrolling for
-// content that would otherwise fit on one screen, even though `overlay`'s own host already
-// budgets up to 80% of the terminal for the box itself -- see DUAL_HOST_OVERLAY_OPTIONS in
-// hitl-prompt.ts -- this ratio was the tighter, independent ceiling actually being hit).
+// instead of displacing it -- that concern doesn't apply, so it reaches for OVERLAY_MAX_HEIGHT_RATIO
+// instead, the exact same ratio hitl-prompt.ts's own host-level `maxHeight: "80%"` already enforces
+// (imported, not re-guessed independently -- see that constant's own doc comment for why the two
+// must never drift apart: pi-tui's overlay host hard-truncates from the BOTTOM of whatever this
+// component renders once it exceeds ITS OWN ceiling, silently swallowing the closing border along
+// with everything past the cut, if this ever asks for more than the host will actually show).
 const ASK_MAX_HEIGHT_RATIO_INTEGRATED = 0.5;
-const ASK_MAX_HEIGHT_RATIO_OVERLAY = 1;
+const ASK_MAX_HEIGHT_RATIO_OVERLAY = OVERLAY_MAX_HEIGHT_RATIO;
 const ASK_MIN_RENDER_LINES = 8;
 const SPLIT_PANE_MIN_WIDTH = 84;
 const SPLIT_PANE_LEFT_MIN_WIDTH = 32;
