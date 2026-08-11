@@ -246,6 +246,64 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 		expect(answer).toEqual({ content: "Ship Friday", selected: ["Ship Friday"] });
 	});
 
+	it("overlay's height budget can use (near-)the full terminal instead of integrated's protective 50% ceiling -- confirmed live: an approval prompt's own multi-line body needed scrolling under the old shared ratio even though overlay already floats over the transcript instead of displacing it", async () => {
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		// Long enough that neither presentation's own budget can show it all -- what's under test is
+		// how MUCH each shows, not whether either shows everything.
+		const longContext = Array.from({ length: 60 }, (_, index) => `Line ${index + 1} of a long approval body.`).join("\n");
+		const askParams = { question: "Approve?", context: longContext, options: [{ title: "Approve" }, { title: "Deny" }] };
+
+		const integratedCtx = interactiveCtx([]);
+		let integratedComponent: { render: (w: number) => string[]; handleInput: (data: string) => void } | undefined;
+		const captureIntegratedCtx = {
+			...integratedCtx,
+			ui: {
+				...(integratedCtx as any).ui,
+				setEditorComponent: (factory: any) => {
+					if (!factory) return;
+					integratedComponent = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				},
+			},
+		} as unknown as ExtensionContext;
+		const pendingIntegrated = requestPiAskPrompt(captureIntegratedCtx, { ...askParams, presentation: "integrated" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const integratedLines = integratedComponent!.render(100);
+		integratedComponent!.handleInput(ENTER);
+		await pendingIntegrated;
+
+		let overlayComponent: { render: (w: number) => string[]; handleInput: (data: string) => void } | undefined;
+		const overlayCtx = {
+			cwd: "/tmp",
+			mode: "tui",
+			hasUI: true,
+			ui: {
+				custom: <T>(factory: (tui: unknown, theme: Theme, keybindings: KeybindingsManager, done: (value: T) => void) => Component) =>
+					new Promise<T>((resolve) => {
+						overlayComponent = factory(tui, theme, keybindings, resolve) as unknown as typeof overlayComponent;
+					}),
+				select: async () => {
+					throw new Error("should not fall back to dialogs");
+				},
+				input: async () => {
+					throw new Error("should not fall back to dialogs");
+				},
+				notify: () => {},
+				theme,
+			},
+		} as unknown as ExtensionContext;
+		const pendingOverlay = requestPiAskPrompt(overlayCtx, { ...askParams, presentation: "overlay" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const overlayLines = overlayComponent!.render(100);
+		overlayComponent!.handleInput(ENTER);
+		await pendingOverlay;
+
+		// integrated stays near the documented ~50% ceiling (terminal.rows=40 -> ~19-20 body lines);
+		// overlay reaches for (near-)the full terminal instead (terminal.rows=40 -> ~38 body lines).
+		expect(integratedLines.length).toBeLessThanOrEqual(22);
+		expect(overlayLines.length).toBeGreaterThan(integratedLines.length * 1.5);
+		expect(overlayLines.length).toBeGreaterThanOrEqual(36);
+	});
+
 	it("multi-select: toggling two rows by digit then confirming returns both, comma-joined", async () => {
 		const ctx = interactiveCtx(["1", "2", ENTER]);
 		const answer = await requestPiAskPrompt(ctx, {
