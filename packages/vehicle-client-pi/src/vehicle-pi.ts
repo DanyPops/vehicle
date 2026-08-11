@@ -6,6 +6,7 @@ import type {
 	VehicleContentBlock,
 	VehicleEffect,
 	VehicleFailure,
+	VehicleIdempotency,
 	VehicleInvocationOptions,
 	VehicleManifest,
 	VehicleManifestOperation,
@@ -572,7 +573,20 @@ function safeInstanceOf(value: unknown, ctor: unknown): boolean {
 /** The code sanitizedFailure() itself falls back to only when its own classification logic threw internally -- distinguishable from GENERIC_TRANSPORT_FAILURE_CODE (a real transport failure) so a caller/log can tell "the vehicle client has an internal bug" apart from "the network/daemon failed". Always paired with reportClassificationFailure so the failure is actually diagnosable, not just silently downgraded. */
 const CLASSIFICATION_FAILURE_CODE = "vehicle-client-classification-failed";
 
-function classifyKnownFailure(error: unknown): VehicleFailure | undefined {
+/**
+ * Real gap fixed here (papyrus task d0eb81b7): a MutationOutcomeUnknownError is thrown
+ * uniformly by createReconnectingVehicleClient's callOnce() for EVERY invoke(), regardless of
+ * the operation's own declared idempotency.mode -- a deliberate, documented choice at that
+ * generic wire-level layer, which has no visibility into any one operation's semantics. This
+ * function DOES have that visibility (the caller already resolved `descriptor`), so it's the
+ * right place to correct the caller-facing symptom: a `mode: "safe"` operation (a plain read,
+ * e.g. tasks.run_gates) that hits this exact ambiguous-transport-failure path was previously
+ * indistinguishable from a genuine mutation -- same non-retryable classification, same message
+ * implying an idempotency-key-backed receipt exists to inspect, even though a safe operation
+ * never files one and never needs to. There is zero duplicate-side-effect risk in simply
+ * retrying a safe operation directly, so it's marked retryable here and told so accurately.
+ */
+function classifyKnownFailure(error: unknown, idempotencyMode?: VehicleIdempotency["mode"]): VehicleFailure | undefined {
 	// isVehicleError(), not `safeInstanceOf(error, VehicleError)`: the latter is a plain `instanceof`
 	// check, which fails whenever the error was constructed against a *different* physical
 	// @danypops/vehicle-core copy than the one this module imported -- a realistic outcome of
@@ -587,11 +601,15 @@ function classifyKnownFailure(error: unknown): VehicleFailure | undefined {
 	if (safeInstanceOf(error, MutationOutcomeUnknownError) || safeInstanceOf(error, PreDispatchConnectionError)) {
 		const typed = error as MutationOutcomeUnknownError | PreDispatchConnectionError;
 		const causeMessage = boundedCauseMessage(typed.cause);
+		const isPreDispatch = safeInstanceOf(error, PreDispatchConnectionError);
+		const isAmbiguousSafeRead = !isPreDispatch && idempotencyMode === "safe";
 		return {
 			code: typed.code,
 			category: "unavailable",
-			message: typed.message,
-			retryable: safeInstanceOf(error, PreDispatchConnectionError),
+			message: isAmbiguousSafeRead
+				? `a safe, read-only operation's result could not be confirmed due to a transport failure -- safe to retry directly, no idempotency key needed${typed.operationId ? ` (${typed.operationId})` : ""}: ${typed.cause instanceof Error ? typed.cause.message : String(typed.cause)}`
+				: typed.message,
+			retryable: isPreDispatch || isAmbiguousSafeRead,
 			...(typed.operationId ? { details: { operationId: typed.operationId } } : {}),
 			...(causeMessage ? { causeMessage } : {}),
 		};
@@ -599,9 +617,9 @@ function classifyKnownFailure(error: unknown): VehicleFailure | undefined {
 	return undefined;
 }
 
-function sanitizedFailure(error: unknown): VehicleFailure {
+function sanitizedFailure(error: unknown, idempotencyMode?: VehicleIdempotency["mode"]): VehicleFailure {
 	try {
-		const known = classifyKnownFailure(error);
+		const known = classifyKnownFailure(error, idempotencyMode);
 		if (known) return known;
 	} catch (internalFailure) {
 		reportClassificationFailure(error, internalFailure);
@@ -949,7 +967,7 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 	try {
 		output = await invokeOrRunAsJob(client, descriptor, input, baseInvocation, jobPollIntervalMs);
 	} catch (error) {
-		const failure = sanitizedFailure(error);
+		const failure = sanitizedFailure(error, descriptor.idempotency.mode);
 		// The registry (once configureApprovals() is enabled there) records a
 		// durable approval.requested event before ever failing this way -- a
 		// caller always has a path forward via vehicle.approval.resolve, this
@@ -998,7 +1016,7 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 		try {
 			output = await invokeOrRunAsJob(client, descriptor, input, { ...baseInvocation, approvalCapability: capability }, jobPollIntervalMs);
 		} catch (retryError) {
-			const retryFailure = sanitizedFailure(retryError);
+			const retryFailure = sanitizedFailure(retryError, descriptor.idempotency.mode);
 			publishOperationActivity("failed", identity, descriptor, { code: retryFailure.code });
 			throw new PiVehicleInvocationError(retryFailure, manifest.name);
 		}

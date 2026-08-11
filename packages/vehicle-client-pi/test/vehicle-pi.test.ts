@@ -705,8 +705,12 @@ describe("registerVehicleTools", () => {
 		}
 	});
 
-	it("preserves a typed mutation-outcome-unknown classification and operation ID", async () => {
-		const client = new FakeClient(manifest([operation("focus.test")]));
+	// A GENUINE mutation (idempotency.mode: "unsafe") -- a retry risks a real duplicate side
+	// effect, so this must stay non-retryable, with mutation_status-style recovery language
+	// still applicable (the operation, if idempotency-key-backed like tasks.complete, really
+	// can be inspected/resumed that way).
+	it("preserves a typed mutation-outcome-unknown classification and operation ID for a genuine (unsafe) mutation, non-retryable", async () => {
+		const client = new FakeClient(manifest([operation("focus.test", 1, { idempotency: { mode: "unsafe" } })]));
 		client.error = new MutationOutcomeUnknownError("call-123", new TypeError("fetch failed"));
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(pi, client, {});
@@ -720,6 +724,31 @@ describe("registerVehicleTools", () => {
 				retryable: false,
 				details: { operationId: "call-123" },
 			});
+			expect(failure.message).toBe("operation outcome is unknown (call-123): fetch failed");
+		}
+	});
+
+	// Real gap (papyrus task d0eb81b7): a SAFE, read-only operation (e.g. tasks.run_gates) that
+	// hits this exact ambiguous-transport-failure path was previously indistinguishable from a
+	// genuine mutation -- same non-retryable classification, same message implying an
+	// idempotency-key-backed receipt exists to inspect, even though a safe operation never
+	// files one and never needs to: there is no duplicate-side-effect risk in simply retrying
+	// it directly.
+	it("classifies the identical transport failure as retryable, with accurate retry-directly guidance, for a safe (read-only) operation", async () => {
+		const client = new FakeClient(manifest([operation("tasks.run_gates")])); // idempotency.mode: "safe" by default
+		client.error = new MutationOutcomeUnknownError("call-789", new TypeError("fetch failed"));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, {});
+		try {
+			await execute(tools[0]!, { value: "go" });
+			throw new Error("expected invocation failure");
+		} catch (error) {
+			const failure = (error as PiVehicleInvocationError).failure;
+			expect(failure.code).toBe("vehicle-mutation-outcome-unknown");
+			expect(failure.retryable).toBe(true);
+			expect(failure.details).toMatchObject({ operationId: "call-789" });
+			expect(failure.message).not.toContain("mutation_status");
+			expect(failure.message.toLowerCase()).toContain("safe to retry");
 		}
 	});
 
