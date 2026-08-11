@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { unlinkSync } from "node:fs";
+import { closeSync, openSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getPeerCredential, PeerCredentialLookupError, rawSocketFd, UnsupportedPlatformError } from "../src/unix-peer-cred.ts";
@@ -96,8 +96,23 @@ describe("getPeerCredential", () => {
 	});
 
 	it("throws PeerCredentialLookupError for a valid-looking fd that isn't actually a socket", () => {
-		// fd 0 (stdin) is a real, open fd in this process but never a socket -- getsockopt must fail on it, not silently return garbage.
-		expect(() => getPeerCredential(0)).toThrow(PeerCredentialLookupError);
+		// A real, freshly-opened regular file -- guaranteed never a socket, unlike fd 0 (stdin), whose
+		// own real backing depends entirely on however THIS test process itself was launched (a bare
+		// terminal/pipe-backed bash invocation never has a socket there, but a process inherited from
+		// a daemon's own stdio -- e.g. a gate command spawned without an explicit stdio override --
+		// genuinely can, since fd 0 is a real socket in the daemon itself; confirmed live). getsockopt
+		// must fail on a real non-socket fd regardless of which fd number the runtime happens to be, not
+		// silently return garbage -- opening our own file sidesteps depending on the ambient process's
+		// own fd 0 at all.
+		const path = join(tmpdir(), `daemon-kit-peer-cred-not-a-socket-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
+		writeFileSync(path, "not a socket");
+		const fd = openSync(path, "r");
+		try {
+			expect(() => getPeerCredential(fd)).toThrow(PeerCredentialLookupError);
+		} finally {
+			closeSync(fd);
+			unlinkSync(path);
+		}
 	});
 
 	it("throws UnsupportedPlatformError outside Linux, rather than returning a wrong or empty result", () => {
