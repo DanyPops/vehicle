@@ -31,6 +31,7 @@ import {
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { SeparatorLine } from "malevich-tui-components";
 import { type PiAskPromptOption, renderSingleSelectRows } from "./hitl-ask-prompt-layout.js";
 import { hostDualPresentationComponent, OVERLAY_MAX_HEIGHT_RATIO, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.js";
 import { createMultiSelectList, type MultiSelectListItem, type MultiSelectList as SharedMultiSelectList } from "./multi-select-list.js";
@@ -207,9 +208,17 @@ function keybindingHint(theme: Theme, keybindings: KeybindingsManager, keybindin
  * below it, replacing what used to be a single blank spacer row. Exported for direct unit
  * coverage of this one pure, generic rule (exact width, dash-only, dim-wrapped) independent of
  * AskComponent's own much larger layout-budgeting logic.
+ *
+ * Delegates the actual rule-drawing to Malevich's own `SeparatorLine` (default thin weight, no
+ * embedded label) rather than hand-repeating the dash character here -- this file previously
+ * reinvented that primitive from scratch despite every sibling file in this package already
+ * depending on Malevich for exactly this class of thing. Only the `theme.fg("dim", ...)` wrap and
+ * this function's own width<=0-safe empty-string return stay local, since `SeparatorLine` itself
+ * has no notion of a host `Theme`.
  */
 export function renderSectionSeparator(theme: Theme, width: number): string {
-	return theme.fg("dim", "─".repeat(Math.max(0, width)));
+	const rule = new SeparatorLine().render(width)[0] ?? "";
+	return rule ? theme.fg("dim", rule) : "";
 }
 
 /**

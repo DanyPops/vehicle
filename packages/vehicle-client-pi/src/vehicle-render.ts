@@ -17,6 +17,7 @@ import {
 	type DetailViewTheme,
 	deriveTableColumns,
 	firstDistinctStyle,
+	neutralizeEmbeddedFullResets,
 	ProgressBar,
 	type ProgressBarGlyphStyle,
 	type ProgressBarGlyphs,
@@ -45,23 +46,13 @@ type RenderResultContext = Parameters<NonNullable<ToolDefinition["renderResult"]
  */
 
 /**
- * pi-tui's own truncateToWidth (dist/utils.js, finalizeTruncatedResult) embeds an
- * unconditional full SGR reset (\x1b[0m) after any truncated content -- even for
- * plain, uncolored text -- whenever it actually truncates. That's fine in isolation,
- * but this string is later handed to Pi's own Box, which paints one background color
- * across the *entire* line by wrapping it once, start to end (Box.applyBg /
- * applyBackgroundToLine in the same package). A full reset embedded mid-line kills
- * that background early: everything after it renders on the terminal's own default
- * background instead of the tool box's, since nothing re-establishes it afterward.
- *
- * Replacing \x1b[0m with every SGR reset *except* background (\x1b[49m) preserves
- * truncateToWidth's own intent -- stop whatever styling the truncated/ellipsis text
- * carried -- without discarding a background this function has no visibility into
- * and that gets applied by a caller further up the render tree.
+ * Re-exported for existing consumers of this module's own subpath (`@danypops/vehicle-client-pi/
+ * vehicle-render`) -- this used to be this function's origin, but it fixes a real host
+ * `truncateToWidth` behavior, not a Vehicle-specific concern, and Malevich (already a shared
+ * dependency of every affected package) is the more honest home for it now. See its own doc
+ * comment there for the full diagnosis.
  */
-export function neutralizeEmbeddedFullResets(text: string): string {
-	return text.replaceAll("\x1b[0m", "\x1b[22;23;24;25;27;28;29;39m");
-}
+export { neutralizeEmbeddedFullResets };
 
 function truncateToWidth(text: string, maxWidth: number, ellipsis?: string, pad?: boolean): string {
 	return neutralizeEmbeddedFullResets(truncateToWidthUnsafe(text, maxWidth, ellipsis, pad));
