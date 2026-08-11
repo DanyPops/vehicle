@@ -226,9 +226,23 @@ type DaemonApp = { fetch(request: Request): Promise<Response> };
 // surfacing as Node's "fetch failed" / SocketError "other side closed" (UND_ERR_SOCKET) -- independent
 // of and before any operation-level VehicleLimits.maxTimeoutMs deadline ever got a chance to apply.
 // Bounded (not server.timeout(request, 0)'s literal no-timeout) to the same order of magnitude as this
-// ecosystem's longest-lived longRunning operations today, applied only to the one request that
-// actually asked for a streaming response -- every ordinary request keeps Bun's normal 10s.
+// ecosystem's longest-lived longRunning operations today.
+//
+// A SECOND, later-confirmed live incident (papyrus task d0eb81b7, vehicle task 59a22737) hit the
+// exact same failure for a PLAIN (non-SSE) POST /vehicle/invoke: a caller-configured
+// background-free operation that itself takes many seconds to tens of seconds (e.g. Papyrus's
+// tasks.run_gates/tasks.complete actually shelling out to and waiting on a caller's own gate
+// command) sends zero response bytes the whole time it runs -- just as exposed to Bun's 10s idle
+// default as the streaming case, and this route was explicitly NOT covered by the
+// Accept:text/event-stream check alone. VehicleLimits.maxTimeoutMs/an operation's own configured
+// timeout are moot if the raw TCP connection is already dead before either ever gets a chance to
+// apply. Every /vehicle/invoke POST now gets this same generous ceiling regardless of Accept --
+// real per-operation timeout enforcement already happens at the application layer (VehicleLimits,
+// AbortController, a gate's own timeoutMs); Bun's own raw idle timeout has no business being the
+// one that fires first. Every OTHER route (manifest, cancel, the Vehicle Jobs submit/poll/tail/
+// steer/cancel routes, all of which are documented as never blocking) keeps Bun's normal 10s.
 const STREAMING_IDLE_TIMEOUT_S = 3_600;
+const VEHICLE_INVOKE_PATH = "/vehicle/invoke";
 
 function startBunListener(options: StartDaemonOptions, app: DaemonApp, pushPath: string, onRequest: () => void): Promise<ListeningServer> {
 	const server = Bun.serve({
@@ -236,10 +250,11 @@ function startBunListener(options: StartDaemonOptions, app: DaemonApp, pushPath:
 		port: 0,
 		fetch: (request, bunServer) => {
 			onRequest();
-			if (options.pushChannel && new URL(request.url).pathname === pushPath) {
+			const pathname = new URL(request.url).pathname;
+			if (options.pushChannel && pathname === pushPath) {
 				return options.pushChannel.upgrade(request, bunServer) ?? undefined;
 			}
-			if ((request.headers.get("accept") ?? "").includes("text/event-stream")) {
+			if (pathname === VEHICLE_INVOKE_PATH || (request.headers.get("accept") ?? "").includes("text/event-stream")) {
 				bunServer.timeout(request, STREAMING_IDLE_TIMEOUT_S);
 			}
 			return runWithRpcCallId(randomUUID(), () => app.fetch(request));

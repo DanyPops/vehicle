@@ -671,4 +671,42 @@ describe("startDaemon: per-request rpcCallId correlation (Bun listener)", () => 
 			serveSpy.mockRestore();
 		}
 	}, 10_000);
+
+	it("raises the SAME idle timeout for a plain (non-streaming) POST /vehicle/invoke, not just an SSE-accepting request", async () => {
+		// Real live incident (papyrus task d0eb81b7, vehicle task 59a22737): tasks.run_gates/
+		// tasks.complete can legitimately take many seconds to tens of seconds to actually run a
+		// caller's gate command, sending zero response bytes the whole time -- a PLAIN (non-SSE)
+		// POST /vehicle/invoke request, which the sibling test above proves is explicitly NOT
+		// covered by the Accept:text/event-stream check. That left it just as exposed to Bun's own
+		// 10s idle-connection default as the SSE case was before that fix -- confirmed live as the
+		// actual root cause of "fetch failed"/vehicle-mutation-outcome-unknown errors 5/5 times for
+		// every gate-executing call in that session, while every fast plain read (tasks.show) never
+		// hit it. VehicleLimits.maxTimeoutMs/gate.timeoutMs are moot if the raw TCP connection is
+		// already dead before either ever gets a chance to apply.
+		const calls: Array<{ seconds: number }> = [];
+		// biome-ignore lint/suspicious/noExplicitAny: Bun.serve's overloaded signature can't be spied through cleanly; only .timeout()'s own args matter here.
+		const originalServe = Bun.serve.bind(Bun) as (options: any) => ReturnType<typeof Bun.serve>;
+		// biome-ignore lint/suspicious/noExplicitAny: same as above -- the mock's own options param.
+		const serveSpy = spyOn(Bun, "serve").mockImplementation(((options: any) => {
+			const server = originalServe(options);
+			spyOn(server, "timeout").mockImplementation(((_request: Request, seconds: number) => {
+				calls.push({ seconds });
+			}) as typeof server.timeout);
+			return server;
+		}) as typeof Bun.serve);
+		try {
+			dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+			const handlePath = join(dir, "handle.json");
+			daemon = await startDaemon({
+				daemonLabel: "Acme",
+				handlePath,
+				buildApp: () => ({ fetch: async () => new Response("ok") }),
+			});
+			await fetch(`http://127.0.0.1:${daemon.port}/vehicle/invoke`, { method: "POST", body: "{}" });
+			await fetch(`http://127.0.0.1:${daemon.port}/vehicle/manifest`);
+			expect(calls).toEqual([{ seconds: 3_600 }]);
+		} finally {
+			serveSpy.mockRestore();
+		}
+	}, 10_000);
 });
