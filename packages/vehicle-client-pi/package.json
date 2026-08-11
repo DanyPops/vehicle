@@ -72,6 +72,10 @@
 		"./widget-state": {
 			"types": "./dist/vehicle-widget-state.d.ts",
 			"default": "./dist/vehicle-widget-state.js"
+		},
+		"./widget-header": {
+			"types": "./dist/vehicle-widget-header.d.ts",
+			"default": "./dist/vehicle-widget-header.js"
 		}
 	},
 	"scripts": {

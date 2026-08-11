@@ -21,6 +21,7 @@
 		"src/vehicle-monolith.ts",
 		"src/multi-select-list.ts",
 		"src/vehicle-widget-state.ts",
+		"src/vehicle-widget-header.ts",
 		"src/hitl-ask-prompt.ts",
 		"src/hitl-approval-ask-prompt.ts"
 	]
