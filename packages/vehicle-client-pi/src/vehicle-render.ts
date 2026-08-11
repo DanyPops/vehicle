@@ -295,6 +295,28 @@ function singleArrayEnvelope(output: unknown): { items: unknown[]; siblings: [st
 }
 
 /**
+ * Two or more array fields -- e.g. tasks.graph's TaskGraph ({nodes, rootIds}) or
+ * tasks.cancel_subtree's {canceled, skipped}. singleArrayEnvelope only ever unwraps exactly
+ * one array field, deliberately, to avoid GUESSING which one is the real payload when there's
+ * ambiguity. This isn't guessing -- it shows every array, each in its own labeled section, so
+ * there's nothing to pick wrong. Requires at least one array to be non-empty (an object whose
+ * only arrays are all empty gets no benefit from this over the record/JSON fallback) and every
+ * non-array sibling to be primitive, same discipline as singleArrayEnvelope.
+ */
+function multiArrayEnvelope(output: unknown): { arrays: [string, unknown[]][]; siblings: [string, Primitive][] } | undefined {
+	if (typeof output !== "object" || output === null || Array.isArray(output)) return undefined;
+	const entries = Object.entries(output as Record<string, unknown>).filter(
+		([key, value]) => !(key === "content" && isVehicleContentBlockArray(value)),
+	);
+	const arrayEntries = entries.filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]));
+	if (arrayEntries.length < 2 || !arrayEntries.some(([, items]) => items.length > 0)) return undefined;
+	const arrayKeys = new Set(arrayEntries.map(([key]) => key));
+	const siblings = entries.filter(([key]) => !arrayKeys.has(key));
+	if (!siblings.every((entry): entry is [string, Primitive] => isPrimitive(entry[1]))) return undefined;
+	return { arrays: arrayEntries, siblings };
+}
+
+/**
  * The envelope singleArrayEnvelope's own content exclusion leaves behind: no domain array at all,
  * just a real content: VehicleContentBlock[] (Vehicle's own model-facing narration channel --
  * extractVehicleContent already reads this exact shape for the LLM side) plus primitive siblings
@@ -329,23 +351,33 @@ function humanizeFieldKey(key: string): string {
 }
 
 /**
- * A plain object where every field is a primitive scalar -- e.g. tasks.claim's TaskLease
- * ({taskId, owner, token, claimedAt, ...}). Neither singleArrayEnvelope nor
- * plainContentEnvelope cover this: both require at least one array/content-block field.
- * A flat record is the single most renderable shape there is (a key/value list), yet
- * previously fell straight through to the raw-JSON fallback below for lack of any array
- * to unwrap. undefined for an empty object or anything with a nested object/array field --
- * genuinely structured data still falls through to raw JSON rather than flattening a shape
- * this isn't meant to guess at.
+ * A plain object with at least one primitive-scalar field -- e.g. tasks.claim's TaskLease
+ * (every field primitive) or tasks.mutation_status's TaskMutationReceiptView (8 primitive
+ * fields plus one genuinely nested `result`). Neither singleArrayEnvelope, multiArrayEnvelope,
+ * nor plainContentEnvelope cover this: all three require at least one array/content-block
+ * field. Previously required EVERY field to be primitive (all-or-nothing), so a record with
+ * even one nested field got zero credit for the rest and fell straight to raw JSON -- the
+ * majority case for every operation that also carries some structured payload alongside its
+ * own scalar metadata. Now: primitive fields render as labeled key/value pairs as before, and
+ * any remaining nested field renders as its own labeled JSON block underneath, rather than
+ * discarding the whole render. undefined for an empty object or one with ZERO primitive
+ * fields (nothing to salvage) -- that genuinely stays on the raw-JSON fallback, since a purely
+ * structured shape gets no benefit from this over the plain dump.
  */
-function flatRecordEnvelope(output: unknown): DetailField[] | undefined {
+function recordEnvelope(output: unknown): { fields: DetailField[]; nested: [string, unknown][] } | undefined {
 	if (typeof output !== "object" || output === null || Array.isArray(output)) return undefined;
 	const entries = Object.entries(output as Record<string, unknown>);
-	if (entries.length === 0 || !entries.every((entry): entry is [string, Primitive] => isPrimitive(entry[1]))) return undefined;
-	return entries.map(([key, value]) => ({
-		label: humanizeFieldKey(key),
-		value: value === null || value === undefined ? "none" : String(value),
-	}));
+	if (entries.length === 0) return undefined;
+	const primitiveEntries = entries.filter((entry): entry is [string, Primitive] => isPrimitive(entry[1]));
+	if (primitiveEntries.length === 0) return undefined;
+	const nested = entries.filter((entry): entry is [string, unknown] => !isPrimitive(entry[1]));
+	return {
+		fields: primitiveEntries.map(([key, value]) => ({
+			label: humanizeFieldKey(key),
+			value: value === null || value === undefined ? "none" : String(value),
+		})),
+		nested,
+	};
 }
 
 function flatRecordTheme(theme: Theme): DetailViewTheme {
@@ -419,6 +451,63 @@ function renderedFields(fields: readonly VehiclePresentationField[], theme: Them
 	return statelessComponent((width) =>
 		buildDetailLines(Math.max(1, width), { fields: detailFields, alignFields: true, theme: fieldTheme, measure }),
 	);
+}
+
+/** A nested (non-primitive) field's own labeled JSON block -- recordEnvelope's fallback for
+ * whatever isn't a primitive field, rather than discarding it or reverting the whole render to
+ * raw JSON. */
+function renderNestedFieldLines(key: string, value: unknown, theme: Theme, width: number): string[] {
+	const heading = theme.fg("toolTitle", theme.bold(`${humanizeFieldKey(key)}:`));
+	const json = JSON.stringify(value, null, 2) ?? String(value);
+	return [heading, ...json.split("\n").map((line) => truncateToWidth(theme.fg("dim", line), width))];
+}
+
+function renderRecordEnvelope(envelope: { fields: DetailField[]; nested: [string, unknown][] }, theme: Theme): Component {
+	const fieldsComponent = renderedFields(
+		envelope.fields.map((field) => ({ label: field.label, value: String(field.value) })),
+		theme,
+	);
+	if (envelope.nested.length === 0) return fieldsComponent;
+	return {
+		render: (width: number) => [
+			...fieldsComponent.render(width),
+			...envelope.nested.flatMap(([key, value]) => renderNestedFieldLines(key, value, theme, width)),
+		],
+		invalidate: () => fieldsComponent.invalidate(),
+	};
+}
+
+/**
+ * Every array field as its own labeled section, in declaration order, plus a trailing sibling
+ * line for any remaining primitive fields. undefined (falls back to the raw-JSON/record path)
+ * if any array's own shape isn't one renderArrayOutput curates (e.g. an array of numbers) --
+ * a half-curated, half-JSON result would be more confusing than a consistent single fallback.
+ */
+function renderMultiArrayEnvelope(
+	envelope: { arrays: [string, unknown[]][]; siblings: [string, Primitive][] },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+): Component | undefined {
+	const sections: { heading: string; component: Component }[] = [];
+	for (const [key, items] of envelope.arrays) {
+		const component = renderArrayOutput(items, options, theme);
+		if (!component) return undefined;
+		sections.push({ heading: theme.fg("toolTitle", theme.bold(`${humanizeFieldKey(key)}:`)), component });
+	}
+	return {
+		render: (width: number) => {
+			const lines: string[] = [];
+			for (const section of sections) {
+				lines.push(section.heading);
+				lines.push(...section.component.render(width));
+			}
+			if (envelope.siblings.length > 0) lines.push(truncateToWidth(theme.fg("dim", formatSiblingLine(envelope.siblings)), width));
+			return lines;
+		},
+		invalidate: () => {
+			for (const section of sections) section.component.invalidate();
+		},
+	};
 }
 
 function appendPresentationAnnotations(
@@ -530,6 +619,15 @@ export function renderVehicleResult(
 
 	// Compatibility window for historical session rows persisted before vehicle.tool-details/v1.
 	const output = details.output;
+	// A bare scalar previously fell to JSON.stringify below -- harmless for a number/boolean
+	// (identical to String()) but visibly wrong for a string, which JSON-quotes and
+	// backslash-escapes it (e.g. tasks.context's plain-text plan summary).
+	if (typeof output === "string") {
+		return new CollapsibleText({ text: theme.fg("text", output), collapsedLines: options.expanded ? Number.MAX_SAFE_INTEGER : 5, measure });
+	}
+	if (typeof output === "number" || typeof output === "boolean") {
+		return new Text({ text: theme.fg("text", String(output)), measure });
+	}
 	if (Array.isArray(output)) {
 		const rendered = renderArrayOutput(output, options, theme);
 		if (rendered) return rendered;
@@ -541,17 +639,16 @@ export function renderVehicleResult(
 				return envelope.siblings.length > 0 ? withTrailingLine(rendered, theme.fg("dim", formatSiblingLine(envelope.siblings))) : rendered;
 			}
 		} else {
+			const multiArray = multiArrayEnvelope(output);
+			const multiRendered = multiArray ? renderMultiArrayEnvelope(multiArray, options, theme) : undefined;
+			if (multiRendered) return multiRendered;
 			const plain = plainContentEnvelope(output);
 			if (plain) {
 				const rendered = new CollapsibleText({ text: plain.text, collapsedLines: options.expanded ? Number.MAX_SAFE_INTEGER : 5, measure });
 				return plain.siblings.length > 0 ? withTrailingLine(rendered, theme.fg("dim", formatSiblingLine(plain.siblings))) : rendered;
 			}
-			const fields = flatRecordEnvelope(output);
-			if (fields)
-				return renderedFields(
-					fields.map((field) => ({ label: field.label, value: String(field.value) })),
-					theme,
-				);
+			const record = recordEnvelope(output);
+			if (record) return renderRecordEnvelope(record, theme);
 		}
 	}
 

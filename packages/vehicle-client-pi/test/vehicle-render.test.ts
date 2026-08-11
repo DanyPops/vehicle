@@ -550,8 +550,10 @@ describe("renderVehicleResult", () => {
 		expect(text).toContain("true");
 	});
 
-	// A flat record is a narrower shape than "any object".
-	it("still falls back to raw JSON for an object with a nested object field", () => {
+	// Zero primitive fields -- nothing to salvage, genuinely stays on raw JSON rather than
+	// showing a record with no key/value fields at all plus one nested block (barely different
+	// from the plain dump).
+	it("still falls back to raw JSON for an object with ONLY a nested object field", () => {
 		const component = renderVehicleResult(
 			descriptor("read"),
 			{ content: [], details: { output: { nested: { a: 1 } } } },
@@ -560,6 +562,59 @@ describe("renderVehicleResult", () => {
 			resultContext(),
 		);
 		expect(component.render(80).join("\n")).toContain('"a": 1');
+	});
+
+	// The exact real shape reported live: tasks.mutation_status's TaskMutationReceiptView --
+	// several primitive fields (receiptId, operation, state, ...) plus one genuinely nested
+	// `result`. Previously ALL-OR-NOTHING: one non-primitive field meant zero credit for the
+	// rest, falling straight to raw JSON. Now the primitive fields render as real fields, and
+	// the nested field renders as its own labeled block underneath, instead of losing everything.
+	it("renders a record with a mix of primitive and nested fields as fields plus a labeled nested block", () => {
+		const component = renderVehicleResult(
+			descriptor("read"),
+			{
+				content: [],
+				details: {
+					output: {
+						receiptId: "abc-123",
+						operation: "complete",
+						state: "completed",
+						result: { changed: true, currentStatus: "done" },
+					},
+				},
+			},
+			{ isPartial: false, expanded: false },
+			fakeTheme,
+			resultContext(),
+		);
+		const text = component.render(80).join("\n");
+		expect(text).toContain("Receipt Id");
+		expect(text).toContain("abc-123");
+		expect(text).toContain("Operation");
+		expect(text).toContain("complete");
+		expect(text).toContain("State");
+		expect(text).toContain("completed");
+		expect(text).toContain("Result:");
+		expect(text).toContain('"changed": true');
+		expect(text).toContain('"currentStatus": "done"');
+	});
+
+	// A bare top-level string is the actual real gap: JSON.stringify wraps it in quotes and
+	// backslash-escapes it, which is only ever wrong for a string -- a number/boolean already
+	// renders identically either way. tasks.context returns exactly this shape (a plain-text
+	// plan summary, `string | null`).
+	it("renders a bare string output as plain text, not JSON-quoted", () => {
+		const component = renderVehicleResult(
+			descriptor("read"),
+			{ content: [], details: { output: 'Progress: 2/5 done\nCurrent: "Ship it"' } },
+			{ isPartial: false, expanded: false },
+			fakeTheme,
+			resultContext(),
+		);
+		const text = component.render(80).join("\n");
+		expect(text).toContain("Progress: 2/5 done");
+		expect(text).toContain('Current: "Ship it"');
+		expect(text).not.toContain("\\n");
 	});
 
 	it("still falls back to raw JSON for an empty object", () => {
@@ -574,8 +629,10 @@ describe("renderVehicleResult", () => {
 	});
 
 	it("expands the collapsible JSON view when options.expanded is true", () => {
-		// Two array fields deliberately -- singleArrayEnvelope only unwraps
-		// exactly one, so this genuinely stays on the raw-JSON fallback path.
+		// Two array fields deliberately -- singleArrayEnvelope only ever unwraps exactly one, and
+		// multiArrayEnvelope punts the WHOLE envelope back to raw JSON the moment any one of its
+		// arrays isn't a curatable shape (`other` is plain numbers, neither a table nor a bulleted
+		// string list) -- so this genuinely stays on the raw-JSON fallback path.
 		const longOutput = {
 			lines: Array.from({ length: 20 }, (_, i) => `line-${i}`),
 			other: Array.from({ length: 5 }, (_, i) => i),
@@ -636,8 +693,11 @@ describe("renderVehicleResult", () => {
 		expect(text).toContain("total: 2");
 	});
 
-	// Too ambiguous to guess which array is the real payload.
-	it("leaves an object with two array fields on the raw-JSON fallback", () => {
+	// Not ambiguous -- shows every array, each in its own labeled section, rather than
+	// guessing which one is "the" payload (multiArrayEnvelope, 8022b123's own follow-up to
+	// the renderer-coverage audit: tasks.graph/{nodes,rootIds} and
+	// tasks.cancel_subtree/{canceled,skipped} are the real motivating shapes).
+	it("renders an object with two array fields as two labeled sections, not raw JSON", () => {
 		const component = renderVehicleResult(
 			descriptor("read"),
 			{ content: [], details: { output: { a: ["x"], b: ["y"] } } },
@@ -645,7 +705,26 @@ describe("renderVehicleResult", () => {
 			fakeTheme,
 			resultContext(),
 		);
-		expect(component.render(80).join("\n")).toContain('"a"');
+		const text = component.render(80).join("\n");
+		expect(text).toContain("A:");
+		expect(text).toContain("x");
+		expect(text).toContain("B:");
+		expect(text).toContain("y");
+		expect(text).not.toContain('"a"');
+	});
+
+	// An array whose own shape isn't one renderArrayOutput curates (here: an array of plain
+	// numbers, neither a table nor a bulleted string list) still punts the WHOLE multi-array
+	// envelope to raw JSON rather than showing a half-curated, half-JSON result.
+	it("still falls back to raw JSON when one of several array fields isn't a curatable shape", () => {
+		const component = renderVehicleResult(
+			descriptor("read"),
+			{ content: [], details: { output: { names: ["x"], counts: [1, 2, 3] } } },
+			{ isPartial: false, expanded: false },
+			fakeTheme,
+			resultContext(),
+		);
+		expect(component.render(80).join("\n")).toContain('"names"');
 	});
 
 	it("unwraps a single domain array alongside a VehicleContentBlock[] content sibling", () => {
@@ -672,7 +751,12 @@ describe("renderVehicleResult", () => {
 	});
 
 	// content exclusion isn't newly permissive for real ambiguity.
-	it("still falls back to raw JSON for two GENUINE domain arrays plus a content sibling", () => {
+	// content is excluded from array-counting exactly as singleArrayEnvelope already excludes
+	// it (isVehicleContentBlockArray) -- two REAL domain arrays remain, rendered as their own
+	// sections, same as the no-content case above. The narration text is dropped from the human
+	// channel here too, same existing precedent as singleArrayEnvelope: content is redundant
+	// with the array(s) actually being shown, and the model already has it on its own channel.
+	it("renders two genuine domain arrays as labeled sections, ignoring a content sibling", () => {
 		const component = renderVehicleResult(
 			descriptor("read"),
 			{
@@ -683,7 +767,11 @@ describe("renderVehicleResult", () => {
 			fakeTheme,
 			resultContext(),
 		);
-		expect(component.render(80).join("\n")).toContain('"a"');
+		const text = component.render(80).join("\n");
+		expect(text).toContain("x");
+		expect(text).toContain("y");
+		expect(text).not.toContain('"a"');
+		expect(text).not.toContain("note");
 	});
 
 	// The exact real shape of Papyrus's discuss.block/unblock: {blocked: true, content: [...]}.
@@ -728,8 +816,12 @@ describe("renderVehicleResult", () => {
 		expect(component.render(80).join("\n")).toContain('"meta"');
 	});
 
-	// Never a misleading "No results."
-	it("an envelope with an empty inner array falls through to raw JSON", () => {
+	// An empty inner array means singleArrayEnvelope's own items.length>0 guard doesn't fire
+	// (never a misleading "No results." for a shape that also carries other real data) -- it
+	// now falls to recordEnvelope instead of all the way to raw JSON: nextCursor renders as a
+	// real field, and the empty array renders as its own honest "[]", never suppressed or
+	// misrepresented as "No results.".
+	it("an envelope with an empty inner array renders the array honestly (never a misleading 'No results.')", () => {
 		const component = renderVehicleResult(
 			descriptor("read"),
 			{ content: [], details: { output: { events: [], nextCursor: 1 } } },
@@ -737,7 +829,12 @@ describe("renderVehicleResult", () => {
 			fakeTheme,
 			resultContext(),
 		);
-		expect(component.render(80).join("\n")).toContain("events");
+		const text = component.render(80).join("\n");
+		expect(text).toContain("Next Cursor");
+		expect(text).toContain("1");
+		expect(text).toContain("Events");
+		expect(text).toContain("[]");
+		expect(text).not.toContain("No results.");
 	});
 
 	// The sibling annotation is preserved through the expansion.
