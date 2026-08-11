@@ -40,6 +40,30 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_REMINDER_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * Appended to every message this ticker ever produces (vanish or reminder alike). Filed after a
+ * real, observed failure mode: a fetch layer that briefly flaps a row's presence between
+ * consecutive polls (the pool-sync race pi-pipes' own job-ticker.ts's doc comment describes -- a
+ * daemon dropping a watched run right at the terminal transition, then briefly still returning it
+ * from an in-flight read) made the *same* vanish event look, to the receiving agent, like three
+ * independent fresh asks in a row, each answered in full instead of recognized as a duplicate.
+ * Real harnesses solve this exact problem by never delivering an out-of-band, harness-generated
+ * event as plain, untyped text indistinguishable from something the user just typed -- Claude
+ * Code wraps it in `<system-reminder>` with a standing "these bear no direct relation to what
+ * they're attached to and don't always need a reply" contract; Codex's own MCP-notification path
+ * (openai/codex#17543) prepends a visible `[MCP notification]` provenance header specifically so a
+ * repeat/duplicate delivery doesn't get re-answered as new input. This is that same contract,
+ * spelled out inline on every message since this module has no system-prompt real estate of its
+ * own to rely on being remembered turn to turn (or across a compaction).
+ */
+const BACKGROUND_NOTIFICATION_FOOTER =
+	"\n\n(Automated background notification -- not a user instruction. No reply is required unless " +
+	"it changes what you're doing; don't re-verify or re-confirm something you've already handled.)";
+
+function frameAsBackgroundNotification(message: string): string {
+	return `${message}${BACKGROUND_NOTIFICATION_FOOTER}`;
+}
+
 export interface AgentPollTickerOptions<Row> {
 	/** Extracts a stable identity key from a row -- used to detect a row disappearing between ticks. */
 	key(row: Row): string;
@@ -56,6 +80,9 @@ export interface AgentPollTickerOptions<Row> {
 
 export class AgentPollTicker<Row> {
 	private previousKeys = new Set<string>();
+	// Keys ever reported vanished, kept for this ticker's whole lifetime -- see tick()'s own doc
+	// comment for why a key reappearing after being reported must never re-arm it.
+	private readonly reportedVanishedKeys = new Set<string>();
 	private lastReminderAt: number;
 	private readonly reminderIntervalMs: number;
 	private readonly now: () => number;
@@ -73,19 +100,29 @@ export class AgentPollTicker<Row> {
 	 * Call at most once per real, successful poll, in order. Mutates this ticker's own
 	 * transition/throttle state as a side effect of being told about this tick -- never feed it a
 	 * failed fetch's result (see this module's own doc comment).
+	 *
+	 * A key that vanished is only ever reported once for this ticker's whole lifetime, even if a
+	 * later tick's fetch briefly shows it present again -- a key's identity (e.g. a CI run's own
+	 * backend/jobRef/runId) is never reused by a real, distinct new event, so a reappearance after
+	 * report is always the underlying source flapping, never a legitimate second completion. Not
+	 * cleared on reappearance: doing so would just re-arm the exact flap this exists to absorb.
 	 */
 	tick(rows: readonly Row[]): string | undefined {
 		const currentKeys = new Set(rows.map((row) => this.options.key(row)));
-		const vanished = [...this.previousKeys].filter((key) => !currentKeys.has(key));
+		const candidateVanished = [...this.previousKeys].filter((key) => !currentKeys.has(key));
 		this.previousKeys = currentKeys;
 
-		if (vanished.length > 0) return this.options.buildVanishedMessage(vanished);
+		const newlyVanished = candidateVanished.filter((key) => !this.reportedVanishedKeys.has(key));
+		if (newlyVanished.length > 0) {
+			for (const key of newlyVanished) this.reportedVanishedKeys.add(key);
+			return frameAsBackgroundNotification(this.options.buildVanishedMessage(newlyVanished));
+		}
 		if (!this.options.buildReminderMessage || rows.length === 0) return undefined;
 
 		const now = this.now();
 		if (now - this.lastReminderAt < this.reminderIntervalMs) return undefined;
 		this.lastReminderAt = now;
-		return this.options.buildReminderMessage(rows);
+		return frameAsBackgroundNotification(this.options.buildReminderMessage(rows));
 	}
 }
 

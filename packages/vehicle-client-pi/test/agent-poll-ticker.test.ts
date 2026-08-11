@@ -51,7 +51,65 @@ describe("AgentPollTicker", () => {
 		ticker.tick([row("a")]); // baseline
 
 		now += 1; // barely any time has passed -- must not matter for a vanish report
-		expect(ticker.tick([])).toBe("gone: a");
+		expect(ticker.tick([])).toContain("gone: a");
+	});
+
+	it("never re-reports the same vanished key again, even if a later tick briefly shows it present again (source flapping)", () => {
+		let now = 0;
+		const ticker = new AgentPollTicker<Row>({
+			key: (r) => r.id,
+			buildVanishedMessage: (keys) => `gone: ${keys.join(", ")}`,
+			now: () => now,
+		});
+		ticker.tick([row("a")]); // baseline
+
+		now += 1;
+		expect(ticker.tick([])).toContain("gone: a"); // reported once
+
+		now += 1;
+		ticker.tick([row("a")]); // the source flaps -- "a" is back
+
+		now += 1;
+		expect(ticker.tick([])).toBeUndefined(); // vanishes again -- already reported, stays quiet
+	});
+
+	it("still reports a genuinely different key vanishing even after an unrelated key was already reported", () => {
+		let now = 0;
+		const ticker = new AgentPollTicker<Row>({
+			key: (r) => r.id,
+			buildVanishedMessage: (keys) => `gone: ${keys.sort().join(", ")}`,
+			now: () => now,
+		});
+		ticker.tick([row("a"), row("b")]); // baseline
+
+		now += 1;
+		expect(ticker.tick([row("b")])).toContain("gone: a");
+
+		now += 1;
+		expect(ticker.tick([])).toContain("gone: b");
+	});
+
+	it("appends a background-notification framing footer to every delivered message -- vanish or reminder alike, distinguishing it from a real user instruction", () => {
+		let now = 0;
+		const ticker = new AgentPollTicker<Row>({
+			key: (r) => r.id,
+			buildVanishedMessage: (keys) => `gone: ${keys.join(", ")}`,
+			buildReminderMessage: (rows) => `still going: ${rows.map((r) => r.id).join(", ")}`,
+			reminderIntervalMs: 1000,
+			now: () => now,
+		});
+		ticker.tick([row("a")]); // baseline
+
+		now += 1;
+		const vanishMessage = ticker.tick([]);
+		expect(vanishMessage).toContain("gone: a");
+		expect(vanishMessage).toContain("Automated background notification -- not a user instruction");
+
+		ticker.tick([row("b")]); // new baseline for the reminder path
+		now += 1000;
+		const reminderMessage = ticker.tick([row("b")]);
+		expect(reminderMessage).toContain("still going: b");
+		expect(reminderMessage).toContain("Automated background notification -- not a user instruction");
 	});
 
 	it("reports every row that vanished in the same tick together, one message", () => {
@@ -64,7 +122,7 @@ describe("AgentPollTicker", () => {
 		ticker.tick([row("a"), row("b")]);
 
 		now += 1;
-		expect(ticker.tick([])).toBe("gone: a, b");
+		expect(ticker.tick([])).toContain("gone: a, b");
 	});
 
 	it("does not report a reminder before reminderIntervalMs has elapsed since the ticker started", () => {
@@ -94,7 +152,7 @@ describe("AgentPollTicker", () => {
 		ticker.tick([row("a")]);
 
 		now = 1000;
-		expect(ticker.tick([row("a")])).toBe("reminder: a");
+		expect(ticker.tick([row("a")])).toContain("reminder: a");
 	});
 
 	it("resets the reminder clock after firing -- does not fire again on the very next tick", () => {
@@ -108,13 +166,13 @@ describe("AgentPollTicker", () => {
 		});
 		ticker.tick([row("a")]);
 		now = 1000;
-		expect(ticker.tick([row("a")])).toBe("reminder");
+		expect(ticker.tick([row("a")])).toContain("reminder");
 
 		now = 1001;
 		expect(ticker.tick([row("a")])).toBeUndefined();
 
 		now = 2000;
-		expect(ticker.tick([row("a")])).toBe("reminder");
+		expect(ticker.tick([row("a")])).toContain("reminder");
 	});
 
 	it("prefers reporting a vanish over a reminder when both would otherwise fire on the same tick", () => {
@@ -129,7 +187,7 @@ describe("AgentPollTicker", () => {
 		ticker.tick([row("a"), row("b")]);
 
 		now = 1000; // reminder is also due now
-		expect(ticker.tick([row("b")])).toBe("gone: a"); // one vanished -- reported instead of a reminder
+		expect(ticker.tick([row("b")])).toContain("gone: a"); // one vanished -- reported instead of a reminder
 	});
 
 	it("never reports a reminder when buildReminderMessage is omitted -- vanish-only mode", () => {
@@ -179,7 +237,9 @@ describe("reportAgentPollTick", () => {
 		reportAgentPollTick(ticker, [row("a")], notifier); // baseline
 		reportAgentPollTick(ticker, [], notifier); // vanished
 
-		expect(notifier.calls).toEqual([{ content: "gone: a", options: { deliverAs: "followUp" } }]);
+		expect(notifier.calls).toHaveLength(1);
+		expect(notifier.calls[0]?.content).toContain("gone: a");
+		expect(notifier.calls[0]?.options).toEqual({ deliverAs: "followUp" });
 	});
 
 	it("honors a caller-supplied deliverAs override", () => {
@@ -187,7 +247,9 @@ describe("reportAgentPollTick", () => {
 		const notifier = fakeNotifier();
 		reportAgentPollTick(ticker, [row("a")], notifier);
 		reportAgentPollTick(ticker, [], notifier, { deliverAs: "followUp" });
-		expect(notifier.calls).toEqual([{ content: "gone", options: { deliverAs: "followUp" } }]);
+		expect(notifier.calls).toHaveLength(1);
+		expect(notifier.calls[0]?.content).toContain("gone");
+		expect(notifier.calls[0]?.options).toEqual({ deliverAs: "followUp" });
 	});
 
 	it("never throws when the ticker itself throws", () => {
