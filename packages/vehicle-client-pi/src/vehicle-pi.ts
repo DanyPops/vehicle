@@ -158,6 +158,12 @@ export type PiVehicleInteractiveFollowUp = (
 	client: VehicleClient,
 ) => Promise<PiVehicleFollowUpResult | undefined>;
 
+/**
+ * Every field below is optional and additive: omitting it preserves pre-existing behavior
+ * exactly, for every consumer that hasn't opted in. Each field's own comment documents the
+ * real incident/gap it closes and what enabling it changes -- not what omitting it preserves,
+ * since that's this one invariant, true of the whole interface, not worth restating per field.
+ */
 export interface RegisterVehicleToolsOptions {
 	readonly permissions?: readonly string[];
 	readonly principal?: VehiclePrincipal;
@@ -201,22 +207,12 @@ export interface RegisterVehicleToolsOptions {
 	readonly modelContentMaxBytes?: number;
 	/** Human-selected glyph strategy for the generic renderer's progress bars. Geometry/math is unchanged. */
 	readonly progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle;
-	/**
-	 * Per-operation escape hatch for a client-local interactive step after a
-	 * successful invoke() -- see PiVehicleInteractiveFollowUp. Returning
-	 * undefined (or omitting this option, or the resolver itself returning
-	 * undefined for a given descriptor) means every operation behaves exactly
-	 * as before this option existed: default content/details from the
-	 * primary output, no extra round trip.
-	 */
+	/** Per-operation escape hatch for a client-local interactive step after a successful invoke() -- see PiVehicleInteractiveFollowUp. */
 	readonly interactiveFollowUps?: (descriptor: VehicleOperationDescriptor) => PiVehicleInteractiveFollowUp | undefined;
 	/**
-	 * Per-operation override for Pi's own tool-call concurrency semantics --
-	 * e.g. "sequential" for an operation whose interactiveFollowUps prompts a
-	 * human synchronously, so the model can't batch it alongside other tool
-	 * calls and let those run before the human sees the prompt. Undefined (the
-	 * default for every operation) means Pi's own default concurrency mode,
-	 * unchanged from today.
+	 * Per-operation override for Pi's own tool-call concurrency semantics -- e.g. "sequential" for
+	 * an operation whose interactiveFollowUps prompts a human synchronously, so the model can't
+	 * batch it alongside other tool calls and let those run before the human sees the prompt.
 	 */
 	readonly executionMode?: (descriptor: VehicleOperationDescriptor) => ToolExecutionMode | undefined;
 	/**
@@ -228,12 +224,9 @@ export interface RegisterVehicleToolsOptions {
 	 */
 	readonly requireApprovalForEffects?: readonly VehicleEffect[];
 	/**
-	 * A human's own /safety overrides, consulted ahead of the effect-level
-	 * default and the permission-based check for both tool visibility (see
-	 * syncManagedActiveTools below) and the local pre-invoke approval gate
-	 * (see createTool's execute()). Omitted means no overrides exist --
-	 * classification falls back to permissions+effect exactly as before this
-	 * option existed, a zero-behavior-change default.
+	 * A human's own /safety overrides, consulted ahead of the effect-level default and the
+	 * permission-based check for both tool visibility (see syncManagedActiveTools below) and
+	 * the local pre-invoke approval gate (see createTool's execute()).
 	 */
 	readonly safetyPolicyStore?: VehicleSafetyPolicyStore;
 	/**
@@ -260,22 +253,18 @@ export interface RegisterVehicleToolsOptions {
 	/**
 	 * Overrides the actual local-approval HITL mechanism itself -- distinct from approvalPrompt
 	 * above, which only ever customizes the plain yes/no prompt's title/message text. See
-	 * LocalApprovalRequester's own doc comment. Omitted (the default) preserves today's
-	 * requestPiApproval-based prompt exactly.
+	 * LocalApprovalRequester's own doc comment.
 	 */
 	readonly requestApproval?: LocalApprovalRequester;
 	/**
-	 * Survives a restart/reload while the daemon is unreachable: a successful
-	 * manifest() fetch is persisted here (atomic write, best-effort -- a failed
-	 * write never fails registration); a failed factory-time fetch falls back
-	 * to reading this file instead of throwing, so tool definitions and their
-	 * renderers still exist for transcript replay of a historical tool call
-	 * even while offline. Live availability (available/permissions) still only
-	 * ever comes from a real manifest -- see RegisteredPiVehicle.stale and
-	 * refreshVehicleToolAvailability, which callers should still wire to
-	 * session_start (e.g. via registerVehicleStatusRefresh) to reconcile once
-	 * the daemon is reachable again. Omitted (the default) preserves today's
-	 * behavior: a factory-time manifest() failure throws.
+	 * Survives a restart/reload while the daemon is unreachable: a successful manifest() fetch is
+	 * persisted here (atomic write, best-effort -- a failed write never fails registration); a
+	 * failed factory-time fetch falls back to reading this file instead of throwing, so tool
+	 * definitions and their renderers still exist for transcript replay of a historical tool call
+	 * even while offline. Live availability (available/permissions) still only ever comes from a
+	 * real manifest -- see RegisteredPiVehicle.stale and refreshVehicleToolAvailability, which
+	 * callers should still wire to session_start (e.g. via registerVehicleStatusRefresh) to
+	 * reconcile once the daemon is reachable again.
 	 */
 	readonly manifestCache?: { readonly filePath: string; readonly fs: AtomicJsonFsAdapter };
 	/**
@@ -301,8 +290,7 @@ export interface RegisterVehicleToolsOptions {
 	 * tools_man by default) and keeps most operations inactive behind a decaying-TTL cache -- see
 	 * vehicle-shell.ts. Exists because a Vehicle with dozens of operations otherwise puts every
 	 * single one's full schema in context from turn one, regardless of whether the session ever
-	 * calls it. Omitted (the default) preserves today's all-active behavior exactly, for every
-	 * existing consumer that hasn't opted in.
+	 * calls it.
 	 */
 	readonly shell?: VehicleShellOptions;
 	/**
@@ -324,11 +312,10 @@ export interface RegisterVehicleToolsOptions {
 	 * neither simple nor deterministic. Every manifest operation NOT in that set is reported
 	 * once, at registration time, to onGap (defaulting to a console.warn naming the vehicle and
 	 * every gap operation) -- turning a permanently invisible degradation into a visible signal
-	 * the moment a new/renamed operation ships without a curated renderer. Omitted (the default)
-	 * runs no audit at all -- zero behavior change for every existing consumer that hasn't
-	 * opted in. The improved generic fallback (vehicle-render.ts's recordEnvelope/
-	 * multiArrayEnvelope) already renders many "uncovered" shapes reasonably -- this audit is
-	 * about visibility into what's ACTUALLY still uncovered, not a claim that every gap is bad.
+	 * the moment a new/renamed operation ships without a curated renderer. The improved generic
+	 * fallback (vehicle-render.ts's recordEnvelope/multiArrayEnvelope) already renders many
+	 * "uncovered" shapes reasonably -- this audit is about visibility into what's ACTUALLY still
+	 * uncovered, not a claim that every gap is bad.
 	 */
 	readonly renderCoverage?: {
 		readonly operations: readonly string[];
@@ -348,8 +335,7 @@ export interface RegisterVehicleToolsOptions {
 	 * operation could produce. The real value: build this map via `satisfies
 	 * Record<YourOperationNameUnion, VehiclePresenter>` and the compiler itself rejects a
 	 * manifest operation with no assigned presenter -- exhaustiveness renderCoverage's own runtime
-	 * audit can only ever report on after the fact, never enforce ahead of time. Omitted (the
-	 * default) preserves today's generic-chain-only behavior exactly, for every existing consumer.
+	 * audit can only ever report on after the fact, never enforce ahead of time.
 	 */
 	readonly renderPresenters?: Readonly<Record<string, VehiclePresenter>>;
 }
