@@ -229,6 +229,17 @@ export interface VehicleShellOptions {
 	 * Vehicle's own base tools_list/tools_man behavior -- it degrades to exactly that.
 	 */
 	readonly broker?: VehicleShellBrokerOptions;
+	/**
+	 * Re-fetches THIS Vehicle's own manifest fresh on every tools_list call, the same freshness
+	 * broker mode already gives every OTHER vehicle -- registerVehicleTools auto-supplies
+	 * `() => client.manifest()`. Omitted keeps tools_list reading the static registration-time
+	 * manifest snapshot (today's exact prior behavior). A refresh failure always falls back to that
+	 * same static snapshot, never breaking the base listing. tools_man's own local-activation path
+	 * is intentionally NOT covered by this yet: a genuinely new operation this refresh surfaces has
+	 * no corresponding Pi tool registered for it (unlike a foreign operation's own
+	 * activateForeignOperation escape hatch) -- listed, but not yet callable without a restart.
+	 */
+	readonly refreshOwnManifest?: () => Promise<VehicleManifest>;
 }
 
 export interface VehicleShellBrokerOptions {
@@ -365,7 +376,33 @@ function splitNamespacedName(name: string): { vehicleName: string; operationName
 	return { vehicleName: name.slice(0, separator), operationName: name.slice(separator + 1) };
 }
 
-function createToolsListTool(listToolName: string, manifest: VehicleManifest, broker?: VehicleShellBrokerOptions): ToolDefinition {
+/**
+ * Re-fetches this Vehicle's OWN manifest fresh, same as the foreign/broker path already does for
+ * every OTHER vehicle -- falls back to the static registration-time snapshot on any failure
+ * (network hiccup, daemon transiently unreachable) so a refresh failure never breaks tools_list's
+ * own base listing, matching broker discovery's own resilience contract. Without this, an
+ * operation this Vehicle's own daemon adds/deprecates live (Packed's package.update updating a
+ * daemon in place, no Pi restart) would never show up here at all -- manifest.operations is a
+ * plain closed-over snapshot from registration time otherwise.
+ */
+async function currentOwnOperations(
+	manifest: VehicleManifest,
+	refreshOwnManifest?: () => Promise<VehicleManifest>,
+): Promise<readonly VehicleOperationDescriptor[]> {
+	if (!refreshOwnManifest) return manifest.operations;
+	try {
+		return (await refreshOwnManifest()).operations;
+	} catch {
+		return manifest.operations;
+	}
+}
+
+function createToolsListTool(
+	listToolName: string,
+	manifest: VehicleManifest,
+	broker?: VehicleShellBrokerOptions,
+	refreshOwnManifest?: () => Promise<VehicleManifest>,
+): ToolDefinition {
 	return {
 		name: listToolName,
 		label: "List Tools",
@@ -377,7 +414,11 @@ function createToolsListTool(listToolName: string, manifest: VehicleManifest, br
 		}),
 		async execute(_toolCallId, params) {
 			const query = (params as { query?: string }).query ?? "";
-			const operations = [...manifest.operations, ...foreignOperationsOf(await discoverBrokerVehicles(broker))];
+			const [ownOperations, foreignVehicles] = await Promise.all([
+				currentOwnOperations(manifest, refreshOwnManifest),
+				discoverBrokerVehicles(broker),
+			]);
+			const operations = [...ownOperations, ...foreignOperationsOf(foreignVehicles)];
 			const matches = operations
 				.flatMap((descriptor, index) => {
 					const score = shellQueryScore(descriptor, query);
@@ -510,7 +551,7 @@ export function registerVehicleShell(
 	}
 
 	if (ownsMetaTools) {
-		pi.registerTool(createToolsListTool(listToolName, manifest, options.broker));
+		pi.registerTool(createToolsListTool(listToolName, manifest, options.broker, options.refreshOwnManifest));
 		pi.registerTool(createToolsManTool(pi, manToolName, manifest, handle, discoveredTtlTurns, options.broker));
 	}
 

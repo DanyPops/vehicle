@@ -907,7 +907,12 @@ export async function registerVehicleTools(
 		effect: descriptor.effect,
 		safetyState: resolveSafetyState(manifest.name, descriptor, options),
 	}));
-	const shell = registerVehicleShell(pi, manifest, shellManagedTools(tools), withBrokerRouting(pi, options));
+	const shell = registerVehicleShell(
+		pi,
+		manifest,
+		shellManagedTools(tools),
+		withOwnManifestRefresh(client, withBrokerRouting(pi, options)),
+	);
 	// Registered tools whose operation is currently unavailable (e.g. a
 	// missing credential) or currently resolved to "blocked" (missing
 	// permissions, or an explicit /safety override) are hidden from the LLM
@@ -958,6 +963,13 @@ function withBrokerRouting(pi: ExtensionAPI, options: RegisterVehicleToolsOption
 			activateForeignOperation: (vehicle, descriptor) => activateForeignVehicleOperation(pi, vehicle, descriptor, options),
 		},
 	};
+}
+
+/** Gives tools_list the same live freshness for THIS Vehicle's own manifest that broker mode
+ * already gives every other one -- see VehicleShellOptions.refreshOwnManifest's own doc comment. */
+function withOwnManifestRefresh(client: VehicleClient, shell: VehicleShellOptions | undefined): VehicleShellOptions | undefined {
+	if (!shell) return shell;
+	return { ...shell, refreshOwnManifest: () => client.manifest() };
 }
 
 /**
