@@ -1,8 +1,11 @@
 import type { JsonSchema, VehicleManifest, VehicleManifestOperation, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { reportModuleLoad, reportShellRegistered, reportToolsListExecute, reportToolsManExecute } from "./client-diagnostics.js";
 import { syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
 import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
+
+reportModuleLoad(import.meta.url);
 
 /**
  * A decaying-TTL cache over Pi's active-tool set, turn-scoped. Every tracked tool name carries a
@@ -405,6 +408,7 @@ function createToolsListTool(
 		}),
 		async execute(_toolCallId, params) {
 			const query = (params as { query?: string }).query ?? "";
+			reportToolsListExecute(manifest.name, query);
 			const [ownOperations, foreignVehicles] = await Promise.all([
 				currentOwnOperations(manifest, refreshOwnManifest),
 				discoverBrokerVehicles(broker),
@@ -448,6 +452,7 @@ function createToolsManTool(
 		}),
 		async execute(_toolCallId, params) {
 			const names = (params as { names: string[] }).names;
+			reportToolsManExecute(manifest.name, names);
 			const byOperationName = new Map(handle.managedTools.map((tool) => [tool.operationName, tool]));
 			const ownOperations = await currentOwnOperations(manifest, refreshOwnManifest);
 			// Lazy, once -- a broker round-trip is real IO, never paid for a purely-local request.
@@ -556,6 +561,7 @@ export function registerVehicleShell(
 			handle.tracker.seed(tool.toolName, handle.coreTtlTurns);
 	}
 
+	reportShellRegistered(manifest.name, listToolName, manToolName, ownsMetaTools);
 	if (ownsMetaTools) {
 		pi.registerTool(createToolsListTool(listToolName, manifest, options.broker, options.refreshOwnManifest));
 		pi.registerTool(

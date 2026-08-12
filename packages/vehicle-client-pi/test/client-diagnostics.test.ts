@@ -6,7 +6,15 @@ import { join } from "node:path";
 import {
 	__classificationFailureChannelForTests,
 	CLASSIFICATION_FAILURE_CHANNEL_NAME,
+	MODULE_LOAD_CHANNEL_NAME,
 	reportClassificationFailure,
+	reportModuleLoad,
+	reportShellRegistered,
+	reportToolsListExecute,
+	reportToolsManExecute,
+	SHELL_REGISTERED_CHANNEL_NAME,
+	TOOLS_LIST_EXECUTE_CHANNEL_NAME,
+	TOOLS_MAN_EXECUTE_CHANNEL_NAME,
 } from "../src/client-diagnostics.ts";
 
 describe("reportClassificationFailure", () => {
@@ -97,5 +105,97 @@ describe("reportClassificationFailure", () => {
 		const entry = JSON.parse(readFileSync(path, "utf8").trim().split("\n")[0]!);
 		expect(entry.originalErrorKind).toBe("string");
 		expect(entry.internalFailureKind).toBe("object");
+	});
+});
+
+describe("Vehicle Shell lifecycle diagnostics", () => {
+	const directory = mkdtempSync(join(tmpdir(), "vehicle-shell-diag-"));
+	const path = join(directory, "shell-diag.log");
+
+	afterEach(() => {
+		delete process.env.VEHICLE_CLIENT_DIAG;
+		delete process.env.VEHICLE_CLIENT_DIAG_PATH;
+		rmSync(directory, { recursive: true, force: true });
+	});
+
+	it("reportModuleLoad publishes on the documented channel, unconditionally", () => {
+		const events: unknown[] = [];
+		const channel = diagnosticsChannel.channel(MODULE_LOAD_CHANNEL_NAME);
+		const subscriber = (event: unknown) => events.push(event);
+		channel.subscribe(subscriber);
+		try {
+			reportModuleLoad("file:///vehicle-shell.js");
+		} finally {
+			channel.unsubscribe(subscriber);
+		}
+		expect(events).toEqual([{ ts: expect.any(String), moduleUrl: "file:///vehicle-shell.js" }]);
+	});
+
+	it("reportShellRegistered publishes the vehicle name and both meta-tool names", () => {
+		const events: unknown[] = [];
+		const channel = diagnosticsChannel.channel(SHELL_REGISTERED_CHANNEL_NAME);
+		const subscriber = (event: unknown) => events.push(event);
+		channel.subscribe(subscriber);
+		try {
+			reportShellRegistered("pipes", "tools_list", "tools_man", true);
+		} finally {
+			channel.unsubscribe(subscriber);
+		}
+		expect(events).toEqual([
+			{ ts: expect.any(String), vehicleName: "pipes", listToolName: "tools_list", manToolName: "tools_man", ownsMetaTools: true },
+		]);
+	});
+
+	it("reportToolsListExecute publishes the vehicle name and query per call", () => {
+		const events: unknown[] = [];
+		const channel = diagnosticsChannel.channel(TOOLS_LIST_EXECUTE_CHANNEL_NAME);
+		const subscriber = (event: unknown) => events.push(event);
+		channel.subscribe(subscriber);
+		try {
+			reportToolsListExecute("pipes", "ci");
+		} finally {
+			channel.unsubscribe(subscriber);
+		}
+		expect(events).toEqual([{ ts: expect.any(String), vehicleName: "pipes", query: "ci" }]);
+	});
+
+	it("reportToolsManExecute publishes the vehicle name and requested names per call", () => {
+		const events: unknown[] = [];
+		const channel = diagnosticsChannel.channel(TOOLS_MAN_EXECUTE_CHANNEL_NAME);
+		const subscriber = (event: unknown) => events.push(event);
+		channel.subscribe(subscriber);
+		try {
+			reportToolsManExecute("pipes", ["ci.status"]);
+		} finally {
+			channel.unsubscribe(subscriber);
+		}
+		expect(events).toEqual([{ ts: expect.any(String), vehicleName: "pipes", names: ["ci.status"] }]);
+	});
+
+	it("is a file-log no-op for every new channel when VEHICLE_CLIENT_DIAG isn't set to 1", () => {
+		reportModuleLoad("file:///x.js");
+		reportShellRegistered("pipes", "tools_list", "tools_man", true);
+		reportToolsListExecute("pipes", "");
+		reportToolsManExecute("pipes", []);
+		expect(existsSync(path)).toBe(false);
+	});
+
+	it("appends one JSONL entry per call once VEHICLE_CLIENT_DIAG=1, tagged with its own channel name", () => {
+		process.env.VEHICLE_CLIENT_DIAG = "1";
+		process.env.VEHICLE_CLIENT_DIAG_PATH = path;
+		reportModuleLoad("file:///vehicle-shell.js");
+		reportShellRegistered("pipes", "tools_list", "tools_man", true);
+		reportToolsListExecute("pipes", "ci");
+		reportToolsManExecute("pipes", ["ci.status"]);
+		const entries = readFileSync(path, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(entries.map((entry) => entry.channel)).toEqual([
+			MODULE_LOAD_CHANNEL_NAME,
+			SHELL_REGISTERED_CHANNEL_NAME,
+			TOOLS_LIST_EXECUTE_CHANNEL_NAME,
+			TOOLS_MAN_EXECUTE_CHANNEL_NAME,
+		]);
 	});
 });

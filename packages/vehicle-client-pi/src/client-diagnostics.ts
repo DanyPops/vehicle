@@ -46,7 +46,7 @@ function diagPath(): string {
 }
 
 /** Best-effort JSONL append -- a broken/unwritable diagnostic path must never break a real invocation. */
-function appendDiagLine(entry: ClassificationFailureEvent): void {
+function appendDiagLine<T extends object>(entry: T): void {
 	if (!isDiagEnabled()) return;
 	try {
 		const path = diagPath();
@@ -55,6 +55,12 @@ function appendDiagLine(entry: ClassificationFailureEvent): void {
 	} catch {
 		/* best-effort -- a broken diagnostic log must never break a real invocation */
 	}
+}
+
+/** publish-unconditionally-then-file-log-if-enabled, the one shared shape every channel below uses. */
+function publishAndLog<T extends object>(channel: diagnosticsChannel.Channel, entry: T): void {
+	if (channel.hasSubscribers) channel.publish(entry);
+	appendDiagLine({ channel: channel.name, ...entry });
 }
 
 /**
@@ -108,4 +114,39 @@ export function reportClassificationFailure(originalError: unknown, internalFail
 /** Exposed for a test/subscriber that wants the live channel object directly rather than re-deriving it from the name. */
 export function __classificationFailureChannelForTests(): diagnosticsChannel.Channel {
 	return classificationFailureChannel;
+}
+
+/**
+ * The Vehicle Shell lifecycle's own diagnostic surface, same convention/env vars as
+ * reportClassificationFailure above: answers "did tools_list/tools_man/registerVehicleShell
+ * actually execute in this process, from this module" from outside the process, without a
+ * debugger or a hand-patched dist file -- module load is the coarsest signal (fires on import,
+ * independent of whether any tool is ever called), the other three confirm the specific
+ * lifecycle step under question.
+ */
+export const MODULE_LOAD_CHANNEL_NAME = "vehicle-client-pi:module-load";
+export const SHELL_REGISTERED_CHANNEL_NAME = "vehicle-client-pi:shell-registered";
+export const TOOLS_LIST_EXECUTE_CHANNEL_NAME = "vehicle-client-pi:tools-list-execute";
+export const TOOLS_MAN_EXECUTE_CHANNEL_NAME = "vehicle-client-pi:tools-man-execute";
+
+const moduleLoadChannel = diagnosticsChannel.channel(MODULE_LOAD_CHANNEL_NAME);
+const shellRegisteredChannel = diagnosticsChannel.channel(SHELL_REGISTERED_CHANNEL_NAME);
+const toolsListExecuteChannel = diagnosticsChannel.channel(TOOLS_LIST_EXECUTE_CHANNEL_NAME);
+const toolsManExecuteChannel = diagnosticsChannel.channel(TOOLS_MAN_EXECUTE_CHANNEL_NAME);
+
+/** Fires once per module evaluation (once per distinct copy actually imported by the runtime), not per call. */
+export function reportModuleLoad(moduleUrl: string): void {
+	publishAndLog(moduleLoadChannel, { ts: new Date().toISOString(), moduleUrl });
+}
+
+export function reportShellRegistered(vehicleName: string, listToolName: string, manToolName: string, ownsMetaTools: boolean): void {
+	publishAndLog(shellRegisteredChannel, { ts: new Date().toISOString(), vehicleName, listToolName, manToolName, ownsMetaTools });
+}
+
+export function reportToolsListExecute(vehicleName: string, query: string): void {
+	publishAndLog(toolsListExecuteChannel, { ts: new Date().toISOString(), vehicleName, query });
+}
+
+export function reportToolsManExecute(vehicleName: string, names: readonly string[]): void {
+	publishAndLog(toolsManExecuteChannel, { ts: new Date().toISOString(), vehicleName, names });
 }
