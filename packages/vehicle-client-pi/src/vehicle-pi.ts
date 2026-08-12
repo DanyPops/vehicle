@@ -911,7 +911,7 @@ export async function registerVehicleTools(
 		pi,
 		manifest,
 		shellManagedTools(tools),
-		withOwnManifestRefresh(client, withBrokerRouting(pi, options)),
+		withLocalDynamism(pi, client, manifest, options, withBrokerRouting(pi, options)),
 	);
 	// Registered tools whose operation is currently unavailable (e.g. a
 	// missing credential) or currently resolved to "blocked" (missing
@@ -965,11 +965,33 @@ function withBrokerRouting(pi: ExtensionAPI, options: RegisterVehicleToolsOption
 	};
 }
 
-/** Gives tools_list the same live freshness for THIS Vehicle's own manifest that broker mode
- * already gives every other one -- see VehicleShellOptions.refreshOwnManifest's own doc comment. */
-function withOwnManifestRefresh(client: VehicleClient, shell: VehicleShellOptions | undefined): VehicleShellOptions | undefined {
+function activateLocalVehicleOperation(
+	pi: ExtensionAPI,
+	client: VehicleClient,
+	manifest: VehicleManifest,
+	descriptor: VehicleManifestOperation,
+	options: RegisterVehicleToolsOptions,
+): string {
+	const toolName = defaultToolName(descriptor, false);
+	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
+	assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
+	pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
+	return toolName;
+}
+
+function withLocalDynamism(
+	pi: ExtensionAPI,
+	client: VehicleClient,
+	manifest: VehicleManifest,
+	options: RegisterVehicleToolsOptions,
+	shell: VehicleShellOptions | undefined,
+): VehicleShellOptions | undefined {
 	if (!shell) return shell;
-	return { ...shell, refreshOwnManifest: () => client.manifest() };
+	return {
+		...shell,
+		refreshOwnManifest: () => client.manifest(),
+		activateLocalOperation: (descriptor) => activateLocalVehicleOperation(pi, client, manifest, descriptor, options),
+	};
 }
 
 /**

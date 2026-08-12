@@ -60,8 +60,10 @@ export class VehicleShellTtlTracker {
 }
 
 /** The NAME section of a real man page: one line, no wrapping, safe to list alongside dozens of others. */
-export function formatOperationOneLiner(descriptor: VehicleOperationDescriptor): string {
-	return `${descriptor.name} -- ${descriptor.description}`;
+export function formatOperationOneLiner(descriptor: VehicleManifestOperation): string {
+	const base = `${descriptor.name} -- ${descriptor.description}`;
+	if (descriptor.available !== false) return base; // undefined stays unannotated, only a literal false
+	return `${base} (currently unavailable${descriptor.unavailableReason ? `: ${descriptor.unavailableReason}` : ""})`;
 }
 
 function normalizeShellTerms(value: string): string {
@@ -229,17 +231,14 @@ export interface VehicleShellOptions {
 	 * Vehicle's own base tools_list/tools_man behavior -- it degrades to exactly that.
 	 */
 	readonly broker?: VehicleShellBrokerOptions;
-	/**
-	 * Re-fetches THIS Vehicle's own manifest fresh on every tools_list call, the same freshness
-	 * broker mode already gives every OTHER vehicle -- registerVehicleTools auto-supplies
-	 * `() => client.manifest()`. Omitted keeps tools_list reading the static registration-time
-	 * manifest snapshot (today's exact prior behavior). A refresh failure always falls back to that
-	 * same static snapshot, never breaking the base listing. tools_man's own local-activation path
-	 * is intentionally NOT covered by this yet: a genuinely new operation this refresh surfaces has
-	 * no corresponding Pi tool registered for it (unlike a foreign operation's own
-	 * activateForeignOperation escape hatch) -- listed, but not yet callable without a restart.
-	 */
+	/** Re-fetches this Vehicle's own manifest fresh per tools_list call (registerVehicleTools
+	 * auto-supplies `() => client.manifest()`); omitted keeps today's static snapshot. Falls back to
+	 * the snapshot on failure, same as broker discovery. */
 	readonly refreshOwnManifest?: () => Promise<VehicleManifest>;
+	/** Registers a real Pi tool for a local operation refreshOwnManifest surfaced after registration
+	 * (mirrors broker.activateForeignOperation); returns its Pi tool name. Omitted: such an
+	 * operation is listed but tools_man reports it not-yet-activatable. */
+	readonly activateLocalOperation?: (descriptor: VehicleManifestOperation) => string;
 }
 
 export interface VehicleShellBrokerOptions {
@@ -328,7 +327,7 @@ function applyShellActivation(pi: ExtensionAPI, handle: VehicleShellHandle): voi
 
 /** A foreign vehicle's own descriptor, relabeled with its namespaced "<vehicleName>:<operation>"
  * name for listing/matching -- a shallow clone, never mutates the original manifest. */
-function namespacedDescriptor(vehicleName: string, descriptor: VehicleOperationDescriptor): VehicleOperationDescriptor {
+function namespacedDescriptor(vehicleName: string, descriptor: VehicleManifestOperation): VehicleManifestOperation {
 	return { ...descriptor, name: `${vehicleName}:${descriptor.name}` };
 }
 
@@ -365,7 +364,7 @@ async function discoverBrokerVehicles(broker: VehicleShellBrokerOptions | undefi
 	}
 }
 
-function foreignOperationsOf(vehicles: readonly DiscoveredVehicle[]): readonly VehicleOperationDescriptor[] {
+function foreignOperationsOf(vehicles: readonly DiscoveredVehicle[]): readonly VehicleManifestOperation[] {
 	return vehicles.flatMap((vehicle) => vehicle.manifest.operations.map((op) => namespacedDescriptor(vehicle.name, op)));
 }
 
@@ -376,19 +375,11 @@ function splitNamespacedName(name: string): { vehicleName: string; operationName
 	return { vehicleName: name.slice(0, separator), operationName: name.slice(separator + 1) };
 }
 
-/**
- * Re-fetches this Vehicle's OWN manifest fresh, same as the foreign/broker path already does for
- * every OTHER vehicle -- falls back to the static registration-time snapshot on any failure
- * (network hiccup, daemon transiently unreachable) so a refresh failure never breaks tools_list's
- * own base listing, matching broker discovery's own resilience contract. Without this, an
- * operation this Vehicle's own daemon adds/deprecates live (Packed's package.update updating a
- * daemon in place, no Pi restart) would never show up here at all -- manifest.operations is a
- * plain closed-over snapshot from registration time otherwise.
- */
+/** Fresh per call, like the broker/foreign path -- falls back to the static snapshot on failure. */
 async function currentOwnOperations(
 	manifest: VehicleManifest,
 	refreshOwnManifest?: () => Promise<VehicleManifest>,
-): Promise<readonly VehicleOperationDescriptor[]> {
+): Promise<readonly VehicleManifestOperation[]> {
 	if (!refreshOwnManifest) return manifest.operations;
 	try {
 		return (await refreshOwnManifest()).operations;
@@ -445,6 +436,8 @@ function createToolsManTool(
 	handle: VehicleShellHandle,
 	discoveredTtlTurns: number,
 	broker?: VehicleShellBrokerOptions,
+	refreshOwnManifest?: () => Promise<VehicleManifest>,
+	activateLocalOperation?: (descriptor: VehicleManifestOperation) => string,
 ): ToolDefinition {
 	return {
 		name: manToolName,
@@ -456,18 +449,31 @@ function createToolsManTool(
 		async execute(_toolCallId, params) {
 			const names = (params as { names: string[] }).names;
 			const byOperationName = new Map(handle.managedTools.map((tool) => [tool.operationName, tool]));
-			// Only resolved once, lazily, and only if at least one requested name isn't local -- a
-			// broker discovery round-trip is real network/fs work, never paid for a purely-local request.
+			const ownOperations = await currentOwnOperations(manifest, refreshOwnManifest);
+			// Lazy, once -- a broker round-trip is real IO, never paid for a purely-local request.
 			let foreignVehicles: readonly DiscoveredVehicle[] | undefined;
 			const pages = await Promise.all(
 				names.map(async (name) => {
-					const descriptor = manifest.operations.find((op) => op.name === name);
+					const descriptor = ownOperations.find((op) => op.name === name);
 					const managed = byOperationName.get(name);
 					if (descriptor && managed) {
 						if (!managed.available) return `${name}: currently unavailable (${DEFAULT_MAN_TOOL_NAME} cannot activate it right now).`;
 						if (managed.blocked) return `${name}: blocked by the current safety policy -- not activatable.`;
 						handle.tracker.seed(managed.toolName, discoveredTtlTurns);
 						return `${formatOperationManPage(descriptor, managed.toolName)}\n\n(now callable as ${managed.toolName})`;
+					}
+					// A genuinely new local operation, not yet a Pi tool -- activate on demand, same as foreign.
+					if (descriptor && !managed) {
+						if (!activateLocalOperation) return `${name}: known, but local activation isn't wired yet; not yet callable here.`;
+						let toolName: string;
+						try {
+							toolName = activateLocalOperation(descriptor);
+						} catch (error) {
+							return `${name}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
+						}
+						handle.managedTools = [...handle.managedTools, { toolName, operationName: name, available: true, blocked: false }];
+						handle.tracker.seed(toolName, discoveredTtlTurns);
+						return `${formatOperationManPage(descriptor, toolName)}\n\n(now callable as ${toolName})`;
 					}
 					const split = splitNamespacedName(name);
 					if (!split) return `${name}: no such operation. Use ${DEFAULT_LIST_TOOL_NAME} to browse available names.`;
@@ -552,7 +558,18 @@ export function registerVehicleShell(
 
 	if (ownsMetaTools) {
 		pi.registerTool(createToolsListTool(listToolName, manifest, options.broker, options.refreshOwnManifest));
-		pi.registerTool(createToolsManTool(pi, manToolName, manifest, handle, discoveredTtlTurns, options.broker));
+		pi.registerTool(
+			createToolsManTool(
+				pi,
+				manToolName,
+				manifest,
+				handle,
+				discoveredTtlTurns,
+				options.broker,
+				options.refreshOwnManifest,
+				options.activateLocalOperation,
+			),
+		);
 	}
 
 	pi.on("tool_execution_end", (event) => {

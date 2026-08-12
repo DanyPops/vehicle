@@ -1,29 +1,15 @@
 #!/usr/bin/env bun
 /**
- * A real, controllable Vehicle daemon for exercising "does tools_list/tools_man converge to
- * reality dynamically" -- on boot (including a slow-starting or never-starting vehicle), on an
- * in-place update (Packed's package.update + restart_service: same process, registry mutated
- * live), and on an Armada-style atomic replacement (old process killed, a new one started at a
- * new port with a different manifest, new handle file written).
+ * A real, controllable Vehicle daemon for boot/in-place-update/Armada-swap E2E tests. Real HTTP,
+ * handle file, bearer auth -- but its manifest is mutable live via its own real operations:
+ *   fixture.ping           -- liveness probe.
+ *   fixture.add_operation  -- registers a new operation live.
+ *   fixture.set_available  -- toggles an existing operation's availability.
  *
- * Real HTTP, real handle file, real bearer auth -- the same wire protocol any real Vehicle daemon
- * (papyrus, pipes, web-spider) speaks -- but with a manifest a test can mutate live through the
- * daemon's own real Vehicle operations, instead of needing a bespoke side-channel:
- *
- *   fixture.ping                    -- always present; a liveness probe distinct from tools_list.
- *   fixture.add_operation           -- registers a brand-new trivial operation live (a genuine
- *                                       vNext addition, not just re-enabling one declared at boot).
- *   fixture.set_available           -- toggles an existing operation's availability (simulates
- *                                       deprecating/hiding one without a restart).
- *
- * FIXTURE_VEHICLE_NAME (default "fixture"), FIXTURE_VEHICLE_VERSION (default "1.0.0"),
- * FIXTURE_INITIAL_OPERATIONS (JSON string array of names, seeded as trivial echo operations at
- * boot -- this is "what version am I" for the Armada-swap scenario: start a second instance with
- * a different list to stand in for a new release). FIXTURE_START_DELAY_MS delays writing the
- * handle file (simulates a slow-booting daemon for boot-race tests). FIXTURE_EXIT_CODE exits with
- * that code shortly after starting (simulates a crash-looping update). SIGTERM/SIGINT/the same
- * stdin fallback awaitGracefulShutdown already supports remove the handle file and exit 0 (a
- * real graceful stop, e.g. Armada tearing this instance down before starting its replacement).
+ * FIXTURE_VEHICLE_NAME/FIXTURE_VEHICLE_VERSION identify this instance. FIXTURE_INITIAL_OPERATIONS
+ * (JSON string array) seeds the boot-time manifest -- start a second instance with a different
+ * list to simulate an Armada version swap. FIXTURE_START_DELAY_MS simulates a slow boot.
+ * FIXTURE_EXIT_CODE simulates a crash. SIGTERM/SIGINT do a real graceful shutdown (handle removed).
  */
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";

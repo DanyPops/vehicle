@@ -1,13 +1,6 @@
-/**
- * The closest reproduction of the actual live-session architecture this repo can build: the REAL,
- * published `@danypops/pi-pipes` and `@danypops/pi-papyrus` npm extensions (not a minimal fixture
- * standing in for them), each talking to its own real, separately-spawned daemon process, loaded
- * into one real spawned `pi --mode rpc` process exactly the way a real settings.json would (two
- * `--extension` entries). vehicle-pi-real-daemons.test.ts already proved the underlying broker
- * filesystem-discovery mechanism sound with minimal fixtures; this is the remaining, larger-surface
- * candidate -- something in pi-pipes' or pi-papyrus' own real extension code (registration timing,
- * session_start deferral, deps wiring) that a minimal fixture can't exercise.
- */
+/** The real, published @danypops/pi-pipes and @danypops/pi-papyrus extensions (not fixtures),
+ * each backed by its own real daemon, loaded together the way settings.json would -- covers their
+ * own registration/timing code, which vehicle-pi-real-daemons.test.ts's minimal fixtures can't. */
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";

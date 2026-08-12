@@ -1,12 +1,6 @@
-/**
- * Registers as the tools_list/tools_man broker owner ("probe"), backed by a real RemoteVehicleClient
- * connection to a real fixture-vehicle-daemon.ts instance named "probe" (see
- * vehicle-server/test/fixtures/fixture-vehicle-daemon.ts) -- started as a companion daemon by
- * whichever test uses this extension. Broker discovery uses the real default filesystem path (no
- * discover override), so it picks up any OTHER fixture-vehicle-daemon instance (e.g. one named
- * "fixture") that publishes its handle into the same $XDG_RUNTIME_DIR -- including one that gets
- * killed and replaced by a differently-versioned instance mid-session, which is the whole point.
- */
+/** Broker owner ("probe"), backed by a real fixture-vehicle-daemon.ts instance named "probe".
+ * Real default filesystem discovery, so it picks up any other fixture instance sharing
+ * $XDG_RUNTIME_DIR -- including one killed and replaced mid-session. */
 import { readFileSync } from "node:fs";
 import { RemoteVehicleClient } from "@danypops/vehicle-client/http";
 import { resolveSharedVehicleHandlePath } from "@danypops/vehicle-server/paths";

@@ -1,19 +1,11 @@
 /**
- * Does tools_list/tools_man converge to reality dynamically, within one already-running pi
- * process -- not "does a fresh process see the current state" (vehicle-pi-real-daemons.test.ts
- * already covers that), but "does an ALREADY-RUNNING session pick up a change that happened to a
- * Vehicle daemon out from under it, on the next tools_list call, with no Pi restart at all".
+ * Does an already-running pi process pick up a Vehicle daemon change out from under it, with no
+ * Pi restart? Drives one real spawned pi process through several turns: a `text` step right after
+ * each `toolCall` ends that turn, so sequential sendPrompt() calls map 1:1 onto script steps,
+ * leaving as much time as needed between two tools_list calls to mutate/kill/replace a daemon.
  *
- * Drives a real spawned pi process through several sequential turns via
- * @danypops/pi-process-harness's faux provider: a `text` step immediately after each `toolCall`
- * step reliably ends that turn (confirmed empirically -- the agent loop does not ask the model for
- * a further action once it receives plain text), so sequential sendPrompt() calls map 1:1 onto
- * sequential script steps, giving the test as much wall-clock time as it needs between two
- * tools_list calls to mutate the fixture daemon's live state or kill/replace it entirely.
- *
- * "probe" is the tools_list/tools_man broker owner throughout (see probe-broker-extension.ts);
- * "fixture" (vehicle-server's fixture-vehicle-daemon.ts) is the one being mutated/swapped, and
- * its operations always appear under this process's tools_list namespaced "fixture:<op>".
+ * "probe" is the tools_list/tools_man broker owner; "fixture" (fixture-vehicle-daemon.ts) is the
+ * one mutated/swapped, appearing namespaced "fixture:<op>".
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -97,11 +89,7 @@ describe("tools_list converges dynamically within one already-running pi process
 		return daemon;
 	}
 
-	// waitForRpcEvent's find() returns the FIRST array element satisfying its predicate, not the
-	// newest one -- every tool_execution_end event satisfies "event.type === 'tool_execution_end'",
-	// so a predicate that only checks the type (or even a global array-length side condition) keeps
-	// matching call #1's own stale event forever. Index by "how many tool_execution_end events have
-	// we already consumed" and wait for one strictly beyond that instead.
+	// find() returns the first match, not the newest -- index by how many we've already consumed.
 	async function toolsListText(events: AgentSessionEvent[], proc: ReturnType<typeof spawnRealPiProcess>, message: string): Promise<string> {
 		const alreadySeen = events.filter((event) => event.type === "tool_execution_end").length;
 		proc.sendPrompt(message);
@@ -151,7 +139,7 @@ describe("tools_list converges dynamically within one already-running pi process
 			expect(before).toContain("fixture:foo.v1");
 			expect(before).not.toContain("fixture:foo.v2");
 
-			// In-place update, same process, no restart: a genuinely new operation appears live.
+			// Same process, no restart: a new operation appears live.
 			const fixture = fixtureClient(runtimeDir, "fixture");
 			await fixture.invoke("fixture.add_operation", 1, { name: "foo.v2", description: "added live" });
 
@@ -159,17 +147,11 @@ describe("tools_list converges dynamically within one already-running pi process
 			expect(afterAdd).toContain("fixture:foo.v1");
 			expect(afterAdd).toContain("fixture:foo.v2");
 
-			// Known current gap, documented rather than silently asserted around: tools_list never
-			// filters by an operation's own `available` flag, for either a local or a foreign
-			// (broker-discovered) vehicle -- formatOperationOneLiner has nothing to key an
-			// availability check off of. Deprecating a foreign operation live IS visible dynamically
-			// (this assertion proves the broker fetch itself is live/fresh), but it does not
-			// disappear from the listing the way #5's user story wants -- filed as a follow-up, not
-			// fixed here.
+			// Deprecating live is visible dynamically; stays listed but annotated (never vanishes).
 			await fixture.invoke("fixture.set_available", 1, { name: "foo.v1", available: false, reason: "deprecated" });
 
 			const afterDeprecate = await toolsListText(events, proc, "list tools once more");
-			expect(afterDeprecate).toContain("fixture:foo.v1"); // current behavior: still listed despite available:false
+			expect(afterDeprecate).toContain("fixture:foo.v1 -- Seeded fixture operation foo.v1. (currently unavailable: deprecated)");
 			expect(afterDeprecate).toContain("fixture:foo.v2");
 		} finally {
 			await proc.dispose();
@@ -204,15 +186,59 @@ describe("tools_list converges dynamically within one already-running pi process
 			expect(before).toContain("own.v1");
 			expect(before).not.toContain("own.v2");
 
-			// "probe" updates ITS OWN manifest live (Packed's package.update + restart_service
-			// scenario, but even more direct: the same process, no restart at all) -- via a
-			// separately-constructed client hitting the same real daemon.
+			// "probe" updates its own manifest live, no restart.
 			const probe = fixtureClient(runtimeDir, "probe");
 			await probe.invoke("fixture.add_operation", 1, { name: "own.v2", description: "added to the owning vehicle's own manifest" });
 
 			const after = await toolsListText(events, proc, "list tools again");
 			expect(after).toContain("own.v1");
 			expect(after).toContain("own.v2");
+		} finally {
+			await proc.dispose();
+		}
+	}, 30_000);
+
+	it("tools_man activates a genuinely new LOCAL operation added live, making it actually callable", async () => {
+		const { runtimeDir, sharedEnv } = isolatedEnv();
+		await startFixture(runtimeDir, sharedEnv, "probe", []);
+
+		const proc = spawnRealPiProcess({
+			extensions: [resolveFauxProviderExtensionPath(), PROBE_EXTENSION],
+			extraArgs: ["--provider", "faux", "--model", "faux-1"],
+			isolatedHome: sharedHome,
+			env: {
+				XDG_RUNTIME_DIR: sharedEnv.XDG_RUNTIME_DIR,
+				XDG_DATA_HOME: sharedEnv.XDG_DATA_HOME,
+				XDG_STATE_HOME: sharedEnv.XDG_STATE_HOME,
+				[SCRIPT_ENV_VAR]: encodeFauxScript([
+					{ type: "toolCall", name: "tools_list", arguments: {} },
+					{ type: "text", text: "ok0" },
+					{ type: "toolCall", name: "tools_man", arguments: { names: ["own.v2"] } },
+					{ type: "text", text: "ok1" },
+					{ type: "toolCall", name: "own_v2", arguments: {} },
+					{ type: "text", text: "ok2" },
+				]),
+			},
+		});
+		const events: AgentSessionEvent[] = [];
+		proc.onEvent((event) => events.push(event));
+
+		try {
+			// Baseline avoids a race with the extension's own async registration seeing own.v2 first.
+			const baseline = await toolsListText(events, proc, "list tools first");
+			expect(baseline).not.toContain("own.v2");
+
+			// Added live, after registration.
+			const probe = fixtureClient(runtimeDir, "probe");
+			await probe.invoke("fixture.add_operation", 1, { name: "own.v2", description: "added to the owning vehicle's own manifest" });
+
+			const manPage = await toolsListText(events, proc, "activate own.v2");
+			expect(manPage).not.toContain("no such operation");
+			expect(manPage).toContain("now callable as own_v2");
+
+			// Proves it's genuinely callable, not just claimed.
+			const callResult = await toolsListText(events, proc, "call the newly-activated tool");
+			expect(callResult).toContain("echoed");
 		} finally {
 			await proc.dispose();
 		}
@@ -248,8 +274,7 @@ describe("tools_list converges dynamically within one already-running pi process
 			const beforeSwap = await toolsListText(events, proc, "list tools");
 			expect(beforeSwap).toContain("fixture:foo.v1");
 
-			// Armada tears the old instance down gracefully (SIGTERM -> handle removed) before
-			// starting the replacement -- a real gap where the vehicle is briefly undiscoverable.
+			// Graceful teardown (handle removed) before the replacement starts -- a real gap.
 			await fixtureV1.dispose();
 			daemons = daemons.filter((daemon) => daemon !== fixtureV1);
 
@@ -258,7 +283,7 @@ describe("tools_list converges dynamically within one already-running pi process
 			expect(duringGap).not.toContain("fixture:foo.v2");
 			expect(duringGap).not.toContain("fixture:"); // no broken/error entries, just silently absent
 
-			// Armada starts the replacement -- same Vehicle name, new port, new handle, new manifest.
+			// Same name, new port/handle/manifest.
 			await startFixture(runtimeDir, sharedEnv, "fixture", ["foo.v2"]);
 
 			const afterSwap = await toolsListText(events, proc, "list tools after swap");

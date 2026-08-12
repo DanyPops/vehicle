@@ -1,14 +1,6 @@
-/**
- * The strongest real-world approximation of the live-session symptom this repo can construct and
- * fully control: two genuinely separate, independently-started Vehicle daemon PROCESSES (a real
- * `papyrus serve` and a real `pipes serve`, both real published packages, not fakes), discovered
- * by a real spawned `pi --mode rpc` process's real filesystem-handle broker discovery
- * (discoverForeignVehicles reading $XDG_RUNTIME_DIR/vehicle/handles/*.json) -- not the in-process
- * registry path vehicle-pi-real-process.test.ts already covers. Isolates HOME/XDG_* for both
- * daemons and the pi process into one shared temp dir so this never touches the real operator's
- * own papyrus/pipes state, but is otherwise the real thing end to end: real HTTP manifest fetch,
- * real Bearer-token auth, real handle files, real jiti-loaded extension.
- */
+/** Two real, separate daemon processes (`papyrus serve`, `pipes serve`) discovered by a real
+ * spawned pi process's filesystem-handle broker discovery -- the path vehicle-pi-real-process.test.ts
+ * doesn't cover. Isolated HOME/XDG_* per run; real HTTP, tokens, handle files, extension loading. */
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";

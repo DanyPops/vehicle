@@ -1,11 +1,6 @@
-/**
- * Real-process regression for the in-process broker-discovery-stacking fix
- * (vehicle-shell-registry.ts): vehicle-pi-shell.test.ts proves the merge logic against a fake
- * in-process harness; this proves the SAME fix survives a real spawned `pi --mode rpc` process --
- * real jiti-based extension loading, real module resolution, real tool_execution_end payload --
- * the exact seam a live interactive session's staleness could plausibly hide in but that no
- * amount of manual restart-and-recheck against a live session can isolate or automate.
- */
+/** Proves the in-process broker-discovery-stacking fix (vehicle-shell-registry.ts) survives a
+ * real spawned `pi --mode rpc` process, not just the fake in-process harness in
+ * vehicle-pi-shell.test.ts. */
 
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";

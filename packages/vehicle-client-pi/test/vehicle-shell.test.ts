@@ -1,13 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import type { VehicleOperationDescriptor } from "@danypops/vehicle-core";
+import type { VehicleManifestOperation } from "@danypops/vehicle-core";
 import { formatOperationManPage, formatOperationOneLiner, matchesShellQuery, VehicleShellTtlTracker } from "../src/vehicle-shell.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
 
-function descriptor(overrides: Partial<VehicleOperationDescriptor> = {}): VehicleOperationDescriptor {
+function descriptor(overrides: Partial<VehicleManifestOperation> = {}): VehicleManifestOperation {
 	return {
 		name: "tasks.depend",
 		version: 1,
+		available: true,
 		description: "Adds a dependency edge between two tasks.",
 		inputSchema: {
 			type: "object",
@@ -32,6 +33,22 @@ function descriptor(overrides: Partial<VehicleOperationDescriptor> = {}): Vehicl
 describe("formatOperationOneLiner", () => {
 	it("joins the operation name and description on one line", () => {
 		expect(formatOperationOneLiner(descriptor())).toBe("tasks.depend -- Adds a dependency edge between two tasks.");
+	});
+
+	it("annotates a currently-unavailable operation with its reason", () => {
+		expect(formatOperationOneLiner(descriptor({ available: false, unavailableReason: "missing credential" }))).toBe(
+			"tasks.depend -- Adds a dependency edge between two tasks. (currently unavailable: missing credential)",
+		);
+	});
+
+	it("annotates a currently-unavailable operation with no reason given", () => {
+		expect(formatOperationOneLiner(descriptor({ available: false }))).toBe(
+			"tasks.depend -- Adds a dependency edge between two tasks. (currently unavailable)",
+		);
+	});
+
+	it("does not annotate an explicitly available operation", () => {
+		expect(formatOperationOneLiner(descriptor({ available: true }))).toBe("tasks.depend -- Adds a dependency edge between two tasks.");
 	});
 });
 
