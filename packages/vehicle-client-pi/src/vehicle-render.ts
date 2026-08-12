@@ -23,6 +23,7 @@ import {
 	type ProgressBarGlyphs,
 	renderBoundedTable,
 	renderTruncatedList,
+	safeTruncateToWidth,
 	statelessComponent,
 	Text,
 	type TextMeasure,
@@ -54,8 +55,17 @@ type RenderResultContext = Parameters<NonNullable<ToolDefinition["renderResult"]
  */
 export { neutralizeEmbeddedFullResets };
 
-function truncateToWidth(text: string, maxWidth: number, ellipsis?: string, pad?: boolean): string {
-	return neutralizeEmbeddedFullResets(truncateToWidthUnsafe(text, maxWidth, ellipsis, pad));
+/**
+ * Delegates to Malevich's own safeTruncateToWidth (the canonical, already-guarded composition --
+ * see its own doc comment) instead of re-deriving the truncate+neutralize pairing locally. Still
+ * guards its OWN import of safeTruncateToWidth: a long-running process can hold an in-memory copy
+ * of Malevich resolved from before this export existed there, while this file's own code --
+ * reloaded more recently -- still assumes it's present. Falls back to the unguarded
+ * truncateToWidthUnsafe output rather than throwing.
+ */
+export function truncateToWidth(text: string, maxWidth: number, ellipsis?: string, pad?: boolean): string {
+	if (typeof safeTruncateToWidth !== "function") return truncateToWidthUnsafe(text, maxWidth, ellipsis, pad);
+	return safeTruncateToWidth(truncateToWidthUnsafe, text, maxWidth, ellipsis, pad);
 }
 
 const measure: TextMeasure = { visibleWidth, truncateToWidth, wrapTextWithAnsi };

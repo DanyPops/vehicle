@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { neutralizeEmbeddedFullResets } from "../src/vehicle-render.ts";
+import { neutralizeEmbeddedFullResets, truncateToWidth } from "../src/vehicle-render.ts";
 
 describe("neutralizeEmbeddedFullResets", () => {
 	it("rewrites a full SGR reset into every reset except background", () => {
@@ -32,5 +32,23 @@ describe("neutralizeEmbeddedFullResets", () => {
 
 	it("leaves plain, uncolored text unchanged", () => {
 		expect(neutralizeEmbeddedFullResets("no ansi codes here")).toBe("no ansi codes here");
+	});
+});
+
+/**
+ * truncateToWidth now delegates to Malevich's own safeTruncateToWidth (see its own test suite
+ * there for the guard-against-a-stale-Malevich-resolution branch this file's own
+ * `typeof safeTruncateToWidth !== "function"` check exists for -- not independently re-tested
+ * here since safeTruncateToWidth is a real top-level module import, not an injectable parameter
+ * of this function, the same constraint TextMeasure's own shape imposes on every implementation).
+ * These tests only cover that the migration preserved truncateToWidth's own observable behavior.
+ */
+describe("truncateToWidth", () => {
+	it("truncates and neutralizes an embedded full reset, same as before the safeTruncateToWidth migration", () => {
+		expect(truncateToWidth("hello world", 5)).not.toContain("\x1b[0m");
+	});
+
+	it("leaves short plain text untouched", () => {
+		expect(truncateToWidth("hi", 10)).toBe("hi");
 	});
 });
