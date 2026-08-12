@@ -65,6 +65,7 @@ import {
 	type VehicleShellOptions,
 } from "./vehicle-shell.js";
 import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
+import { registerInProcessVehicle } from "./vehicle-shell-registry.js";
 
 export type { RegisterVehicleToolsJobOptions } from "./vehicle-job-polling.js";
 export type {
@@ -882,6 +883,7 @@ export async function registerVehicleTools(
 ): Promise<RegisteredPiVehicle> {
 	const options = normalizeRegisterVehicleToolsOptions(rawOptions);
 	const { manifest, stale } = await resolveManifestForRegistration(client, options.manifestCache, options.handshake);
+	registerInProcessVehicle(manifest.name, manifest, client);
 	const projected = projectedNames(manifest, options.toolName ?? defaultToolName);
 	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
 	assertNamesAvailable(projected, runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);

@@ -329,14 +329,23 @@ function namespacedDescriptor(vehicleName: string, descriptor: VehicleOperationD
 // or not options.broker was ever set -- confirmed as a real regression live, breaking Node's native
 // (--experimental-strip-types) ESM loader for any consumer whose own load-path test exercises it,
 // since Node unconditionally refuses to strip types for a .ts file under node_modules.
+// listInProcessVehicles is synchronous, IO-free, and has zero runtime dependency on vehicle-server/
+// vehicle-client (see vehicle-shell-registry.ts's own imports) -- safe to import eagerly here without
+// reintroducing the eager-loading regression discoverForeignVehicles' own dynamic import exists to avoid.
 async function discoverBrokerVehicles(broker: VehicleShellBrokerOptions | undefined): Promise<readonly DiscoveredVehicle[]> {
 	if (!broker) return [];
 	try {
 		const discover =
 			broker.discover ??
 			(async () => {
+				const { listInProcessVehicles } = await import("./vehicle-shell-registry.js");
+				const inProcess = listInProcessVehicles(broker.ownVehicleName);
 				const { discoverForeignVehicles } = await import("./vehicle-shell-broker.js");
-				return discoverForeignVehicles(broker.ownVehicleName);
+				const foreign = await discoverForeignVehicles(broker.ownVehicleName).catch(() => []);
+				// In-process wins on a name collision: it's free, always-current, and never subject to a
+				// stale/dead filesystem handle the way a cross-process daemon's own written handle can be.
+				const inProcessNames = new Set(inProcess.map((vehicle) => vehicle.name));
+				return [...inProcess, ...foreign.filter((vehicle) => !inProcessNames.has(vehicle.name))];
 			});
 		return await discover();
 	} catch {

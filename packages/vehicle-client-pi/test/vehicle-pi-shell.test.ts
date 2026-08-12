@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -26,8 +29,8 @@ function operation(name: string, overrides: Partial<VehicleManifestOperation> = 
 	};
 }
 
-function manifest(operations: readonly VehicleManifestOperation[]): VehicleManifest {
-	return { name: "test-vehicle", version: "1.0.0", description: "Test Vehicle.", operations };
+function manifest(operations: readonly VehicleManifestOperation[], name = "test-vehicle"): VehicleManifest {
+	return { name, version: "1.0.0", description: "Test Vehicle.", operations };
 }
 
 function discoveredVehicle(name: string, operations: readonly VehicleManifestOperation[]) {
@@ -339,6 +342,35 @@ describe("registerVehicleTools with shell broker mode", () => {
 
 		const result = (await callTool(tools, "tools_list", { query: "package" })) as { content: Array<{ text: string }> };
 		expect(result.content[0]?.text).toBe("packed:package.install -- Run package.install.");
+	});
+
+	it("discovers another registerVehicleTools() call in the SAME process automatically, with no broker.discover override -- stacks instead of racing", async () => {
+		// Points the real default discoverForeignVehicles() at an empty temp dir so this test's
+		// assertions only reflect the in-process registry, not whatever real Vehicle daemons
+		// happen to be running on the machine executing this test.
+		const originalXdgRuntimeDir = process.env.XDG_RUNTIME_DIR;
+		const emptyDir = mkdtempSync(join(tmpdir(), "vehicle-shell-registry-test-"));
+		process.env.XDG_RUNTIME_DIR = emptyDir;
+		try {
+			const { pi, tools } = fakePi();
+			// Papyrus registers first, no shell of its own -- exactly like a real extension that
+			// lost the tools_list/tools_man ownership race but still runs its own registration fully.
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.create")], "papyrus")), {});
+			// Pipes wins tools_list/tools_man ownership and enables broker mode with the real default
+			// discover() -- no explicit discover callback given, unlike every other test in this file.
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("ci.status")], "pipes")), {
+				shell: { broker: { ownVehicleName: "pipes" } },
+			});
+
+			const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("ci.status -- Run ci.status.");
+			expect(result.content[0]?.text).toContain("papyrus:tasks.create -- Run tasks.create.");
+			expect(result.content[0]?.text).toContain("papyrus:docs.create -- Run docs.create.");
+		} finally {
+			if (originalXdgRuntimeDir === undefined) delete process.env.XDG_RUNTIME_DIR;
+			else process.env.XDG_RUNTIME_DIR = originalXdgRuntimeDir;
+			rmSync(emptyDir, { recursive: true, force: true });
+		}
 	});
 
 	it("broker discovery throwing never breaks tools_list's own base (local) listing", async () => {
