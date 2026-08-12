@@ -363,10 +363,20 @@ export interface RegisterVehicleToolsOptions {
  * refreshVehicleToolAvailability, buildInvocationContext) rather than at each of the ~11
  * individual read sites, so this reconciliation logic exists in exactly one place.
  */
+/** Escape hatch for diagnosing/bypassing Vehicle Shell mode without a code change in every
+ * consumer: set VEHICLE_SHELL_DISABLED=1 to force every registerVehicleTools() call in this
+ * process to activate every operation directly (no tools_list/tools_man, no broker), regardless
+ * of what options.shell the consumer itself passed. */
+function isShellDisabledByEnv(): boolean {
+	return process.env.VEHICLE_SHELL_DISABLED === "1";
+}
+
 function normalizeRegisterVehicleToolsOptions(options: RegisterVehicleToolsOptions): RegisterVehicleToolsOptions {
-	if (!options.rendering && !options.safety && !options.approval && !options.jobs) return options;
+	if (!options.rendering && !options.safety && !options.approval && !options.jobs && !(isShellDisabledByEnv() && options.shell))
+		return options;
 	return {
 		...options,
+		...(isShellDisabledByEnv() ? { shell: undefined } : {}),
 		renderers: options.rendering?.renderers ?? options.renderers,
 		presentations: options.rendering?.presentations ?? options.presentations,
 		progressBarGlyphs: options.rendering?.progressBarGlyphs ?? options.progressBarGlyphs,

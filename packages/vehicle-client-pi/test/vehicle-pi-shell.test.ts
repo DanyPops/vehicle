@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -268,6 +268,36 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tasks_depend"].sort());
 		expect(harness.activeTools).not.toContain("tools_list");
 		expect(harness.activeTools).not.toContain("tools_man");
+	});
+});
+
+describe("registerVehicleTools honors VEHICLE_SHELL_DISABLED", () => {
+	const ORIGINAL_ENV = process.env.VEHICLE_SHELL_DISABLED;
+	afterEach(() => {
+		if (ORIGINAL_ENV === undefined) delete process.env.VEHICLE_SHELL_DISABLED;
+		else process.env.VEHICLE_SHELL_DISABLED = ORIGINAL_ENV;
+	});
+
+	it("forces shell off and activates every operation directly, overriding a consumer's own shell option", async () => {
+		process.env.VEHICLE_SHELL_DISABLED = "1";
+		const { pi, harness } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.list")])), {
+			shell: { coreOperations: ["tasks.create"] },
+		});
+
+		expect(harness.activeTools.sort()).toEqual(["tasks_create", "docs_list"].sort());
+		expect(harness.activeTools).not.toContain("tools_list");
+		expect(harness.activeTools).not.toContain("tools_man");
+	});
+
+	it("leaves shell mode alone when unset", async () => {
+		delete process.env.VEHICLE_SHELL_DISABLED;
+		const { pi, harness } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.list")])), {
+			shell: { coreOperations: ["tasks.create"] },
+		});
+
+		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man"].sort());
 	});
 });
 
