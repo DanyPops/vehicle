@@ -1,6 +1,5 @@
 import type { NativeServiceState, NativeServiceStrategy } from "../native/service-manager.js";
 import { type Diagnostic, diagnostic } from "./diagnostic.js";
-import { manifestHash } from "./hash.js";
 import type { VehicleName } from "./identity.js";
 import type { ArmadaManifest } from "./manifest.js";
 
@@ -73,7 +72,9 @@ export function buildFleetStatus(input: FleetStatusInput): FleetStatusReport {
 		const native = nativeByName.get(vehicle.name) ?? { name: vehicle.name, status: "absent" as const };
 		const handle = input.handles.get(vehicle.name);
 		const matches = matchingProcesses(vehicle, input.processes);
-		const descriptorDrift = native.specHash !== undefined && native.specHash !== manifestHash(vehicle);
+		const generated = input.strategy.generateDescriptor(vehicle);
+		diagnostics.push(...generated.diagnostics);
+		const descriptorDrift = generated.ok && native.specHash !== undefined && native.specHash !== generated.descriptor.specHash;
 		if (!input.executableExists(vehicle.executable)) {
 			diagnostics.push(diagnostic("VEHICLE_EXECUTABLE_MISSING", "error", `/vehicles/${vehicle.name}/executable`, vehicle.executable));
 		}
@@ -108,8 +109,6 @@ export function buildFleetStatus(input: FleetStatusInput): FleetStatusReport {
 				),
 			);
 		}
-		const generated = input.strategy.generateDescriptor(vehicle);
-		diagnostics.push(...generated.diagnostics);
 		vehicles.push(
 			Object.freeze({
 				name: vehicle.name,

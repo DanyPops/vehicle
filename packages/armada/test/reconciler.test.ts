@@ -15,6 +15,12 @@ function success(): NativeOperationOutcome {
 	return { ok: true, diagnostics: [] };
 }
 
+function specHashOf(spec: ReturnType<typeof vehicle>): string {
+	const outcome = systemdStrategy.generateDescriptor(spec);
+	if (!outcome.ok) throw new Error("fixture vehicle must be systemd-compatible");
+	return outcome.descriptor.specHash;
+}
+
 function harness(actual: NativeServiceState[] = []) {
 	const events: string[] = [];
 	const controller: NativeServiceController = {
@@ -47,7 +53,7 @@ function harness(actual: NativeServiceState[] = []) {
 describe("reconcileFleet", () => {
 	it("installs, starts, and verifies readiness under one native identity", async () => {
 		const desired = manifest();
-		const planned = planFleet(desired, []);
+		const planned = planFleet(desired, [], systemdStrategy);
 		expect(planned.ok).toBe(true);
 		if (!planned.ok) return;
 		const { controller, readiness, events } = harness();
@@ -67,7 +73,7 @@ describe("reconcileFleet", () => {
 		const spec = vehicle();
 		const desired = manifest([spec]);
 		const actual = [{ name: spec.name, status: "running" as const, specHash: "stale" }];
-		const planned = planFleet(desired, actual);
+		const planned = planFleet(desired, actual, systemdStrategy);
 		expect(planned.ok).toBe(true);
 		if (!planned.ok) return;
 		const { controller, readiness, events } = harness(actual);
@@ -90,7 +96,7 @@ describe("reconcileFleet", () => {
 
 	it("rejects stale manifest and actual-state plans before mutation", async () => {
 		const desired = manifest();
-		const planned = planFleet(desired, []);
+		const planned = planFleet(desired, [], systemdStrategy);
 		expect(planned.ok).toBe(true);
 		if (!planned.ok) return;
 		const staleManifest = harness();
@@ -105,7 +111,7 @@ describe("reconcileFleet", () => {
 		expect(first).toMatchObject({ ok: false, diagnostics: [{ code: "RECONCILE_MANIFEST_STALE" }] });
 		expect(staleManifest.events).toEqual([]);
 
-		const changedActual = harness([{ name: desired.vehicles[0]!.name, status: "running", specHash: manifestHash(desired.vehicles[0]!) }]);
+		const changedActual = harness([{ name: desired.vehicles[0]!.name, status: "running", specHash: specHashOf(desired.vehicles[0]!) }]);
 		const second = await reconcileFleet({
 			manifest: desired,
 			plan: planned.plan,
@@ -121,8 +127,8 @@ describe("reconcileFleet", () => {
 	it("is a no-op when desired and actual state are converged", async () => {
 		const spec = vehicle();
 		const desired = manifest([spec]);
-		const actual = [{ name: spec.name, status: "running" as const, specHash: manifestHash(spec) }];
-		const planned = planFleet(desired, actual);
+		const actual = [{ name: spec.name, status: "running" as const, specHash: specHashOf(spec) }];
+		const planned = planFleet(desired, actual, systemdStrategy);
 		expect(planned.ok).toBe(true);
 		if (!planned.ok) return;
 		const { controller, readiness, events } = harness(actual);

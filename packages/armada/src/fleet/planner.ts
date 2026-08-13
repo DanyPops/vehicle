@@ -1,6 +1,6 @@
-import type { NativeServiceState } from "../native/service-manager.js";
+import type { NativeServiceState, NativeServiceStrategy } from "../native/service-manager.js";
 import { type Diagnostic, diagnostic } from "./diagnostic.js";
-import { manifestHash, planHash } from "./hash.js";
+import { planHash } from "./hash.js";
 import type { ManifestHash, PlanHash, VehicleName } from "./identity.js";
 import type { ArmadaManifest, VehicleSpec } from "./manifest.js";
 
@@ -20,12 +20,7 @@ export type PlanOutcome =
 	| { readonly ok: true; readonly plan: FleetPlan }
 	| { readonly ok: false; readonly diagnostics: readonly Diagnostic[] };
 
-function vehicleSpecHash(vehicle: VehicleSpec): ManifestHash {
-	return manifestHash(vehicle);
-}
-
-function operationFor(vehicle: VehicleSpec, actual: NativeServiceState | undefined): PlanOperation | undefined {
-	const specHash = vehicleSpecHash(vehicle);
+function operationFor(vehicle: VehicleSpec, actual: NativeServiceState | undefined, specHash: ManifestHash): PlanOperation | undefined {
 	if (!actual || actual.status === "absent") return { kind: "install", name: vehicle.name, specHash };
 	if (actual.specHash !== specHash) return { kind: "update", name: vehicle.name, specHash };
 	if (actual.status === "stopped") return { kind: "start", name: vehicle.name };
@@ -33,7 +28,19 @@ function operationFor(vehicle: VehicleSpec, actual: NativeServiceState | undefin
 	return undefined;
 }
 
-export function planFleet(manifest: ArmadaManifest, actualServices: readonly NativeServiceState[]): PlanOutcome {
+/**
+ * strategy is required, not just for its `kind` -- the desired specHash MUST
+ * come from that same strategy's own generateDescriptor(vehicle), not a bare
+ * manifestHash(vehicle). Two vehicles with byte-identical specs can still
+ * need re-installing after a renderer-only change (see descriptorSpecHash's
+ * own doc comment); comparing against anything else would silently stop
+ * detecting that class of drift again.
+ */
+export function planFleet(
+	manifest: ArmadaManifest,
+	actualServices: readonly NativeServiceState[],
+	strategy: NativeServiceStrategy,
+): PlanOutcome {
 	if (actualServices.length > 100) {
 		return {
 			ok: false,
@@ -52,10 +59,19 @@ export function planFleet(manifest: ArmadaManifest, actualServices: readonly Nat
 		}
 		byName.set(service.name, service);
 	}
+	const descriptorFailures: Diagnostic[] = [];
 	const operations = manifest.vehicles
-		.map((vehicle) => operationFor(vehicle, byName.get(vehicle.name)))
+		.map((vehicle) => {
+			const generated = strategy.generateDescriptor(vehicle);
+			if (!generated.ok) {
+				descriptorFailures.push(...generated.diagnostics);
+				return undefined;
+			}
+			return operationFor(vehicle, byName.get(vehicle.name), generated.descriptor.specHash);
+		})
 		.filter((operation): operation is PlanOperation => operation !== undefined)
 		.sort((left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind));
+	if (descriptorFailures.length > 0) return { ok: false, diagnostics: Object.freeze(descriptorFailures) };
 	const content = { manifestHash: manifest.contentHash, operations, diagnostics: [] as Diagnostic[] };
 	return { ok: true, plan: Object.freeze({ ...content, planHash: planHash(content) }) };
 }

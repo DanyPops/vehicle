@@ -1,5 +1,6 @@
 import { type Diagnostic, diagnostic } from "../fleet/diagnostic.js";
-import { createNativeServiceIdentity, type NativeServiceIdentity } from "../fleet/identity.js";
+import { manifestHash } from "../fleet/hash.js";
+import { createNativeServiceIdentity, type ManifestHash, type NativeServiceIdentity } from "../fleet/identity.js";
 import type { VehicleResources, VehicleSpec } from "../fleet/manifest.js";
 import type { NativeManagerCapabilities } from "./service-manager.js";
 
@@ -19,6 +20,22 @@ export function nativeServiceIdentity(value: string): NativeServiceIdentity {
 	const outcome = createNativeServiceIdentity(value);
 	if (!outcome.ok) throw new Error(`invalid native service identity: ${outcome.reason}`);
 	return outcome.value;
+}
+
+/**
+ * Mixes each strategy's own renderer-format version into the hash a plan
+ * compares against the already-installed descriptor's own recorded spec
+ * hash -- deliberately NOT a bare `manifestHash(vehicle)`. A vehicle's own
+ * spec can stay byte-identical across a renderer-only change (e.g. a fixed
+ * env var name, a new hardcoded unit line) that still changes what actually
+ * gets installed; without this, planFleet's `actual.specHash !== specHash`
+ * drift check never fires for that class of change, and an already-deployed
+ * unit is silently never re-installed no matter how many times reconcile
+ * runs. Bump the calling strategy's own version constant whenever its
+ * generateDescriptor output changes for some existing vehicle spec.
+ */
+export function descriptorSpecHash(vehicle: VehicleSpec, rendererVersion: number): ManifestHash {
+	return manifestHash({ vehicle, rendererVersion });
 }
 
 function resourceDiagnostics(resources: VehicleResources | undefined, capabilities: NativeManagerCapabilities): Diagnostic[] {

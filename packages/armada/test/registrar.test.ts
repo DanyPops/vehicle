@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	createVehicleRegistrar,
-	manifestHash,
 	type NativeOperationOutcome,
 	type NativeServiceController,
 	type NativeServiceState,
@@ -72,7 +71,8 @@ function statefulHarness() {
 	const readiness: ReadinessProbe = {
 		waitUntilReady: (spec) => {
 			events.push(`ready:${spec.name}`);
-			installed.set(spec.name, manifestHash(spec));
+			const generated = systemdStrategy.generateDescriptor(spec);
+			if (generated.ok) installed.set(spec.name, generated.descriptor.specHash);
 			return Promise.resolve(success());
 		},
 	};

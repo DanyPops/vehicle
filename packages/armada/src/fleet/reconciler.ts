@@ -109,7 +109,7 @@ export async function reconcileFleet(request: ReconcileRequest): Promise<Reconci
 	}
 	const inspected = await request.controller.inspect(request.manifest.vehicles);
 	if (!inspected.ok) return inspected;
-	const currentPlan = planFleet(request.manifest, inspected.services);
+	const currentPlan = planFleet(request.manifest, inspected.services, request.strategy);
 	if (!currentPlan.ok) return currentPlan;
 	if (currentPlan.plan.planHash !== request.plan.planHash) {
 		return { ok: false, diagnostics: [diagnostic("RECONCILE_PLAN_STALE", "error", "/", "native state changed after planning")] };

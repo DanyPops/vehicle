@@ -1,6 +1,9 @@
-import { manifestHash } from "../fleet/hash.js";
 import type { VehicleSpec } from "../fleet/manifest.js";
-import { capabilityDiagnostics, hasError, nativeServiceIdentity, seconds, sortedEnvEntries } from "./descriptor.js";
+import { capabilityDiagnostics, descriptorSpecHash, hasError, nativeServiceIdentity, seconds, sortedEnvEntries } from "./descriptor.js";
+
+/** Bump whenever generateDescriptor's own output changes for some existing vehicle spec -- see descriptorSpecHash. */
+const RENDERER_VERSION = 2;
+
 import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrategy } from "./service-manager.js";
 
 const capabilities: NativeManagerCapabilities = Object.freeze({
@@ -36,7 +39,7 @@ function quote(value: string): string {
 function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	const diagnostics = capabilityDiagnostics(vehicle, capabilities);
 	if (hasError(diagnostics)) return { ok: false, diagnostics };
-	const specHash = manifestHash(vehicle);
+	const specHash = descriptorSpecHash(vehicle, RENDERER_VERSION);
 	const unitName = `armada-${vehicle.name}.service`;
 	const unit: string[] = ["[Unit]", `Description=Armada Vehicle ${vehicle.name}`, `X-Armada-SpecHash=${specHash}`];
 	if (vehicle.runtime?.networkReadiness) unit.push("After=network-online.target", "Wants=network-online.target");

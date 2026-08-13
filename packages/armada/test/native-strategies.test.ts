@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { launchdStrategy, type NativeServiceStrategy, systemdStrategy, windowsTaskSchedulerStrategy } from "../src/index.js";
+import { launchdStrategy, manifestHash, type NativeServiceStrategy, systemdStrategy, windowsTaskSchedulerStrategy } from "../src/index.js";
 import { vehicle } from "./fixtures.js";
 
 const strategies: readonly NativeServiceStrategy[] = [systemdStrategy, launchdStrategy, windowsTaskSchedulerStrategy];
@@ -16,6 +16,16 @@ describe("native service strategies", () => {
 			expect(first.descriptor.kind).toBe(strategy.kind);
 			expect(first.descriptor.specHash).toMatch(/^[a-f0-9]{64}$/);
 			expect(first.descriptor.content).toContain(first.descriptor.specHash);
+		}
+	});
+
+	it("mixes a renderer identity into specHash, not just the bare vehicle spec -- so a renderer-only change (e.g. a fixed env var name) is detected as drift on the next plan/reconcile instead of silently never re-installing an already-deployed unit", () => {
+		for (const strategy of strategies) {
+			const spec = vehicle({ restart: { policy: "never" } });
+			const outcome = strategy.generateDescriptor(spec);
+			expect(outcome.ok).toBe(true);
+			if (!outcome.ok) continue;
+			expect(outcome.descriptor.specHash).not.toBe(manifestHash(spec));
 		}
 	});
 

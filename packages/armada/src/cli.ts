@@ -216,7 +216,8 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 		writeDiagnostics(inspected.diagnostics, parsed.arguments.json, dependencies.io);
 		return 1;
 	}
-	const planned = planFleet(decoded.manifest, inspected.services);
+	const strategy = strategyForNativeManager(dependencies.manager.kind);
+	const planned = planFleet(decoded.manifest, inspected.services, strategy);
 	if (!planned.ok) {
 		writeDiagnostics(planned.diagnostics, parsed.arguments.json, dependencies.io);
 		return 1;
@@ -311,7 +312,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 			nativeServices: inspected.services,
 			processes,
 			handles,
-			strategy: strategyForNativeManager(dependencies.manager.kind),
+			strategy,
 			executableExists: dependencies.executableExists ?? existsSync,
 		});
 		const hasErrors = report.diagnostics.some((item) => item.severity === "error");

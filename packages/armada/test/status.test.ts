@@ -1,11 +1,17 @@
 import { describe, expect, it } from "bun:test";
-import { buildFleetStatus, manifestHash, type NativeServiceState, type ObservedProcess, systemdStrategy } from "../src/index.js";
+import { buildFleetStatus, type NativeServiceState, type ObservedProcess, systemdStrategy } from "../src/index.js";
 import { manifest, vehicle } from "./fixtures.js";
+
+function specHashOf(spec: ReturnType<typeof vehicle>): string {
+	const outcome = systemdStrategy.generateDescriptor(spec);
+	if (!outcome.ok) throw new Error("fixture vehicle must be systemd-compatible");
+	return outcome.descriptor.specHash;
+}
 
 describe("buildFleetStatus", () => {
 	it("joins desired, native, handle, and process state", () => {
 		const spec = vehicle();
-		const native: NativeServiceState[] = [{ name: spec.name, status: "running", pid: 42, specHash: manifestHash(spec) }];
+		const native: NativeServiceState[] = [{ name: spec.name, status: "running", pid: 42, specHash: specHashOf(spec) }];
 		const processes: ObservedProcess[] = [{ pid: 42, executable: spec.executable, command: `${spec.executable} serve` }];
 		const report = buildFleetStatus({
 			manifest: manifest([spec]),

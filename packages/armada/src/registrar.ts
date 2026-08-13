@@ -74,7 +74,7 @@ export function createVehicleRegistrar(options: VehicleRegistrarOptions = {}): V
 	async function reconcileAgainst(manifest: ArmadaManifest): Promise<VehicleRegistrationOutcome> {
 		const inspected = await controller.inspect(manifest.vehicles);
 		if (!inspected.ok) return inspected;
-		const planned = planFleet(manifest, inspected.services);
+		const planned = planFleet(manifest, inspected.services, strategy);
 		if (!planned.ok) return planned;
 		const reconciled = await reconcileFleet({
 			manifest,
