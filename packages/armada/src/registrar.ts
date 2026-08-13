@@ -12,7 +12,7 @@
 import { defaultManifestPath, managerKind } from "./cli.js";
 import type { Diagnostic } from "./fleet/diagnostic.js";
 import type { ManifestHash } from "./fleet/identity.js";
-import type { ArmadaManifest, VehicleResources, VehicleRestartPolicy, VehicleRuntimeRequirements } from "./fleet/manifest.js";
+import type { ArmadaManifest, VehicleResources, VehicleRestartPolicy, VehicleRuntimeRequirements, VehicleSpec } from "./fleet/manifest.js";
 import { readManifestFile, removeManifestVehicle, upsertManifestVehicle } from "./fleet/manifest-store.js";
 import { type PlanOperation, planFleet } from "./fleet/planner.js";
 import { createHandleReadinessProbe } from "./fleet/readiness.js";
@@ -50,6 +50,16 @@ export interface VehicleRegistrar {
 	unregister(name: string): Promise<VehicleRegistrationOutcome>;
 	/** Whether the manifest currently declares this Vehicle -- registration status alone, not native running/ready state (see status.ts's buildFleetStatus for that). False on any manifest read failure, the same fail-closed default a caller deciding whether to restart/reconcile something should get. */
 	isRegistered(name: string): Promise<boolean>;
+	/**
+	 * Every Vehicle this manifest currently declares -- full specs (not just
+	 * names), since a caller pruning stale registrations (e.g. Packed's own
+	 * daemon-service discovery no longer producing a name it once did) needs
+	 * each one's own `executable` to scope what it's actually safe to touch,
+	 * not just the fact that a name exists. Empty array on any manifest read
+	 * failure -- the same fail-closed default as isRegistered, and safe for a
+	 * pruning caller: nothing to compare against means nothing gets removed.
+	 */
+	listRegistered(): Promise<readonly VehicleSpec[]>;
 }
 
 export interface VehicleRegistrarOptions {
@@ -100,6 +110,10 @@ export function createVehicleRegistrar(options: VehicleRegistrarOptions = {}): V
 		async isRegistered(name) {
 			const current = await readManifestFile(manifestPath);
 			return current.ok && current.manifest.vehicles.some((vehicle) => vehicle.name === name);
+		},
+		async listRegistered() {
+			const current = await readManifestFile(manifestPath);
+			return current.ok ? current.manifest.vehicles : [];
 		},
 		async unregister(name) {
 			const current = await readManifestFile(manifestPath);

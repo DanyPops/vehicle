@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -163,5 +163,28 @@ describe("createVehicleRegistrar", () => {
 
 		expect(outcome).toMatchObject({ ok: true, applied: [] });
 		expect(events).toEqual([]);
+	});
+
+	it("listRegistered reports every currently-declared Vehicle's full spec, empty for a brand-new manifest", async () => {
+		const manifestPath = tempManifestPath();
+		const { controller, readiness } = statefulHarness();
+		const registrar = createVehicleRegistrar({ manifestPath, controller, readiness });
+
+		expect(await registrar.listRegistered()).toEqual([]);
+
+		await registrar.register(papyrus());
+		const listed = await registrar.listRegistered();
+		expect(listed).toEqual([expect.objectContaining({ name: "papyrus", version: "1.0.0", executable: "/opt/papyrus/cli.js" })]);
+
+		await registrar.unregister("papyrus");
+		expect(await registrar.listRegistered()).toEqual([]);
+	});
+
+	it("listRegistered fails closed to an empty list when the manifest file is unreadable/invalid, not just missing", async () => {
+		const manifestPath = tempManifestPath();
+		writeFileSync(manifestPath, "not valid json");
+		const registrar = createVehicleRegistrar({ manifestPath });
+
+		expect(await registrar.listRegistered()).toEqual([]);
 	});
 });

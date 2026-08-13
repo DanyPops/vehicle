@@ -152,6 +152,9 @@ class FakeVehicleRegistrar implements VehicleRegistrar {
 	async isRegistered(name: string): Promise<boolean> {
 		return this.registeredNames.has(name);
 	}
+	async listRegistered(): Promise<readonly never[]> {
+		return [];
+	}
 }
 
 describe("Armada service ownership -- in-process registrar path", () => {
