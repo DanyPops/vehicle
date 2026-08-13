@@ -1,9 +1,10 @@
-import type { JsonSchema, VehicleManifest, VehicleManifestOperation, VehicleOperationDescriptor } from "@danypops/vehicle-core";
+import type { JsonSchema, VehicleManifestOperation, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { reportModuleLoad, reportShellRegistered, reportToolsListExecute, reportToolsManExecute } from "./client-diagnostics.js";
 import { syncManagedActiveTools, tryExtensionRuntimeAction } from "./pi-tool-availability.js";
 import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
+import { type InProcessDiscoveredVehicle, listInProcessVehicles } from "./vehicle-shell-registry.js";
 
 reportModuleLoad(import.meta.url);
 
@@ -14,7 +15,10 @@ reportModuleLoad(import.meta.url);
  * from the tracker; the underlying Pi tool stays registered, just inactive until re-seeded).
  *
  * Deliberately name-keyed and Pi-agnostic: this file never touches ExtensionAPI directly, so its
- * decay/refresh logic is testable as a pure state machine.
+ * decay/refresh logic is testable as a pure state machine. Shared by every vehicle in this process
+ * (see the module-level singleton this file itself owns below) -- tool names are already globally
+ * unique process-wide (that's precisely why two vehicles registering the same name is a problem in
+ * the first place), so one tracker safely holds every vehicle's own entries side by side.
  */
 export class VehicleShellTtlTracker {
 	private readonly entries = new Map<string, { current: number; readonly starting: number }>();
@@ -203,9 +207,13 @@ const DEFAULT_CORE_TTL_TURNS = 20;
 const DEFAULT_DISCOVERED_TTL_TURNS = 8;
 
 /** The subset of a registered Pi tool's own bookkeeping the shell needs to decide what's
- * activatable -- deliberately narrower than vehicle-pi.ts's own RegisteredPiVehicleTool so this
- * file never has to import from (and create a cycle with) vehicle-pi.ts. */
+ * activatable. `vehicleName` disambiguates `operationName` across vehicles (e.g. two vehicles
+ * can both legitimately have a "focus.set" core operation) now that one shared tracker/managed
+ * set covers every vehicle in the process, not just one. Deliberately narrower than vehicle-pi.ts's
+ * own RegisteredPiVehicleTool so this file never has to import from (and create a cycle with)
+ * vehicle-pi.ts. */
 export interface VehicleShellManagedTool {
+	readonly vehicleName: string;
 	readonly toolName: string;
 	readonly operationName: string;
 	readonly available: boolean;
@@ -222,52 +230,24 @@ export interface VehicleShellOptions {
 	readonly coreTtlTurns?: number;
 	/** Starting TTL, in turns, for an operation activated via tools_man. Default 3 -- illustrative. */
 	readonly discoveredTtlTurns?: number;
-	/** Pi tool name for the list meta-tool. Default "tools_list". */
+	/**
+	 * Pi tool name for the list meta-tool. Default "tools_list". The meta-tools are a single,
+	 * process-wide, vehicle-agnostic pair (see ensureVehicleShellHandle below) -- whichever vehicle
+	 * happens to be the first in this process to enable shell mode at all decides these two names
+	 * for every vehicle that follows; a later vehicle's own different preference, if any, is
+	 * ignored. Not worth plumbing a conflict error for: every real consumer today uses the default.
+	 */
 	readonly listToolName?: string;
-	/** Pi tool name for the man meta-tool. Default "tools_man". */
+	/** Pi tool name for the man meta-tool. Default "tools_man". See listToolName's own note on
+	 * first-writer-wins scope. */
 	readonly manToolName?: string;
-	/**
-	 * Opt-in broker mode: when given, tools_list/tools_man also discover and list every OTHER
-	 * live Vehicle daemon's own operations (namespaced "<vehicleName>:<operation>"), scanning the
-	 * shared Vehicle Handle Directory (see @danypops/vehicle-server's resolveSharedVehicleHandleDirectory).
-	 * Omitted preserves today's exact single-vehicle behavior. Discovery failure never breaks this
-	 * Vehicle's own base tools_list/tools_man behavior -- it degrades to exactly that.
-	 */
-	readonly broker?: VehicleShellBrokerOptions;
-	/** Re-fetches this Vehicle's own manifest fresh per tools_list call (registerVehicleTools
-	 * auto-supplies `() => client.manifest()`); omitted keeps today's static snapshot. Falls back to
-	 * the snapshot on failure, same as broker discovery. */
-	readonly refreshOwnManifest?: () => Promise<VehicleManifest>;
-	/** Registers a real Pi tool for a local operation refreshOwnManifest surfaced after registration
-	 * (mirrors broker.activateForeignOperation); returns its Pi tool name. Omitted: such an
-	 * operation is listed but tools_man reports it not-yet-activatable. */
-	readonly activateLocalOperation?: (descriptor: VehicleManifestOperation) => string;
-}
-
-export interface VehicleShellBrokerOptions {
-	/** This Vehicle's own stable identity name (Armada's own VehicleName pattern), excluded from its own discovery results. */
-	readonly ownVehicleName: string;
-	/** Injectable for tests; defaults to a real discoverForeignVehicles(ownVehicleName) call. */
-	readonly discover?: () => Promise<readonly DiscoveredVehicle[]>;
-	/**
-	 * Builds and registers (via pi.registerTool) a real, fully policy-wrapped Pi tool bound to one
-	 * foreign vehicle's operation, returning the Pi tool name it registered under. Owned by the
-	 * consumer (registerVehicleTools in vehicle-pi.ts auto-supplies this) because activating a
-	 * foreign operation must carry every cross-cutting guarantee a native operation gets
-	 * (permissions, safety, presentations, activity broadcasting, idempotency) -- this file
-	 * deliberately has no knowledge of any of that policy layer. Called at most once per foreign
-	 * operation for this handle's lifetime; a repeat tools_man call on an already-activated foreign
-	 * operation only re-seeds its TTL. Omitted keeps tools_man's pre-routing behavior: a foreign
-	 * operation is reported as known but not yet locally activatable.
-	 */
-	readonly activateForeignOperation?: (vehicle: DiscoveredVehicle, descriptor: VehicleManifestOperation) => string;
 }
 
 export interface VehicleShellHandle {
 	readonly tracker: VehicleShellTtlTracker;
 	readonly listToolName: string;
 	readonly manToolName: string;
-	/** Live, mutable view of this Vehicle's own managed tools -- refreshVehicleShellManagedTools
+	/** Live, mutable view of every vehicle's own managed tools in this process -- refreshVehicleShellManagedTools
 	 * keeps this current across a refreshVehicleToolAvailability call, since the per-turn decay
 	 * handler and the man-page tool both close over this same handle rather than a stale snapshot. */
 	managedTools: readonly VehicleShellManagedTool[];
@@ -275,44 +255,43 @@ export interface VehicleShellHandle {
 	/** Starting TTL a core operation is (re-)seeded with -- kept on the handle so a later refresh
 	 * can seed a core operation that just became available the same way initial registration did. */
 	readonly coreTtlTurns: number;
-	/** False when another extension already owns listToolName/manToolName at registration time (Pi's
-	 * "first registration per name wins" means registering a second copy would be pure dead weight,
-	 * forever unreachable) -- this handle never registered, and never tries to activate/deactivate,
-	 * either meta-tool name, leaving the winner in exclusive control of them. Always true when
-	 * ownership can't be determined yet (Pi's action methods aren't ready during extension loading)
-	 * -- registers unconditionally, today's exact behavior, never worse than before this existed. */
-	readonly ownsMetaTools: boolean;
 }
 
 /**
- * Updates a handle's managed-tool bookkeeping after a fresh availability check (e.g. a credential
- * became available, or a /safety override changed). A core operation that just became available
- * and isn't currently tracked is (re-)seeded fresh, matching what initial registration would have
- * done for it -- every other tracked tool (core or discovered) is left exactly as the decay cycle
- * already has it; "core" only ever means "seeded generously," never "exempt from decay" (see
- * desiredShellActiveNames, which reads tracker membership alone, not coreOperationNames, for who's
- * currently active).
+ * Updates one vehicle's own managed-tool bookkeeping after a fresh availability check (e.g. a
+ * credential became available, or a /safety override changed) -- an upsert by toolName (globally
+ * unique process-wide) against the shared handle's full managedTools list, so refreshing one
+ * vehicle's own tools never clobbers any other vehicle's entries sharing this same handle. A core
+ * operation that just became available and isn't currently tracked is (re-)seeded fresh, matching
+ * what initial registration would have done for it -- every other tracked tool (core or discovered,
+ * this vehicle's own or another's) is left exactly as the decay cycle already has it; "core" only
+ * ever means "seeded generously," never "exempt from decay" (see desiredShellActiveNames, which
+ * reads tracker membership alone, not coreOperationNames, for who's currently active).
  */
-export function refreshVehicleShellManagedTools(handle: VehicleShellHandle, managedTools: readonly VehicleShellManagedTool[]): void {
-	handle.managedTools = managedTools;
-	for (const tool of managedTools) {
+export function refreshVehicleShellManagedTools(handle: VehicleShellHandle, incoming: readonly VehicleShellManagedTool[]): void {
+	const incomingToolNames = new Set(incoming.map((tool) => tool.toolName));
+	handle.managedTools = [...handle.managedTools.filter((tool) => !incomingToolNames.has(tool.toolName)), ...incoming];
+	for (const tool of incoming) {
 		if (handle.coreOperationNames.has(tool.operationName) && tool.available && !tool.blocked && !handle.tracker.isTracked(tool.toolName)) {
 			handle.tracker.seed(tool.toolName, handle.coreTtlTurns);
 		}
 	}
 }
 
-/** Every Pi tool name this handle could ever legitimately activate -- the full `managed` superset syncManagedActiveTools requires. */
+/** Every Pi tool name this handle could ever legitimately activate -- the full `managed` superset
+ * syncManagedActiveTools requires. The two meta-tools are always included: they're a single,
+ * process-wide capability now, never contingent on any one vehicle's own "did I win ownership"
+ * check the way they used to be. */
 function allManagedNames(handle: VehicleShellHandle): string[] {
-	const toolNames = handle.managedTools.map((tool) => tool.toolName);
-	return handle.ownsMetaTools ? [...toolNames, handle.listToolName, handle.manToolName] : toolNames;
+	return [...handle.managedTools.map((tool) => tool.toolName), handle.listToolName, handle.manToolName];
 }
 
 /**
- * The active set a shell handle wants right now: its two meta-tools (always active), its core
- * operations that are currently available and unblocked, and whatever tools_man has activated
- * that hasn't yet decayed out -- re-filtered against current availability so a tool that became
- * unavailable/blocked since it was seeded doesn't stay active just because its TTL hasn't hit zero.
+ * The active set a shell handle wants right now: its two meta-tools (always active), every
+ * vehicle's core operations that are currently available and unblocked, and whatever tools_man has
+ * activated that hasn't yet decayed out -- re-filtered against current availability so a tool that
+ * became unavailable/blocked since it was seeded doesn't stay active just because its TTL hasn't
+ * hit zero.
  */
 export function desiredShellActiveNames(handle: VehicleShellHandle): string[] {
 	const byToolName = new Map(handle.managedTools.map((tool) => [tool.toolName, tool]));
@@ -320,55 +299,65 @@ export function desiredShellActiveNames(handle: VehicleShellHandle): string[] {
 		const tool = byToolName.get(toolName);
 		return tool?.available === true && !tool.blocked;
 	});
-	const metaTools = handle.ownsMetaTools ? [handle.listToolName, handle.manToolName] : [];
-	return [...new Set([...metaTools, ...tracked])];
+	return [...new Set([handle.listToolName, handle.manToolName, ...tracked])];
 }
 
 function applyShellActivation(pi: ExtensionAPI, handle: VehicleShellHandle): void {
 	syncManagedActiveTools(pi, allManagedNames(handle), desiredShellActiveNames(handle));
 }
 
-/** A foreign vehicle's own descriptor, relabeled with its namespaced "<vehicleName>:<operation>"
- * name for listing/matching -- a shallow clone, never mutates the original manifest. */
+/** A vehicle's own operation descriptor, relabeled with its namespaced "<vehicleName>:<operation>"
+ * name for listing/matching/activating -- a shallow clone, never mutates the original manifest.
+ * Applied uniformly to every vehicle now, including whichever one happens to house the shared
+ * meta-tools' own creation call: there is no more "local, unprefixed" special case. */
 function namespacedDescriptor(vehicleName: string, descriptor: VehicleManifestOperation): VehicleManifestOperation {
 	return { ...descriptor, name: `${vehicleName}:${descriptor.name}` };
 }
 
-// A dynamic import, deliberately -- vehicle-shell-broker.ts pulls in @danypops/vehicle-server/paths
-// and @danypops/vehicle-client/http, both real runtime dependencies a consumer that never opts into
-// broker mode should never have to load at all. A static top-level import here would defeat that:
-// ES module imports are evaluated eagerly for the whole graph, so EVERY registerVehicleTools()
-// caller would transitively load vehicle-server's module the moment vehicle-shell.ts loads, whether
-// or not options.broker was ever set -- confirmed as a real regression live, breaking Node's native
-// (--experimental-strip-types) ESM loader for any consumer whose own load-path test exercises it,
-// since Node unconditionally refuses to strip types for a .ts file under node_modules.
-// listInProcessVehicles is synchronous, IO-free, and has zero runtime dependency on vehicle-server/
-// vehicle-client (see vehicle-shell-registry.ts's own imports) -- safe to import eagerly here without
-// reintroducing the eager-loading regression discoverForeignVehicles' own dynamic import exists to avoid.
-async function discoverBrokerVehicles(broker: VehicleShellBrokerOptions | undefined): Promise<readonly DiscoveredVehicle[]> {
-	if (!broker) return [];
+/**
+ * Every vehicle currently reachable -- in-process ones (free, always-current, no IO) plus
+ * cross-process ones discovered via the shared Vehicle Handle Directory (a real Vehicle daemon
+ * this process doesn't itself host an extension for). In-process wins on a name collision: it's
+ * free, always-current, and never subject to a stale/dead filesystem handle the way a cross-process
+ * daemon's own written handle can be. Discovery failure (cross-process only -- in-process listing
+ * never throws) degrades to the in-process list alone rather than breaking tools_list/tools_man.
+ *
+ * A dynamic import, deliberately -- vehicle-shell-broker.ts pulls in @danypops/vehicle-server/paths
+ * and @danypops/vehicle-client/http, both real runtime dependencies nobody should have to load
+ * merely because this module itself loaded. A static top-level import here would defeat that: ES
+ * module imports are evaluated eagerly for the whole graph, so loading vehicle-shell.ts at all
+ * would transitively load vehicle-server's module -- confirmed as a real regression live, breaking
+ * Node's native (--experimental-strip-types) ESM loader for any consumer whose own load-path test
+ * exercises it, since Node unconditionally refuses to strip types for a .ts file under node_modules.
+ */
+async function discoverAllVehicles(): Promise<readonly (InProcessDiscoveredVehicle | DiscoveredVehicle)[]> {
+	const inProcess = listInProcessVehicles();
 	try {
-		const discover =
-			broker.discover ??
-			(async () => {
-				const { listInProcessVehicles } = await import("./vehicle-shell-registry.js");
-				const inProcess = listInProcessVehicles(broker.ownVehicleName);
-				const { discoverForeignVehicles } = await import("./vehicle-shell-broker.js");
-				const foreign = await discoverForeignVehicles(broker.ownVehicleName).catch(() => []);
-				// In-process wins on a name collision: it's free, always-current, and never subject to a
-				// stale/dead filesystem handle the way a cross-process daemon's own written handle can be.
-				const inProcessNames = new Set(inProcess.map((vehicle) => vehicle.name));
-				return [...inProcess, ...foreign.filter((vehicle) => !inProcessNames.has(vehicle.name))];
-			});
-		return await discover();
+		const { discoverForeignVehicles } = await import("./vehicle-shell-broker.js");
+		const foreign = await discoverForeignVehicles();
+		const inProcessNames = new Set(inProcess.map((vehicle) => vehicle.name));
+		return [...inProcess, ...foreign.filter((vehicle) => !inProcessNames.has(vehicle.name))];
 	} catch {
-		// Broker discovery must never break this Vehicle's own base tools_list/tools_man behavior.
-		return [];
+		return inProcess;
 	}
 }
 
-function foreignOperationsOf(vehicles: readonly DiscoveredVehicle[]): readonly VehicleManifestOperation[] {
-	return vehicles.flatMap((vehicle) => vehicle.manifest.operations.map((op) => namespacedDescriptor(vehicle.name, op)));
+/** Fresh per call for every vehicle (mirrors what a single vehicle's own refreshOwnManifest used
+ * to do, generalized to everyone) -- falls back to the snapshot manifest discovery already
+ * returned on a failed re-fetch, so one unreachable vehicle never breaks another's listing. */
+async function namespacedOperationsOf(
+	vehicles: readonly (InProcessDiscoveredVehicle | DiscoveredVehicle)[],
+): Promise<VehicleManifestOperation[]> {
+	const perVehicle = await Promise.all(
+		vehicles.map(async (vehicle) => {
+			const operations = await vehicle.client.manifest().then(
+				(manifest) => manifest.operations,
+				() => vehicle.manifest.operations,
+			);
+			return operations.map((op) => namespacedDescriptor(vehicle.name, op));
+		}),
+	);
+	return perVehicle.flat();
 }
 
 /** Splits a namespaced "<vehicle>:<operation>" name; undefined when name carries no vehicle prefix at all. */
@@ -378,29 +367,11 @@ function splitNamespacedName(name: string): { vehicleName: string; operationName
 	return { vehicleName: name.slice(0, separator), operationName: name.slice(separator + 1) };
 }
 
-/** Fresh per call, like the broker/foreign path -- falls back to the static snapshot on failure. */
-async function currentOwnOperations(
-	manifest: VehicleManifest,
-	refreshOwnManifest?: () => Promise<VehicleManifest>,
-): Promise<readonly VehicleManifestOperation[]> {
-	if (!refreshOwnManifest) return manifest.operations;
-	try {
-		return (await refreshOwnManifest()).operations;
-	} catch {
-		return manifest.operations;
-	}
-}
-
-function createToolsListTool(
-	listToolName: string,
-	manifest: VehicleManifest,
-	broker?: VehicleShellBrokerOptions,
-	refreshOwnManifest?: () => Promise<VehicleManifest>,
-): ToolDefinition {
+function createToolsListTool(listToolName: string, manToolName: string): ToolDefinition {
 	return {
 		name: listToolName,
 		label: "List Tools",
-		description: `Lists ${manifest.name}'s available operations by name, one line each (name -- description).${broker ? ' Also lists every other live Vehicle daemon\'s own operations, namespaced "<vehicle>:<operation>".' : ""} Optionally filter by a keyword matched against the name and description. Use ${DEFAULT_MAN_TOOL_NAME} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
+		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description. Use ${manToolName} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
 		parameters: Type.Object({
 			query: Type.Optional(
 				Type.String({ description: "Keyword to filter by (matched against operation name and description); omit to list everything." }),
@@ -408,12 +379,9 @@ function createToolsListTool(
 		}),
 		async execute(_toolCallId, params) {
 			const query = (params as { query?: string }).query ?? "";
-			reportToolsListExecute(manifest.name, query);
-			const [ownOperations, foreignVehicles] = await Promise.all([
-				currentOwnOperations(manifest, refreshOwnManifest),
-				discoverBrokerVehicles(broker),
-			]);
-			const operations = [...ownOperations, ...foreignOperationsOf(foreignVehicles)];
+			reportToolsListExecute("vehicle", query);
+			const vehicles = await discoverAllVehicles();
+			const operations = await namespacedOperationsOf(vehicles);
 			const matches = operations
 				.flatMap((descriptor, index) => {
 					const score = shellQueryScore(descriptor, query);
@@ -435,75 +403,62 @@ function createToolsListTool(
 
 function createToolsManTool(
 	pi: ExtensionAPI,
+	listToolName: string,
 	manToolName: string,
-	manifest: VehicleManifest,
 	handle: VehicleShellHandle,
 	discoveredTtlTurns: number,
-	broker?: VehicleShellBrokerOptions,
-	refreshOwnManifest?: () => Promise<VehicleManifest>,
-	activateLocalOperation?: (descriptor: VehicleManifestOperation) => string,
 ): ToolDefinition {
 	return {
 		name: manToolName,
 		label: "Tool Manual",
-		description: `Shows full documentation for one or more of ${manifest.name}'s operations by exact name (as seen from ${DEFAULT_LIST_TOOL_NAME} or already known) and makes each one callable starting next turn. A name doesn't need to have been listed first.`,
+		description: `Shows full documentation for one or more Vehicle operations by their exact namespaced name (as seen from ${listToolName} or already known) and makes each one callable starting next turn. A name doesn't need to have been listed first.`,
 		parameters: Type.Object({
-			names: Type.Array(Type.String(), { description: 'Exact operation name(s), e.g. "tasks.create".', minItems: 1 }),
+			names: Type.Array(Type.String(), { description: 'Exact operation name(s), e.g. "papyrus:tasks.create".', minItems: 1 }),
 		}),
 		async execute(_toolCallId, params) {
 			const names = (params as { names: string[] }).names;
-			reportToolsManExecute(manifest.name, names);
-			const byOperationName = new Map(handle.managedTools.map((tool) => [tool.operationName, tool]));
-			const ownOperations = await currentOwnOperations(manifest, refreshOwnManifest);
-			// Lazy, once -- a broker round-trip is real IO, never paid for a purely-local request.
-			let foreignVehicles: readonly DiscoveredVehicle[] | undefined;
+			reportToolsManExecute("vehicle", names);
+			const byKey = new Map(handle.managedTools.map((tool) => [`${tool.vehicleName}:${tool.operationName}`, tool]));
+			const vehicles = await discoverAllVehicles();
+			const byVehicleName = new Map(vehicles.map((vehicle) => [vehicle.name, vehicle]));
+
 			const pages = await Promise.all(
 				names.map(async (name) => {
-					const descriptor = ownOperations.find((op) => op.name === name);
-					const managed = byOperationName.get(name);
-					if (descriptor && managed) {
-						if (!managed.available) return `${name}: currently unavailable (${DEFAULT_MAN_TOOL_NAME} cannot activate it right now).`;
+					const split = splitNamespacedName(name);
+					if (!split) return `${name}: no such operation. Use ${listToolName} to browse available names.`;
+					const vehicle = byVehicleName.get(split.vehicleName);
+					if (!vehicle) return `${name}: no such operation. Use ${listToolName} to browse available names.`;
+					const descriptor = await vehicle.client.manifest().then(
+						(manifest) => manifest.operations.find((op) => op.name === split.operationName),
+						() => vehicle.manifest.operations.find((op) => op.name === split.operationName),
+					);
+					if (!descriptor) return `${name}: no such operation. Use ${listToolName} to browse available names.`;
+					const namespaced = namespacedDescriptor(split.vehicleName, descriptor);
+
+					const managed = byKey.get(name);
+					if (managed) {
+						if (!managed.available) return `${name}: currently unavailable (${manToolName} cannot activate it right now).`;
 						if (managed.blocked) return `${name}: blocked by the current safety policy -- not activatable.`;
 						handle.tracker.seed(managed.toolName, discoveredTtlTurns);
-						return `${formatOperationManPage(descriptor, managed.toolName)}\n\n(now callable as ${managed.toolName})`;
+						return `${formatOperationManPage(namespaced, managed.toolName)}\n\n(now callable as ${managed.toolName})`;
 					}
-					// A genuinely new local operation, not yet a Pi tool -- activate on demand, same as foreign.
-					if (descriptor && !managed) {
-						if (!activateLocalOperation) return `${name}: known, but local activation isn't wired yet; not yet callable here.`;
-						let toolName: string;
-						try {
-							toolName = activateLocalOperation(descriptor);
-						} catch (error) {
-							return `${name}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
-						}
-						handle.managedTools = [...handle.managedTools, { toolName, operationName: name, available: true, blocked: false }];
-						handle.tracker.seed(toolName, discoveredTtlTurns);
-						return `${formatOperationManPage(descriptor, toolName)}\n\n(now callable as ${toolName})`;
-					}
-					const split = splitNamespacedName(name);
-					if (!split) return `${name}: no such operation. Use ${DEFAULT_LIST_TOOL_NAME} to browse available names.`;
-					foreignVehicles ??= await discoverBrokerVehicles(broker);
-					const vehicle = foreignVehicles.find((entry) => entry.name === split.vehicleName);
-					const foreignDescriptor = vehicle?.manifest.operations.find((op) => op.name === split.operationName);
-					if (!vehicle || !foreignDescriptor) return `${name}: no such operation. Use ${DEFAULT_LIST_TOOL_NAME} to browse available names.`;
 
-					const alreadyActivated = byOperationName.get(name);
-					if (alreadyActivated) {
-						handle.tracker.seed(alreadyActivated.toolName, discoveredTtlTurns);
-						return `${formatOperationManPage(namespacedDescriptor(split.vehicleName, foreignDescriptor), alreadyActivated.toolName)}\n\n(now callable as ${alreadyActivated.toolName})`;
-					}
-					if (!broker?.activateForeignOperation) {
-						return `${name}: known -- provided by Vehicle "${split.vehicleName}", discovered live via broker mode. Foreign-vehicle activation isn't wired yet; not yet callable here.`;
+					const activateOperation = "activateOperation" in vehicle ? vehicle.activateOperation : undefined;
+					if (!activateOperation) {
+						return `${name}: known -- provided by Vehicle "${split.vehicleName}", discovered live via the shared Vehicle Handle Directory. Cross-process activation isn't wired here; not yet callable in this process.`;
 					}
 					let toolName: string;
 					try {
-						toolName = broker.activateForeignOperation(vehicle, foreignDescriptor);
+						toolName = activateOperation(descriptor);
 					} catch (error) {
 						return `${name}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
 					}
-					handle.managedTools = [...handle.managedTools, { toolName, operationName: name, available: true, blocked: false }];
+					handle.managedTools = [
+						...handle.managedTools,
+						{ vehicleName: split.vehicleName, toolName, operationName: descriptor.name, available: true, blocked: false },
+					];
 					handle.tracker.seed(toolName, discoveredTtlTurns);
-					return `${formatOperationManPage(namespacedDescriptor(split.vehicleName, foreignDescriptor), toolName)}\n\n(now callable as ${toolName})`;
+					return `${formatOperationManPage(namespaced, toolName)}\n\n(now callable as ${toolName})`;
 				}),
 			);
 			applyShellActivation(pi, handle);
@@ -512,70 +467,51 @@ function createToolsManTool(
 	};
 }
 
-/**
- * Registers the two always-on meta-tools (tools_list, tools_man) and wires the decaying-TTL
- * activation cycle: a core operation (per options.coreOperations) boots active; every other
- * operation boots inactive, reachable via tools_man; each turn, unused active tools decay and
- * eventually get deactivated (not unregistered -- Pi has no unregisterTool()), while a tool
- * actually called that turn stays fully warm. Returns undefined (no-op, today's all-active
- * behavior applies) when options is omitted -- opt-in only, per this package's own convention for
- * a change that could alter an existing consumer's visible tool surface.
- */
-/** True when a Pi tool by this name is already registered (by any extension, including a prior
- * call of this vehicle's own) at THIS exact call time. False whenever ownership genuinely can't
- * be determined yet -- Pi's action methods (getAllTools included) aren't ready during pure
- * extension-loading; registerVehicleShell then registers unconditionally, matching every
- * consumer's behavior before this check existed. */
-function metaToolAlreadyRegistered(pi: ExtensionAPI, toolName: string): boolean {
-	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
-	return runtime.status === "ready" && runtime.value.some((tool) => tool.name === toolName);
-}
+const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle");
 
-export function registerVehicleShell(
-	pi: ExtensionAPI,
-	manifest: VehicleManifest,
-	managedTools: readonly VehicleShellManagedTool[],
-	options: VehicleShellOptions | undefined,
-): VehicleShellHandle | undefined {
-	if (!options) return undefined;
-	const discoveredTtlTurns = options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS;
+/**
+ * The single, process-wide, vehicle-agnostic Vehicle Shell handle -- created by whichever vehicle's
+ * own registerVehicleShell() call happens to run first, exactly like vehicle-shell-registry.ts's
+ * own in-process vehicle registry, and for the same reason: `globalThis[Symbol.for(...)]` survives
+ * module duplication across separately-installed npm packages (each with its own physical copy of
+ * this file) the same way a plain module-level singleton wouldn't -- Symbol.for and globalThis are
+ * both process-wide, not module-instance-scoped.
+ *
+ * This is the fix for the "whichever domain vehicle happens to load first becomes the accidental,
+ * arbitrarily-named owner of tools_list/tools_man" problem: nobody "wins" anymore. The two
+ * meta-tools are registered here, exactly once, bound to nothing vehicle-specific -- their own
+ * closures always read every vehicle currently in the process (discoverAllVehicles), never one
+ * particular vehicle's own manifest. Every subsequent call (from every other vehicle) is a pure
+ * no-op that just returns the same shared handle to fold its own managed tools into.
+ */
+function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions): VehicleShellHandle {
+	const holder = globalThis as { [SHELL_HANDLE_KEY]?: VehicleShellHandle };
+	const existing = holder[SHELL_HANDLE_KEY];
+	if (existing) return existing;
+
 	const listToolName = options.listToolName ?? DEFAULT_LIST_TOOL_NAME;
 	const manToolName = options.manToolName ?? DEFAULT_MAN_TOOL_NAME;
-	// Checked once, up front, against the SAME name a losing extension's own registerTool call
-	// would otherwise shadow forever (Pi has no unregisterTool()) -- registering a redundant,
-	// permanently-unreachable copy is pure dead weight; the shared handle directory (see
-	// @danypops/vehicle-server) is how this vehicle's own operations stay discoverable regardless.
-	const ownsMetaTools = !metaToolAlreadyRegistered(pi, listToolName);
 	const handle: VehicleShellHandle = {
 		tracker: new VehicleShellTtlTracker(),
 		listToolName,
 		manToolName,
-		managedTools,
-		coreOperationNames: new Set(options.coreOperations ?? []),
+		managedTools: [],
+		coreOperationNames: new Set(),
 		coreTtlTurns: options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS,
-		ownsMetaTools,
 	};
+	holder[SHELL_HANDLE_KEY] = handle;
 
-	for (const tool of managedTools) {
-		if (handle.coreOperationNames.has(tool.operationName) && tool.available && !tool.blocked)
-			handle.tracker.seed(tool.toolName, handle.coreTtlTurns);
-	}
-
-	reportShellRegistered(manifest.name, listToolName, manToolName, ownsMetaTools);
-	if (ownsMetaTools) {
-		pi.registerTool(createToolsListTool(listToolName, manifest, options.broker, options.refreshOwnManifest));
-		pi.registerTool(
-			createToolsManTool(
-				pi,
-				manToolName,
-				manifest,
-				handle,
-				discoveredTtlTurns,
-				options.broker,
-				options.refreshOwnManifest,
-				options.activateLocalOperation,
-			),
-		);
+	// Distinct from "did another vehicle already claim it" (that concern doesn't exist anymore --
+	// every vehicle just folds into this one shared handle) -- this guards against a truly
+	// unrelated extension elsewhere in the process having registered a same-named tool of its own.
+	// Pi has no unregisterTool(), so registering a second, permanently-unreachable copy would be
+	// pure dead weight; skip it, but still track/decay our own operations exactly as normal.
+	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
+	const claimedElsewhere = runtime.status === "ready" && runtime.value.some((tool) => tool.name === listToolName);
+	reportShellRegistered("vehicle", listToolName, manToolName, !claimedElsewhere);
+	if (!claimedElsewhere) {
+		pi.registerTool(createToolsListTool(listToolName, manToolName));
+		pi.registerTool(createToolsManTool(pi, listToolName, manToolName, handle, options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS));
 	}
 
 	pi.on("tool_execution_end", (event) => {
@@ -587,6 +523,34 @@ export function registerVehicleShell(
 		applyShellActivation(pi, handle);
 	});
 
+	return handle;
+}
+
+/** Test-only: clears the process-wide shell handle singleton so each test gets a fresh one. Not
+ * exported from the package's own public entry point. */
+export function __resetVehicleShellHandleForTests(): void {
+	delete (globalThis as { [SHELL_HANDLE_KEY]?: VehicleShellHandle })[SHELL_HANDLE_KEY];
+}
+
+/**
+ * Ensures the shared, process-wide meta-tools exist (a no-op after the first real call, from any
+ * vehicle), then folds this vehicle's own operations into the shared handle's bookkeeping --
+ * seeding its declared core operations active, leaving the rest reachable only via tools_man.
+ * Returns undefined (no-op, today's all-active behavior applies) when options is omitted --
+ * opt-in only, per this package's own convention for a change that could alter an existing
+ * consumer's visible tool surface.
+ */
+export function registerVehicleShell(
+	pi: ExtensionAPI,
+	vehicleName: string,
+	managedTools: readonly VehicleShellManagedTool[],
+	options: VehicleShellOptions | undefined,
+): VehicleShellHandle | undefined {
+	if (!options) return undefined;
+	const handle = ensureVehicleShellHandle(pi, options);
+	for (const operationName of options.coreOperations ?? []) (handle.coreOperationNames as Set<string>).add(operationName);
+	refreshVehicleShellManagedTools(handle, managedTools);
+	void vehicleName; // Kept for call-site symmetry with the pre-consolidation signature and future diagnostics; not otherwise needed today.
 	return handle;
 }
 

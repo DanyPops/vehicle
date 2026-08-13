@@ -12,5 +12,5 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const handle = JSON.parse(readFileSync(handlePath, "utf8")) as { host: string; port: number; tokenPath: string };
 	const token = readFileSync(handle.tokenPath, "utf8").trim();
 	const client = new RemoteVehicleClient({ baseUrl: `http://${handle.host}:${handle.port}`, token });
-	await registerVehicleTools(pi, client, { shell: { broker: { ownVehicleName: "probe" } } });
+	await registerVehicleTools(pi, client, { shell: {} });
 }

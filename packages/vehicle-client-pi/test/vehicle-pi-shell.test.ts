@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +6,8 @@ import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { refreshVehicleToolAvailability, registerVehicleTools } from "../src/vehicle-pi.ts";
-import { registerVehicleShell } from "../src/vehicle-shell.ts";
+import { __resetVehicleShellHandleForTests } from "../src/vehicle-shell.ts";
+import { __resetInProcessVehicleRegistryForTests, registerInProcessVehicle } from "../src/vehicle-shell-registry.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
 
@@ -31,11 +32,6 @@ function operation(name: string, overrides: Partial<VehicleManifestOperation> = 
 
 function manifest(operations: readonly VehicleManifestOperation[], name = "test-vehicle"): VehicleManifest {
 	return { name, version: "1.0.0", description: "Test Vehicle.", operations };
-}
-
-function discoveredVehicle(name: string, operations: readonly VehicleManifestOperation[]) {
-	const vehicleManifest = { name, version: "1.0.0", description: `${name} Vehicle.`, operations };
-	return { name, manifest: vehicleManifest, client: new FakeClient(vehicleManifest) };
 }
 
 class FakeClient implements VehicleClient {
@@ -70,6 +66,15 @@ async function callTool(tools: ToolDefinition[], name: string, params: unknown) 
 	return tool.execute("call-1", params as never, undefined as never, undefined as never, { hasUI: false } as never);
 }
 
+// The shared meta-tools are a process-wide singleton (globalThis[Symbol.for(...)]) by design --
+// see vehicle-shell.ts's own ensureVehicleShellHandle doc comment -- so every test needs a fresh
+// one; otherwise the second test onward would see the first test's own tools_list still "already
+// registered" and skip creating its own.
+beforeEach(() => {
+	__resetVehicleShellHandleForTests();
+	__resetInProcessVehicleRegistryForTests();
+});
+
 describe("registerVehicleTools with shell activation", () => {
 	// Everything else is registered but inactive.
 	it("boots with only the two meta-tools and the declared core operations active", async () => {
@@ -85,13 +90,13 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man"].sort());
 	});
 
-	it("tools_list returns every operation as a one-liner, without activating any of them", async () => {
+	it("tools_list returns every operation as a one-liner, namespaced by vehicle name, without activating any of them", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.list")])), { shell: {} });
 
 		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toContain("tasks.create -- Run tasks.create.");
-		expect(result.content[0]?.text).toContain("docs.list -- Run docs.list.");
+		expect(result.content[0]?.text).toContain("test-vehicle:tasks.create -- Run tasks.create.");
+		expect(result.content[0]?.text).toContain("test-vehicle:docs.list -- Run docs.list.");
 		expect(harness.activeTools).not.toContain("tasks_create");
 		expect(harness.activeTools).not.toContain("docs_list");
 	});
@@ -115,7 +120,7 @@ describe("registerVehicleTools with shell activation", () => {
 
 		for (const query of ["tasks create", "tasks_create", "tasks-create", "tasks.create"]) {
 			const result = (await callTool(tools, "tools_list", { query })) as { content: Array<{ text: string }> };
-			expect(result.content[0]?.text.split("\n")[0]).toStartWith("tasks.create --");
+			expect(result.content[0]?.text.split("\n")[0]).toStartWith("test-vehicle:tasks.create --");
 		}
 	});
 
@@ -147,7 +152,7 @@ describe("registerVehicleTools with shell activation", () => {
 			{ shell: {} },
 		);
 
-		const result = (await callTool(tools, "tools_man", { names: ["tasks.create"] })) as { content: Array<{ text: string }> };
+		const result = (await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.create"] })) as { content: Array<{ text: string }> };
 		const text = result.content[0]?.text ?? "";
 		expect(text).toContain("gates (array, optional; minItems: 1)");
 		expect(text).toContain("items (object)");
@@ -160,8 +165,8 @@ describe("registerVehicleTools with shell activation", () => {
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: {} });
 		expect(harness.activeTools).not.toContain("tasks_depend");
 
-		const result = (await callTool(tools, "tools_man", { names: ["tasks.depend"] })) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toContain("tasks_depend (tasks.depend, v1)");
+		const result = (await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] })) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("tasks_depend (test-vehicle:tasks.depend, v1)");
 		expect(result.content[0]?.text).toContain("now callable as tasks_depend");
 		expect(harness.activeTools).toContain("tasks_depend");
 	});
@@ -170,7 +175,7 @@ describe("registerVehicleTools with shell activation", () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend"), operation("docs.list")])), { shell: {} });
 
-		await callTool(tools, "tools_man", { names: ["docs.list"] });
+		await callTool(tools, "tools_man", { names: ["test-vehicle:docs.list"] });
 		expect(harness.activeTools).toContain("docs_list");
 	});
 
@@ -188,7 +193,7 @@ describe("registerVehicleTools with shell activation", () => {
 	it("a discovered operation decays and is deactivated after its TTL elapses unused", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: { discoveredTtlTurns: 2 } });
-		await callTool(tools, "tools_man", { names: ["tasks.depend"] });
+		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
 		expect(harness.activeTools).toContain("tasks_depend");
 
 		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
@@ -201,7 +206,7 @@ describe("registerVehicleTools with shell activation", () => {
 	it("calling a discovered operation resets its TTL instead of letting it decay while in use", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: { discoveredTtlTurns: 2 } });
-		await callTool(tools, "tools_man", { names: ["tasks.depend"] });
+		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
 
 		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // 2 -> 1
 		await harness.emit("tool_execution_end", { toolCallId: "x", toolName: "tasks_depend", result: {}, isError: false });
@@ -231,7 +236,7 @@ describe("registerVehicleTools with shell activation", () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend", { available: false })])), { shell: {} });
 
-		const result = (await callTool(tools, "tools_man", { names: ["tasks.depend"] })) as { content: Array<{ text: string }> };
+		const result = (await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] })) as { content: Array<{ text: string }> };
 		expect(result.content[0]?.text).toContain("currently unavailable");
 		expect(harness.activeTools).not.toContain("tasks_depend");
 	});
@@ -253,7 +258,7 @@ describe("registerVehicleTools with shell activation", () => {
 		const { pi, tools, harness } = fakePi();
 		const client = new FakeClient(manifest([operation("tasks.depend")]));
 		const registered = await registerVehicleTools(pi, client, { shell: { discoveredTtlTurns: 2 } });
-		await callTool(tools, "tools_man", { names: ["tasks.depend"] });
+		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
 
 		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // 2 -> 1
 		await refreshVehicleToolAvailability(pi, client, registered, { shell: { discoveredTtlTurns: 2 } });
@@ -304,47 +309,8 @@ describe("registerVehicleTools honors VEHICLE_SHELL_DISABLED", () => {
 	});
 });
 
-describe("registerVehicleTools with shell broker mode", () => {
-	it("without options.shell.broker, tools_list is unaffected -- today's exact single-vehicle behavior", async () => {
-		const { pi, tools } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
-
-		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toBe("tasks.create -- Run tasks.create.");
-	});
-
-	it("tools_list merges a broker-discovered foreign vehicle's operations, namespaced by vehicle name", async () => {
-		const { pi, tools } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: {
-				broker: {
-					ownVehicleName: "papyrus",
-					discover: async () => [discoveredVehicle("packed", [operation("package.install")])],
-				},
-			},
-		});
-
-		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toContain("tasks.create -- Run tasks.create.");
-		expect(result.content[0]?.text).toContain("packed:package.install -- Run package.install.");
-	});
-
-	it("tools_list's query filter matches a namespaced foreign operation's own name", async () => {
-		const { pi, tools } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: {
-				broker: {
-					ownVehicleName: "papyrus",
-					discover: async () => [discoveredVehicle("packed", [operation("package.install")])],
-				},
-			},
-		});
-
-		const result = (await callTool(tools, "tools_list", { query: "package" })) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toBe("packed:package.install -- Run package.install.");
-	});
-
-	it("discovers another registerVehicleTools() call in the SAME process automatically, with no broker.discover override -- stacks instead of racing", async () => {
+describe("the shared meta-tools discover every vehicle in the process, regardless of which one created them", () => {
+	it("merges a second registerVehicleTools() call's operations in automatically, with no configuration on either side beyond shell -- stacks instead of racing", async () => {
 		// Points the real default discoverForeignVehicles() at an empty temp dir so this test's
 		// assertions only reflect the in-process registry, not whatever real Vehicle daemons
 		// happen to be running on the machine executing this test.
@@ -353,17 +319,15 @@ describe("registerVehicleTools with shell broker mode", () => {
 		process.env.XDG_RUNTIME_DIR = emptyDir;
 		try {
 			const { pi, tools } = fakePi();
-			// Papyrus registers first, no shell of its own -- exactly like a real extension that
-			// lost the tools_list/tools_man ownership race but still runs its own registration fully.
-			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.create")], "papyrus")), {});
-			// Pipes wins tools_list/tools_man ownership and enables broker mode with the real default
-			// discover() -- no explicit discover callback given, unlike every other test in this file.
-			await registerVehicleTools(pi, new FakeClient(manifest([operation("ci.status")], "pipes")), {
-				shell: { broker: { ownVehicleName: "pipes" } },
+			// Papyrus registers first -- neither vehicle needs any option beyond its own shell;
+			// there is no more "ownership" for either of them to win or lose.
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.create")], "papyrus")), {
+				shell: {},
 			});
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("ci.status")], "pipes")), { shell: {} });
 
 			const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
-			expect(result.content[0]?.text).toContain("ci.status -- Run ci.status.");
+			expect(result.content[0]?.text).toContain("pipes:ci.status -- Run ci.status.");
 			expect(result.content[0]?.text).toContain("papyrus:tasks.create -- Run tasks.create.");
 			expect(result.content[0]?.text).toContain("papyrus:docs.create -- Run docs.create.");
 		} finally {
@@ -373,156 +337,101 @@ describe("registerVehicleTools with shell broker mode", () => {
 		}
 	});
 
-	it("broker discovery throwing never breaks tools_list's own base (local) listing", async () => {
-		const { pi, tools } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: {
-				broker: {
-					ownVehicleName: "papyrus",
-					discover: async () => {
-						throw new Error("handle directory unreadable");
-					},
-				},
-			},
-		});
+	it("cross-process discovery throwing never breaks tools_list's own in-process listing", async () => {
+		const originalXdgRuntimeDir = process.env.XDG_RUNTIME_DIR;
+		// A path that can never be listed (not a directory at all) reproduces a real discovery
+		// failure without needing to inject a fake -- discoverForeignVehicles degrades to [] on
+		// any readdir failure, exactly like an unreadable/nonexistent handle directory would.
+		process.env.XDG_RUNTIME_DIR = join(tmpdir(), "vehicle-shell-nonexistent-handle-dir-does-not-exist");
+		try {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
 
-		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toBe("tasks.create -- Run tasks.create.");
+			const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toBe("test-vehicle:tasks.create -- Run tasks.create.");
+		} finally {
+			if (originalXdgRuntimeDir === undefined) delete process.env.XDG_RUNTIME_DIR;
+			else process.env.XDG_RUNTIME_DIR = originalXdgRuntimeDir;
+		}
 	});
 
-	it("tools_man for a known local operation is unaffected by broker mode", async () => {
+	it("tools_man for a known operation is unaffected by another vehicle also being in the process -- it was already pre-registered (unprefixed) by its own vehicle's registration, same as today", async () => {
 		const { pi, tools, harness } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: { broker: { ownVehicleName: "papyrus", discover: async () => [] } },
-		});
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("ci.status")], "pipes")), { shell: {} });
 
-		const result = (await callTool(tools, "tools_man", { names: ["tasks.create"] })) as { content: Array<{ text: string }> };
+		const result = (await callTool(tools, "tools_man", { names: ["papyrus:tasks.create"] })) as { content: Array<{ text: string }> };
 		expect(result.content[0]?.text).toContain("now callable as tasks_create");
 		expect(harness.activeTools).toContain("tasks_create");
 	});
 
-	// registerVehicleTools always auto-supplies activateForeignOperation now (see the real-routing
-	// tests below) -- this fallback message is only reachable by a consumer calling
-	// registerVehicleShell directly without one, e.g. a future consumer that wants broker-mode
-	// discovery/listing without dynamic foreign-tool activation.
-	it("tools_man for a broker-discovered foreign operation reports it as known but not yet locally activatable when no activateForeignOperation hook is given", async () => {
-		const { pi, tools, harness } = fakePi();
-		registerVehicleShell(pi, manifest([operation("tasks.create")]), [], {
-			broker: {
-				ownVehicleName: "papyrus",
-				discover: async () => [discoveredVehicle("packed", [operation("package.install")])],
-			},
-		});
-
-		const result = (await callTool(tools, "tools_man", { names: ["packed:package.install"] })) as { content: Array<{ text: string }> };
-		expect(result.content[0]?.text).toContain('known -- provided by Vehicle "packed"');
-		expect(result.content[0]?.text).toContain("not yet callable here");
-		expect(harness.activeTools).not.toContain("packed:package.install");
-	});
-
-	it("tools_man for a name that's neither local nor broker-discoverable keeps today's exact unknown-operation message", async () => {
+	it("tools_man for a name that's neither known locally nor discoverable keeps today's exact unknown-operation message", async () => {
 		const { pi, tools } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: { broker: { ownVehicleName: "papyrus", discover: async () => [] } },
-		});
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
 
 		const result = (await callTool(tools, "tools_man", { names: ["nonexistent.operation"] })) as { content: Array<{ text: string }> };
 		expect(result.content[0]?.text).toBe("nonexistent.operation: no such operation. Use tools_list to browse available names.");
 	});
 
-	it("tools_man for a broker-discovered operation dynamically routes to and registers a real, callable Pi tool via activateForeignOperation", async () => {
+	// A vehicle registered directly into the in-process registry (not via registerVehicleTools())
+	// never pre-registers any of its own operations as Pi tools -- the same shape a genuinely
+	// cross-process daemon-only vehicle (no local Pi extension of its own) has. This is the one
+	// real case that still needs dynamic, on-demand activation through the vehicle's own
+	// activateOperation closure, exactly like a truly new operation a live manifest re-fetch reveals.
+	it("tools_man dynamically routes to and registers a real, callable Pi tool for a vehicle that never pre-registered its own operations, using THAT vehicle's own activation policy", async () => {
 		const { pi, tools, harness } = fakePi();
-		const vehicle = discoveredVehicle("packed", [operation("package.install")]);
-		const activated: Array<{ vehicleName: string; operationName: string }> = [];
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: {
-				broker: {
-					ownVehicleName: "papyrus",
-					discover: async () => [vehicle],
-					activateForeignOperation: (v, descriptor) => {
-						activated.push({ vehicleName: v.name, operationName: descriptor.name });
-						const toolName = `${v.name}_${descriptor.name.replace(/\./g, "_")}`;
-						pi.registerTool({
-							name: toolName,
-							label: descriptor.name,
-							description: descriptor.description,
-							parameters: descriptor.inputSchema as never,
-							async execute() {
-								return { content: [{ type: "text", text: "ok" }], details: {} };
-							},
-						});
-						return toolName;
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
+
+		const invocations: Array<{ name: string; version: number; input: unknown }> = [];
+		const packedManifest = manifest(
+			[operation("package.install", { inputSchema: { type: "object", properties: { name: { type: "string" } } } })],
+			"packed",
+		);
+		registerInProcessVehicle(
+			"packed",
+			packedManifest,
+			{ manifest: () => Promise.resolve(packedManifest) } as VehicleClient,
+			(descriptor) => {
+				const toolName = `packed_${descriptor.name.replace(/\./g, "_")}`;
+				pi.registerTool({
+					name: toolName,
+					label: descriptor.name,
+					description: descriptor.description,
+					parameters: descriptor.inputSchema as never,
+					async execute(_id, params) {
+						invocations.push({ name: descriptor.name, version: descriptor.version, input: params });
+						return { content: [{ type: "text", text: "installed" }], details: {} };
 					},
-				},
+				});
+				return toolName;
 			},
-		});
+		);
 
 		const result = (await callTool(tools, "tools_man", { names: ["packed:package.install"] })) as { content: Array<{ text: string }> };
-		expect(activated).toEqual([{ vehicleName: "packed", operationName: "package.install" }]);
 		expect(result.content[0]?.text).toContain("now callable as packed_package_install");
 		expect(harness.activeTools).toContain("packed_package_install");
 
-		// A second tools_man call on the same foreign operation must not re-activate it.
+		// A second tools_man call on the same operation must not re-activate/re-register it.
 		await callTool(tools, "tools_man", { names: ["packed:package.install"] });
-		expect(activated.length).toBe(1);
-	});
+		expect(invocations.length).toBe(0); // registering isn't calling -- only an actual tool call is
 
-	it("by default (no explicit activateForeignOperation), registerVehicleTools wires real routing: the activated foreign tool actually invokes the foreign vehicle's own client, and decays via the same TTL cycle as any local tool", async () => {
-		const { pi, tools, harness } = fakePi();
-		const foreignManifest = manifest([
-			operation("package.install", { inputSchema: { type: "object", properties: { name: { type: "string" } } } }),
-		]);
-		const invocations: Array<{ name: string; version: number; input: unknown }> = [];
-		class RecordingClient extends FakeClient {
-			override async invoke<Output = unknown>(name: string, version: number, input: unknown): Promise<Output> {
-				invocations.push({ name, version, input });
-				return { installed: true } as Output;
-			}
-		}
-		const vehicle = { name: "packed", manifest: foreignManifest, client: new RecordingClient(foreignManifest) };
-
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: { broker: { ownVehicleName: "papyrus", discover: async () => [vehicle] } },
-		});
-
-		await callTool(tools, "tools_man", { names: ["packed:package.install"] });
-		expect(harness.activeTools).toContain("packed_package_install");
-
-		const installTool = tools.find((tool) => tool.name === "packed_package_install");
-		if (!installTool) throw new Error("packed_package_install not registered");
-		const result = (await installTool.execute(
-			"call-1",
-			{ name: "curl" } as never,
-			undefined as never,
-			undefined as never,
-			{
-				sessionManager: { getSessionId: () => "session-1" },
-				hasUI: false,
-			} as never,
-		)) as { content: Array<{ text: string }> };
+		// Proves it's genuinely callable, using packed's own activateOperation, not just claimed.
+		await callTool(tools, "packed_package_install", { name: "curl" });
 		expect(invocations).toEqual([{ name: "package.install", version: 1, input: { name: "curl" } }]);
-		expect(result.content[0]?.text).toContain("installed");
 
-		// Same decay cycle as any locally-registered discovered operation (default discoveredTtlTurns=8).
+		// Same decay cycle as any other discovered operation (default discoveredTtlTurns=8).
 		for (let turn = 0; turn < 8; turn++) {
 			await harness.emit("turn_end", { turnIndex: turn, message: {}, toolResults: [] });
 		}
 		expect(harness.activeTools).not.toContain("packed_package_install");
 	});
 
-	it("activateForeignOperation throwing (e.g. a Pi tool-name collision) reports a friendly failure without crashing tools_man", async () => {
-		const { pi, tools } = fakePi();
-		const vehicle = discoveredVehicle("packed", [operation("package.install")]);
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: {
-				broker: {
-					ownVehicleName: "papyrus",
-					discover: async () => [vehicle],
-					activateForeignOperation: () => {
-						throw new Error("Pi tool 'packed_package_install' is already registered");
-					},
-				},
-			},
+	it("activation throwing (e.g. a Pi tool-name collision) reports a friendly failure without crashing tools_man", async () => {
+		const { pi, tools } = fakePi({ existingTools: ["packed_package_install"] });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
+		const packedManifest = manifest([operation("package.install")], "packed");
+		registerInProcessVehicle("packed", packedManifest, { manifest: () => Promise.resolve(packedManifest) } as VehicleClient, () => {
+			throw new Error("Pi tool 'packed_package_install' is already registered");
 		});
 
 		const result = (await callTool(tools, "tools_man", { names: ["packed:package.install"] })) as { content: Array<{ text: string }> };
@@ -532,38 +441,40 @@ describe("registerVehicleTools with shell broker mode", () => {
 	});
 });
 
-describe("registerVehicleTools skips registering redundant meta-tools", () => {
-	it("when tools_list is already registered by another extension, never registers its own tools_list/tools_man -- pure dead weight, Pi has no unregisterTool()", async () => {
-		const { pi, tools } = fakePi({ existingTools: ["tools_list"] });
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+describe("the shared meta-tools are registered exactly once, no matter how many vehicles enable shell mode", () => {
+	it("a second vehicle's own registerVehicleTools() call never registers a redundant tools_list/tools_man -- pure dead weight, Pi has no unregisterTool()", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
+		const countAfterFirst = tools.filter((tool) => tool.name === "tools_list").length;
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("ci.status")], "pipes")), { shell: {} });
 
-		expect(tools.find((tool) => tool.name === "tools_list")).toBeUndefined();
-		expect(tools.find((tool) => tool.name === "tools_man")).toBeUndefined();
+		expect(countAfterFirst).toBe(1);
+		expect(tools.filter((tool) => tool.name === "tools_list").length).toBe(1);
+		expect(tools.filter((tool) => tool.name === "tools_man").length).toBe(1);
 	});
 
-	it("still registers and activates its own core/discovered operation tools normally when meta-tools are skipped", async () => {
+	it("an extension with a pre-existing tools_list registered by something else entirely never registers its own -- and still registers/activates its own core operations normally", async () => {
 		const { pi, tools, harness } = fakePi({ existingTools: ["tools_list"] });
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
 			shell: { coreOperations: ["tasks.create"] },
 		});
 
+		expect(tools.find((tool) => tool.name === "tools_list")).toBeUndefined();
+		expect(tools.find((tool) => tool.name === "tools_man")).toBeUndefined();
 		expect(tools.find((tool) => tool.name === "tasks_create")).toBeDefined();
 		expect(harness.activeTools).toContain("tasks_create");
 	});
 
-	it("never touches another extension's tools_list/tools_man active state -- doesn't own them, so never adds or removes them via setActiveTools", async () => {
+	it("never touches an unrelated extension's pre-existing tools_list/tools_man active state -- doesn't own them, so never adds or removes them via setActiveTools", async () => {
 		const { pi, harness } = fakePi({ existingTools: ["tools_list", "tools_man"] });
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
 
 		// Started active (existingTools' own default) and must stay that way -- untouched, not
 		// re-added by us (which would be indistinguishable from "left alone" here, but the next
-		// assertion -- decaying our own tools_man -- proves we genuinely never track them at all).
+		// assertion -- decaying our own tools_man -- proves we genuinely never mis-manage them).
 		expect(harness.activeTools).toContain("tools_list");
 		expect(harness.activeTools).toContain("tools_man");
 
-		// If this vehicle mistakenly believed it owned tools_man, turn_end's decay cycle would
-		// eventually deactivate it once untracked/unseeded -- it must not, since we never seeded or
-		// claimed it in the first place.
 		for (let turn = 0; turn < 30; turn++) {
 			await harness.emit("turn_end", { turnIndex: turn, message: {}, toolResults: [] });
 		}
@@ -571,7 +482,7 @@ describe("registerVehicleTools skips registering redundant meta-tools", () => {
 		expect(harness.activeTools).toContain("tools_man");
 	});
 
-	it("without any pre-existing tools_list, registers both meta-tools exactly as before this check existed", async () => {
+	it("without any pre-existing tools_list, registers both meta-tools exactly once", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
 

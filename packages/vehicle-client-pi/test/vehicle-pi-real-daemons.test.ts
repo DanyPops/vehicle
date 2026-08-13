@@ -113,9 +113,9 @@ describe("registerVehicleTools broker discovery across two real, separately-runn
 			expect(end.toolName).toBe("tools_list");
 			expect(end.isError).toBe(false);
 			const text = JSON.stringify(end.result);
-			// pipes' own operations, unnamespaced (it's the tools_list/tools_man owner).
-			expect(text).toContain("ci.help");
-			// papyrus's real operations, merged in via broker discovery, namespaced "papyrus:<op>".
+			// Both real daemons' operations, uniformly namespaced -- neither is the accidental,
+			// unprefixed "local" vehicle the old whichever-wins-ownership design would have made pipes.
+			expect(text).toContain("pipes:ci.help");
 			expect(text).toContain("papyrus:tasks.create");
 			expect(text).toContain("papyrus:notes.capture");
 		} finally {

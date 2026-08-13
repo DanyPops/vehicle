@@ -82,8 +82,6 @@ describe("the real @danypops/pi-pipes + @danypops/pi-papyrus extensions, each ba
 		});
 		daemons.push(pipesDaemon);
 
-		// pipes loads (and so wins the tools_list/tools_man ownership race) before papyrus --
-		// matches the real live session's own observed load order/ownership exactly.
 		const proc = spawnRealPiProcess({
 			extensions: [resolveFauxProviderExtensionPath(), PI_PIPES_EXTENSION, PI_PAPYRUS_EXTENSION],
 			extraArgs: ["--provider", "faux", "--model", "faux-1"],
@@ -112,19 +110,13 @@ describe("the real @danypops/pi-pipes + @danypops/pi-papyrus extensions, each ba
 			expect(end.toolName).toBe("tools_list");
 			expect(end.isError).toBe(false);
 			const text = JSON.stringify(end.result);
-			// Whichever extension's own vehicle-client-pi copy actually attempts broker registration
-			// wins the tools_list/tools_man ownership race (not necessarily load order -- an older
-			// dependency copy that never enables broker mode at all simply never contends). Assert on
-			// both real operations appearing SOMEWHERE, unnamespaced XOR namespaced, rather than
-			// hardcoding which side wins.
-			expect(text).toMatch(/(^|[\s"])(pipes:)?ci\.help\b/);
-			expect(text).toMatch(/(^|[\s"])(papyrus:)?tasks\.create\b/);
-			expect(text).toMatch(/(^|[\s"])(papyrus:)?notes\.capture\b/);
-			// The real test: one side's ops are namespaced and the other's aren't -- proving an actual
-			// cross-daemon broker merge happened, not just two independent, un-merged tool sets.
-			const pipesNamespaced = text.includes("pipes:ci.help");
-			const papyrusNamespaced = text.includes("papyrus:tasks.create");
-			expect(pipesNamespaced !== papyrusNamespaced).toBe(true);
+			// Neither extension "owns" tools_list anymore -- the shared, neutral meta-tools namespace
+			// every vehicle's operations uniformly, regardless of which one happened to trigger their
+			// own creation. No more hedging on which side wins: both real daemons' real operations must
+			// appear, both namespaced.
+			expect(text).toContain("pipes:ci.help");
+			expect(text).toContain("papyrus:tasks.create");
+			expect(text).toContain("papyrus:notes.capture");
 		} finally {
 			await proc.dispose();
 		}

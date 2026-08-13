@@ -1,6 +1,6 @@
-/** Proves the in-process broker-discovery-stacking fix (vehicle-shell-registry.ts) survives a
- * real spawned `pi --mode rpc` process, not just the fake in-process harness in
- * vehicle-pi-shell.test.ts. */
+/** Proves the shared, process-wide, neutral meta-tools (ensureVehicleShellHandle in
+ * vehicle-shell.ts) survive a real spawned `pi --mode rpc` process, not just the fake in-process
+ * harness in vehicle-pi-shell.test.ts. */
 
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -49,7 +49,9 @@ describe("registerVehicleTools broker discovery through a real spawned pi proces
 			expect(end.toolName).toBe("tools_list");
 			expect(end.isError).toBe(false);
 			const text = JSON.stringify(end.result);
-			expect(text).toContain("ci.status -- Run ci.status.");
+			// Every operation is uniformly namespaced now, including whichever vehicle happened to
+			// trigger the shared meta-tools' own creation -- there's no more unprefixed "local" vehicle.
+			expect(text).toContain("pipes:ci.status -- Run ci.status.");
 			expect(text).toContain("papyrus:tasks.create -- Run tasks.create.");
 			expect(text).toContain("papyrus:docs.create -- Run docs.create.");
 		} finally {

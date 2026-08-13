@@ -4,8 +4,9 @@
  * each `toolCall` ends that turn, so sequential sendPrompt() calls map 1:1 onto script steps,
  * leaving as much time as needed between two tools_list calls to mutate/kill/replace a daemon.
  *
- * "probe" is the tools_list/tools_man broker owner; "fixture" (fixture-vehicle-daemon.ts) is the
- * one mutated/swapped, appearing namespaced "fixture:<op>".
+ * "probe" and "fixture" (fixture-vehicle-daemon.ts) are both plain vehicles now -- neither owns
+ * the shared meta-tools, which are neutral; every operation from both appears namespaced
+ * ("probe:<op>", "fixture:<op>"). "fixture" is the one mutated/swapped across these stories.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -158,7 +159,7 @@ describe("tools_list converges dynamically within one already-running pi process
 		}
 	}, 30_000);
 
-	it("picks up a live in-place update to the OWNING vehicle's own local manifest, not just a foreign one -- Packed updating its own daemon in place", async () => {
+	it("picks up a live in-place update to any vehicle's own manifest, not just another vehicle's -- Packed updating its own daemon in place", async () => {
 		const { runtimeDir, sharedEnv } = isolatedEnv();
 		await startFixture(runtimeDir, sharedEnv, "probe", ["own.v1"]);
 
@@ -183,22 +184,22 @@ describe("tools_list converges dynamically within one already-running pi process
 
 		try {
 			const before = await toolsListText(events, proc, "list tools");
-			expect(before).toContain("own.v1");
-			expect(before).not.toContain("own.v2");
+			expect(before).toContain("probe:own.v1");
+			expect(before).not.toContain("probe:own.v2");
 
 			// "probe" updates its own manifest live, no restart.
 			const probe = fixtureClient(runtimeDir, "probe");
-			await probe.invoke("fixture.add_operation", 1, { name: "own.v2", description: "added to the owning vehicle's own manifest" });
+			await probe.invoke("fixture.add_operation", 1, { name: "own.v2", description: "added to its own manifest" });
 
 			const after = await toolsListText(events, proc, "list tools again");
-			expect(after).toContain("own.v1");
-			expect(after).toContain("own.v2");
+			expect(after).toContain("probe:own.v1");
+			expect(after).toContain("probe:own.v2");
 		} finally {
 			await proc.dispose();
 		}
 	}, 30_000);
 
-	it("tools_man activates a genuinely new LOCAL operation added live, making it actually callable", async () => {
+	it("tools_man activates a genuinely new operation added live to a vehicle's own manifest, making it actually callable", async () => {
 		const { runtimeDir, sharedEnv } = isolatedEnv();
 		await startFixture(runtimeDir, sharedEnv, "probe", []);
 
@@ -213,9 +214,9 @@ describe("tools_list converges dynamically within one already-running pi process
 				[SCRIPT_ENV_VAR]: encodeFauxScript([
 					{ type: "toolCall", name: "tools_list", arguments: {} },
 					{ type: "text", text: "ok0" },
-					{ type: "toolCall", name: "tools_man", arguments: { names: ["own.v2"] } },
+					{ type: "toolCall", name: "tools_man", arguments: { names: ["probe:own.v2"] } },
 					{ type: "text", text: "ok1" },
-					{ type: "toolCall", name: "own_v2", arguments: {} },
+					{ type: "toolCall", name: "probe_own_v2", arguments: {} },
 					{ type: "text", text: "ok2" },
 				]),
 			},
@@ -226,15 +227,15 @@ describe("tools_list converges dynamically within one already-running pi process
 		try {
 			// Baseline avoids a race with the extension's own async registration seeing own.v2 first.
 			const baseline = await toolsListText(events, proc, "list tools first");
-			expect(baseline).not.toContain("own.v2");
+			expect(baseline).not.toContain("probe:own.v2");
 
 			// Added live, after registration.
 			const probe = fixtureClient(runtimeDir, "probe");
-			await probe.invoke("fixture.add_operation", 1, { name: "own.v2", description: "added to the owning vehicle's own manifest" });
+			await probe.invoke("fixture.add_operation", 1, { name: "own.v2", description: "added to its own manifest" });
 
-			const manPage = await toolsListText(events, proc, "activate own.v2");
+			const manPage = await toolsListText(events, proc, "activate probe:own.v2");
 			expect(manPage).not.toContain("no such operation");
-			expect(manPage).toContain("now callable as own_v2");
+			expect(manPage).toContain("now callable as probe_own_v2");
 
 			// Proves it's genuinely callable, not just claimed.
 			const callResult = await toolsListText(events, proc, "call the newly-activated tool");

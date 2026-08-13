@@ -64,7 +64,6 @@ import {
 	type VehicleShellHandle,
 	type VehicleShellOptions,
 } from "./vehicle-shell.js";
-import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
 import { registerInProcessVehicle } from "./vehicle-shell-registry.js";
 
 export type { RegisterVehicleToolsJobOptions } from "./vehicle-job-polling.js";
@@ -793,32 +792,41 @@ function createTool(
 }
 
 /**
- * The Vehicle Shell broker mode's own default activateForeignOperation implementation: the exact
- * same createTool() every native operation gets, just pointed at a foreign vehicle's own client
- * and manifest -- so a dynamically-activated foreign operation carries every cross-cutting
- * guarantee (permissions, safety, presentations, activity broadcasting, keyed idempotency,
- * structured failures) a locally-registered operation gets, never a second-class code path.
+ * Builds this vehicle's own operation-activation closure -- the one thing every vehicle supplies
+ * into the shared in-process registry (vehicle-shell-registry.ts's registerInProcessVehicle) so
+ * the process-wide, vehicle-agnostic tools_man (vehicle-shell.ts) can dynamically activate any of
+ * this vehicle's own non-core operations using THIS vehicle's own permissions/principal/renderers/
+ * safety policy -- never borrowed from whichever vehicle happens to house the shared meta-tools'
+ * own creation call, the way a single accidental "owner" used to force on every other vehicle's
+ * discovered operations.
  *
- * Tool name is namespaced by vehicle name up front (e.g. "packed_package_install") specifically
- * so two different foreign vehicles can never collide with each other on a shared operation name;
- * within one vehicle's own operations, defaultToolName's own uniqueness already holds. Still
- * guards against every other kind of collision (a foreign vehicle whose own name collides with an
- * already-registered local tool, or the rare case of two distinct operations sanitizing to the
- * same name) via the same assertNamesAvailable check static registration already uses, surfacing
- * a clear error tools_man turns into a friendly non-crashing message rather than silently
- * overwriting an existing tool.
+ * Also doubles as the mechanism for a genuinely new operation a fresh manifest re-fetch reveals
+ * this vehicle's own initial registration never knew about (a daemon that hot-adds an operation
+ * while this session is already running) -- the exact same createTool() every operation known at
+ * registration time already gets, just called on demand instead of upfront.
+ *
+ * Tool name is namespaced by vehicle name up front (e.g. "packed_package_install") specifically so
+ * two different vehicles can never collide with each other on a shared operation name; within one
+ * vehicle's own operations, defaultToolName's own uniqueness already holds. Still guards against
+ * every other kind of collision (this vehicle's own name colliding with an already-registered
+ * tool, or the rare case of two distinct operations sanitizing to the same name) via the same
+ * assertNamesAvailable check static registration already uses, surfacing a clear error tools_man
+ * turns into a friendly non-crashing message rather than silently overwriting an existing tool.
  */
-function activateForeignVehicleOperation(
+function buildOperationActivator(
 	pi: ExtensionAPI,
-	vehicle: DiscoveredVehicle,
-	descriptor: VehicleManifestOperation,
+	vehicleName: string,
+	client: VehicleClient,
+	manifest: VehicleManifest,
 	options: RegisterVehicleToolsOptions,
-): string {
-	const toolName = `${defaultToolName({ ...descriptor, name: vehicle.name }, false)}_${defaultToolName(descriptor, false)}`;
-	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
-	assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
-	pi.registerTool(createTool(vehicle.client, vehicle.manifest, descriptor, toolName, options));
-	return toolName;
+): (descriptor: VehicleManifestOperation) => string {
+	return (descriptor) => {
+		const toolName = `${defaultToolName({ ...descriptor, name: vehicleName }, false)}_${defaultToolName(descriptor, false)}`;
+		const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
+		assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
+		pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
+		return toolName;
+	};
 }
 
 /**
@@ -883,7 +891,7 @@ export async function registerVehicleTools(
 ): Promise<RegisteredPiVehicle> {
 	const options = normalizeRegisterVehicleToolsOptions(rawOptions);
 	const { manifest, stale } = await resolveManifestForRegistration(client, options.manifestCache, options.handshake);
-	registerInProcessVehicle(manifest.name, manifest, client);
+	registerInProcessVehicle(manifest.name, manifest, client, buildOperationActivator(pi, manifest.name, client, manifest, options));
 	const projected = projectedNames(manifest, options.toolName ?? defaultToolName);
 	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
 	assertNamesAvailable(projected, runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
@@ -907,12 +915,7 @@ export async function registerVehicleTools(
 		effect: descriptor.effect,
 		safetyState: resolveSafetyState(manifest.name, descriptor, options),
 	}));
-	const shell = registerVehicleShell(
-		pi,
-		manifest,
-		shellManagedTools(tools),
-		withLocalDynamism(pi, client, manifest, options, withBrokerRouting(pi, options)),
-	);
+	const shell = registerVehicleShell(pi, manifest.name, shellManagedTools(manifest.name, tools), options.shell);
 	// Registered tools whose operation is currently unavailable (e.g. a
 	// missing credential) or currently resolved to "blocked" (missing
 	// permissions, or an explicit /safety override) are hidden from the LLM
@@ -940,58 +943,15 @@ export async function registerVehicleTools(
 	return { manifest, tools, stale, ...(shell ? { shell } : {}) };
 }
 
-/** RegisteredPiVehicleTool's own available/blocked facts, narrowed to what vehicle-shell.ts needs -- keeps that file from importing this one's own (much larger) type. */
-function shellManagedTools(tools: readonly RegisteredPiVehicleTool[]) {
+/** RegisteredPiVehicleTool's own available/blocked facts, narrowed to what vehicle-shell.ts needs -- keeps that file from importing this one's own (much larger) type. vehicleName disambiguates operationName across vehicles now that one shared handle covers every vehicle in the process, not just this one. */
+function shellManagedTools(vehicleName: string, tools: readonly RegisteredPiVehicleTool[]) {
 	return tools.map((tool) => ({
+		vehicleName,
 		toolName: tool.toolName,
 		operationName: tool.operationName,
 		available: tool.available,
 		blocked: tool.safetyState === "blocked",
 	}));
-}
-
-/** Auto-supplies broker mode's real routing hook (activateForeignVehicleOperation) whenever a
- * consumer opts into options.shell.broker without already supplying its own -- the only reason
- * this file passes anything other than options.shell straight through to registerVehicleShell.
- * Returns options.shell completely unmodified in every other case, including no shell at all. */
-function withBrokerRouting(pi: ExtensionAPI, options: RegisterVehicleToolsOptions): VehicleShellOptions | undefined {
-	if (!options.shell?.broker || options.shell.broker.activateForeignOperation) return options.shell;
-	return {
-		...options.shell,
-		broker: {
-			...options.shell.broker,
-			activateForeignOperation: (vehicle, descriptor) => activateForeignVehicleOperation(pi, vehicle, descriptor, options),
-		},
-	};
-}
-
-function activateLocalVehicleOperation(
-	pi: ExtensionAPI,
-	client: VehicleClient,
-	manifest: VehicleManifest,
-	descriptor: VehicleManifestOperation,
-	options: RegisterVehicleToolsOptions,
-): string {
-	const toolName = defaultToolName(descriptor, false);
-	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
-	assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
-	pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
-	return toolName;
-}
-
-function withLocalDynamism(
-	pi: ExtensionAPI,
-	client: VehicleClient,
-	manifest: VehicleManifest,
-	options: RegisterVehicleToolsOptions,
-	shell: VehicleShellOptions | undefined,
-): VehicleShellOptions | undefined {
-	if (!shell) return shell;
-	return {
-		...shell,
-		refreshOwnManifest: () => client.manifest(),
-		activateLocalOperation: (descriptor) => activateLocalVehicleOperation(pi, client, manifest, descriptor, options),
-	};
 }
 
 /**
@@ -1045,7 +1005,7 @@ export async function refreshVehicleToolAvailability(
 	}
 
 	if (registered.shell) {
-		refreshVehicleShellManagedTools(registered.shell, shellManagedTools(tools));
+		refreshVehicleShellManagedTools(registered.shell, shellManagedTools(manifest.name, tools));
 		applyVehicleShellActivation(pi, registered.shell);
 	} else {
 		syncManagedActiveTools(

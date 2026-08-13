@@ -71,13 +71,14 @@ function defaultCreateClient(baseUrl: string, token: string): VehicleClient {
 }
 
 /**
- * Every OTHER live Vehicle daemon currently discoverable, excluding `ownVehicleName` (this
- * consumer's own vehicle -- its operations are already in the base manifest, never duplicated
- * here). Bounded by whatever the shared directory actually contains; no network fan-out timeout
- * of its own beyond each RemoteVehicleClient call's own default.
+ * Every live Vehicle daemon currently discoverable, optionally excluding `ownVehicleName` (a
+ * consumer's own vehicle -- its operations are already known some other way, never duplicated
+ * here). Omit `ownVehicleName` to list everyone, the shape a neutral caller with no "own name" of
+ * its own needs. Bounded by whatever the shared directory actually contains; no network fan-out
+ * timeout of its own beyond each RemoteVehicleClient call's own default.
  */
 export async function discoverForeignVehicles(
-	ownVehicleName: string,
+	ownVehicleName?: string,
 	deps: VehicleBrokerDependencies = {},
 ): Promise<readonly DiscoveredVehicle[]> {
 	const directory = deps.handleDirectory ?? resolveSharedVehicleHandleDirectory();

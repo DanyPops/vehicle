@@ -1,14 +1,15 @@
 /**
- * Reproduces the "does the broker-discovery-merge fix actually work through a real spawned `pi`
- * binary" question end-to-end: registers two Vehicles in ONE real extension-activation pass --
- * "papyrus" first (no shell of its own, exactly like a real extension that lost the
- * tools_list/tools_man ownership race), then "pipes" second (wins tools_list/tools_man ownership,
- * broker mode, no discover override -- the real default path). If the in-process registry stacking
- * fix (vehicle-shell-registry.ts) is wired correctly all the way through a real pi process's own
- * extension loader/module resolution, tools_list's real tool_execution_end result must contain
- * both vehicles' operations, namespaced. XDG_RUNTIME_DIR is left to whatever the spawning test
- * sets (isolated to an empty dir) so only the in-process registry -- not real machine daemons --
- * is exercised.
+ * Reproduces the "does the neutral, single-owner tools_list/tools_man fix actually work through a
+ * real spawned `pi` binary" question end-to-end: registers two Vehicles in ONE real
+ * extension-activation pass -- "papyrus" first, "pipes" second, both opting into shell mode with
+ * their own coreOperations (the real shape every actual consumer uses; neither vehicle passes or
+ * needs a "broker" option of any kind anymore -- discovery is unconditional and vehicle-agnostic).
+ * If the shared, process-wide meta-tools (vehicle-shell.ts's ensureVehicleShellHandle) are wired
+ * correctly all the way through a real pi process's own extension loader/module resolution,
+ * tools_list's real tool_execution_end result must contain both vehicles' operations, namespaced,
+ * regardless of which of the two happened to trigger the shared handle's own creation.
+ * XDG_RUNTIME_DIR is left to whatever the spawning test sets (isolated to an empty dir) so only
+ * the in-process registry -- not real machine daemons -- is exercised.
  */
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -52,8 +53,10 @@ class FakeClient implements VehicleClient {
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-	await registerVehicleTools(pi, new FakeClient(manifest("papyrus", [operation("tasks.create"), operation("docs.create")])), {});
+	await registerVehicleTools(pi, new FakeClient(manifest("papyrus", [operation("tasks.create"), operation("docs.create")])), {
+		shell: { coreOperations: ["tasks.create"] },
+	});
 	await registerVehicleTools(pi, new FakeClient(manifest("pipes", [operation("ci.status")])), {
-		shell: { broker: { ownVehicleName: "pipes" } },
+		shell: { coreOperations: [] },
 	});
 }
