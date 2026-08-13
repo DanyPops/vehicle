@@ -23,7 +23,7 @@ export function nativeServiceIdentity(value: string): NativeServiceIdentity {
 }
 
 /**
- * Mixes each strategy's own renderer-format version into the hash a plan
+ * Mixes each strategy's own renderer fingerprint into the hash a plan
  * compares against the already-installed descriptor's own recorded spec
  * hash -- deliberately NOT a bare `manifestHash(vehicle)`. A vehicle's own
  * spec can stay byte-identical across a renderer-only change (e.g. a fixed
@@ -31,11 +31,26 @@ export function nativeServiceIdentity(value: string): NativeServiceIdentity {
  * gets installed; without this, planFleet's `actual.specHash !== specHash`
  * drift check never fires for that class of change, and an already-deployed
  * unit is silently never re-installed no matter how many times reconcile
- * runs. Bump the calling strategy's own version constant whenever its
- * generateDescriptor output changes for some existing vehicle spec.
+ * runs.
+ *
+ * The fingerprint is each strategy's own `generateDescriptor.toString()` --
+ * its real source text, not a hand-maintained version integer. This was a
+ * genuine, lived incident: a prior version of this file used a manually-
+ * bumped RENDERER_VERSION constant, which depended on a human remembering
+ * to bump it every time generateDescriptor's own output changed -- exactly
+ * the kind of forgettable discipline that let the original
+ * DAEMON_KIT_LAUNCH_PROVENANCE rename go undetected for weeks. Deriving the
+ * fingerprint from the function's own source closes that gap unconditionally:
+ * any future edit to generateDescriptor's body changes this hash with zero
+ * additional developer action, the same way systemd's own generator model
+ * (systemd.generator(7)) has no cached-hash staleness problem at all because
+ * generators simply re-run unconditionally every boot. A pure whitespace/
+ * comment-only reformat also changes the fingerprint (an unnecessary but
+ * harmless extra reconcile), which is the safe direction to be wrong in --
+ * unlike a missed real change, which is silently, permanently wrong.
  */
-export function descriptorSpecHash(vehicle: VehicleSpec, rendererVersion: number): ManifestHash {
-	return manifestHash({ vehicle, rendererVersion });
+export function descriptorSpecHash(vehicle: VehicleSpec, rendererFingerprint: string): ManifestHash {
+	return manifestHash({ vehicle, rendererFingerprint });
 }
 
 function resourceDiagnostics(resources: VehicleResources | undefined, capabilities: NativeManagerCapabilities): Diagnostic[] {

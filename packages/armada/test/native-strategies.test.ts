@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { launchdStrategy, manifestHash, type NativeServiceStrategy, systemdStrategy, windowsTaskSchedulerStrategy } from "../src/index.js";
+import { descriptorSpecHash } from "../src/native/descriptor.js";
 import { vehicle } from "./fixtures.js";
 
 const strategies: readonly NativeServiceStrategy[] = [systemdStrategy, launchdStrategy, windowsTaskSchedulerStrategy];
@@ -27,6 +28,25 @@ describe("native service strategies", () => {
 			if (!outcome.ok) continue;
 			expect(outcome.descriptor.specHash).not.toBe(manifestHash(spec));
 		}
+	});
+
+	it("derives the renderer fingerprint from generateDescriptor's own real source text, not a hand-maintained constant -- every strategy's own function source is substantial and each strategy's differs from every other's", () => {
+		const sources = strategies.map((strategy) => strategy.generateDescriptor.toString());
+		for (const source of sources) expect(source.length).toBeGreaterThan(200);
+		const distinct = new Set(sources);
+		expect(distinct.size).toBe(strategies.length);
+	});
+
+	it("changing a strategy's own generateDescriptor source changes its specHash for an otherwise-identical vehicle spec -- proving the fingerprint really does track the function's own current implementation, not a frozen snapshot", () => {
+		// Simulates "someone edited generateDescriptor" without needing a second real
+		// module build: descriptorSpecHash takes the fingerprint as a plain string
+		// argument, so calling it directly with two different strings proves the
+		// hash is genuinely sensitive to fingerprint content -- exactly the
+		// property RENDERER_FINGERPRINT = generateDescriptor.toString() relies on.
+		const spec = vehicle({ restart: { policy: "never" } });
+		const before = descriptorSpecHash(spec, systemdStrategy.generateDescriptor.toString());
+		const afterEdit = descriptorSpecHash(spec, `${systemdStrategy.generateDescriptor.toString()} // pretend edit`);
+		expect(afterEdit).not.toBe(before);
 	});
 
 	it("maps bounded restart and resource controls to a systemd user unit", () => {

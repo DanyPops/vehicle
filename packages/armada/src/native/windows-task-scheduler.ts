@@ -8,10 +8,6 @@ import {
 	sortedEnvEntries,
 	xmlEscape,
 } from "./descriptor.js";
-
-/** Bump whenever generateDescriptor's own output changes for some existing vehicle spec -- see descriptorSpecHash. */
-const RENDERER_VERSION = 2;
-
 import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrategy } from "./service-manager.js";
 
 const capabilities: NativeManagerCapabilities = Object.freeze({
@@ -66,7 +62,7 @@ function restartSettings(vehicle: VehicleSpec): readonly string[] {
 function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	const diagnostics = capabilityDiagnostics(vehicle, capabilities);
 	if (hasError(diagnostics)) return { ok: false, diagnostics };
-	const specHash = descriptorSpecHash(vehicle, RENDERER_VERSION);
+	const specHash = descriptorSpecHash(vehicle, RENDERER_FINGERPRINT);
 	const identity = `\\Armada\\${vehicle.name}`;
 	const commandText = [vehicle.executable, ...vehicle.arguments].map(quoteArgument).join(" ");
 	const envPrefix = sortedEnvEntries(vehicle)
@@ -118,6 +114,9 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 		diagnostics,
 	};
 }
+
+/** generateDescriptor's own real source text -- see descriptorSpecHash's own doc comment for why this replaces a hand-maintained version constant. Computed once after the function it fingerprints is fully defined. */
+const RENDERER_FINGERPRINT = generateDescriptor.toString();
 
 export const windowsTaskSchedulerStrategy: NativeServiceStrategy = Object.freeze({
 	kind: "windows-task-scheduler",
