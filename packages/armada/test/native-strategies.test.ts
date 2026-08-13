@@ -20,7 +20,7 @@ describe("native service strategies", () => {
 		}
 	});
 
-	it("mixes a renderer identity into specHash, not just the bare vehicle spec -- so a renderer-only change (e.g. a fixed env var name) is detected as drift on the next plan/reconcile instead of silently never re-installing an already-deployed unit", () => {
+	it("mixes a renderer fingerprint into specHash -- a renderer-only change is detected as drift instead of never re-installing an already-deployed unit", () => {
 		for (const strategy of strategies) {
 			const spec = vehicle({ restart: { policy: "never" } });
 			const outcome = strategy.generateDescriptor(spec);
@@ -30,22 +30,10 @@ describe("native service strategies", () => {
 		}
 	});
 
-	it("derives the renderer fingerprint from generateDescriptor's own real source text, not a hand-maintained constant -- every strategy's own function source is substantial and each strategy's differs from every other's", () => {
-		const sources = strategies.map((strategy) => strategy.generateDescriptor.toString());
-		for (const source of sources) expect(source.length).toBeGreaterThan(200);
-		const distinct = new Set(sources);
-		expect(distinct.size).toBe(strategies.length);
-	});
-
-	it("changing a strategy's own generateDescriptor source changes its specHash for an otherwise-identical vehicle spec -- proving the fingerprint really does track the function's own current implementation, not a frozen snapshot", () => {
-		// Simulates "someone edited generateDescriptor" without needing a second real
-		// module build: descriptorSpecHash takes the fingerprint as a plain string
-		// argument, so calling it directly with two different strings proves the
-		// hash is genuinely sensitive to fingerprint content -- exactly the
-		// property RENDERER_FINGERPRINT = generateDescriptor.toString() relies on.
+	it("descriptorSpecHash is sensitive to fingerprint content, not just the vehicle spec", () => {
 		const spec = vehicle({ restart: { policy: "never" } });
-		const before = descriptorSpecHash(spec, systemdStrategy.generateDescriptor.toString());
-		const afterEdit = descriptorSpecHash(spec, `${systemdStrategy.generateDescriptor.toString()} // pretend edit`);
+		const before = descriptorSpecHash(spec, "fingerprint-a");
+		const afterEdit = descriptorSpecHash(spec, "fingerprint-b");
 		expect(afterEdit).not.toBe(before);
 	});
 

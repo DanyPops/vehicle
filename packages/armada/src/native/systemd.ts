@@ -1,5 +1,13 @@
 import type { VehicleSpec } from "../fleet/manifest.js";
-import { capabilityDiagnostics, descriptorSpecHash, hasError, nativeServiceIdentity, seconds, sortedEnvEntries } from "./descriptor.js";
+import {
+	capabilityDiagnostics,
+	descriptorSpecHash,
+	hasError,
+	moduleSourceFingerprint,
+	nativeServiceIdentity,
+	seconds,
+	sortedEnvEntries,
+} from "./descriptor.js";
 import type { DescriptorOutcome, NativeManagerCapabilities, NativeServiceStrategy } from "./service-manager.js";
 
 const capabilities: NativeManagerCapabilities = Object.freeze({
@@ -78,7 +86,7 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	};
 }
 
-/** generateDescriptor's own real source text -- see descriptorSpecHash's own doc comment for why this replaces a hand-maintained version constant. Computed once after the function it fingerprints is fully defined. */
-const RENDERER_FINGERPRINT = generateDescriptor.toString();
+/** See descriptorSpecHash/moduleSourceFingerprint's own doc comments. */
+const RENDERER_FINGERPRINT = moduleSourceFingerprint(import.meta.url);
 
 export const systemdStrategy: NativeServiceStrategy = Object.freeze({ kind: "systemd", capabilities, generateDescriptor });

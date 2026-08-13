@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { type Diagnostic, diagnostic } from "../fleet/diagnostic.js";
 import { manifestHash } from "../fleet/hash.js";
 import { createNativeServiceIdentity, type ManifestHash, type NativeServiceIdentity } from "../fleet/identity.js";
@@ -23,31 +25,26 @@ export function nativeServiceIdentity(value: string): NativeServiceIdentity {
 }
 
 /**
- * Mixes each strategy's own renderer fingerprint into the hash a plan
- * compares against the already-installed descriptor's own recorded spec
- * hash -- deliberately NOT a bare `manifestHash(vehicle)`. A vehicle's own
- * spec can stay byte-identical across a renderer-only change (e.g. a fixed
- * env var name, a new hardcoded unit line) that still changes what actually
- * gets installed; without this, planFleet's `actual.specHash !== specHash`
- * drift check never fires for that class of change, and an already-deployed
- * unit is silently never re-installed no matter how many times reconcile
- * runs.
- *
- * The fingerprint is each strategy's own `generateDescriptor.toString()` --
- * its real source text, not a hand-maintained version integer. This was a
- * genuine, lived incident: a prior version of this file used a manually-
- * bumped RENDERER_VERSION constant, which depended on a human remembering
- * to bump it every time generateDescriptor's own output changed -- exactly
- * the kind of forgettable discipline that let the original
- * DAEMON_KIT_LAUNCH_PROVENANCE rename go undetected for weeks. Deriving the
- * fingerprint from the function's own source closes that gap unconditionally:
- * any future edit to generateDescriptor's body changes this hash with zero
- * additional developer action, the same way systemd's own generator model
- * (systemd.generator(7)) has no cached-hash staleness problem at all because
- * generators simply re-run unconditionally every boot. A pure whitespace/
- * comment-only reformat also changes the fingerprint (an unnecessary but
- * harmless extra reconcile), which is the safe direction to be wrong in --
- * unlike a missed real change, which is silently, permanently wrong.
+ * A module's own compiled file bytes, keyed by its `import.meta.url`. NOT
+ * `generateDescriptor.toString()`: confirmed live, Bun and Node serialize
+ * function source differently (JavaScriptCore vs V8), so the same published
+ * file produced two different fingerprints depending on which runtime
+ * loaded it. Reading the file directly sidesteps that -- plain file I/O is
+ * byte-identical everywhere.
+ */
+export function moduleSourceFingerprint(moduleUrl: string): string {
+	return readFileSync(fileURLToPath(moduleUrl), "utf8");
+}
+
+/**
+ * Mixes a renderer fingerprint into the hash a plan compares against the
+ * installed descriptor's own recorded spec hash -- NOT a bare
+ * `manifestHash(vehicle)`. A vehicle's spec can stay identical across a
+ * renderer-only change (e.g. a fixed env var name); without this,
+ * planFleet's drift check never fires and an already-deployed unit is
+ * never re-installed. The fingerprint is the strategy module's own file
+ * content (see moduleSourceFingerprint) rather than a hand-bumped version
+ * constant, so any future edit is caught automatically.
  */
 export function descriptorSpecHash(vehicle: VehicleSpec, rendererFingerprint: string): ManifestHash {
 	return manifestHash({ vehicle, rendererFingerprint });

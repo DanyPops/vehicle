@@ -3,6 +3,7 @@ import {
 	capabilityDiagnostics,
 	descriptorSpecHash,
 	hasError,
+	moduleSourceFingerprint,
 	nativeServiceIdentity,
 	seconds,
 	sortedEnvEntries,
@@ -115,8 +116,8 @@ function generateDescriptor(vehicle: VehicleSpec): DescriptorOutcome {
 	};
 }
 
-/** generateDescriptor's own real source text -- see descriptorSpecHash's own doc comment for why this replaces a hand-maintained version constant. Computed once after the function it fingerprints is fully defined. */
-const RENDERER_FINGERPRINT = generateDescriptor.toString();
+/** See descriptorSpecHash/moduleSourceFingerprint's own doc comments. */
+const RENDERER_FINGERPRINT = moduleSourceFingerprint(import.meta.url);
 
 export const windowsTaskSchedulerStrategy: NativeServiceStrategy = Object.freeze({
 	kind: "windows-task-scheduler",
