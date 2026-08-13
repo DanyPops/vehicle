@@ -37,6 +37,7 @@
 			"default": "./dist/hitl-approval-ask-prompt.js"
 		},
 		"./pi-load-harness": "./src/pi-load-harness.ts",
+		"./test-utils": "./src/test-utils.ts",
 		"./pi-status-refresh": "./src/pi-status-refresh.ts",
 		"./secrets-backend": "./src/secrets-backend.ts",
 		"./secrets-backend-env": "./src/secrets-backend-env.ts",
