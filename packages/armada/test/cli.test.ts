@@ -130,6 +130,40 @@ describe("armada plan", () => {
 		});
 	});
 
+	it("restarts one named Vehicle unconditionally, even with zero declared drift", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const path = join(directory, "armada.json");
+		await writeFile(path, manifestJson());
+		const events: string[] = [];
+		const controller: NativeServiceController = {
+			...manager,
+			capabilities: systemdStrategy.capabilities,
+			// actual state is reported "absent" by default `manager.inspect` above,
+			// so plan/reconcile would see an "install", not a "restart" -- restart
+			// must go straight to stop+start regardless of what plan would propose.
+			replaceDescriptorAtomically: () => Promise.resolve({ ok: true, diagnostics: [] }),
+			start: (identity) => {
+				events.push(`start:${identity}`);
+				return Promise.resolve({ ok: true, diagnostics: [] });
+			},
+			stop: (identity) => {
+				events.push(`stop:${identity}`);
+				return Promise.resolve({ ok: true, diagnostics: [] });
+			},
+			remove: () => Promise.resolve({ ok: true, diagnostics: [] }),
+		};
+		const captured = output();
+		const code = await runCli(["restart", "papyrus", "--manifest", path, "--json"], {
+			manager: controller,
+			controller,
+			readiness: { waitUntilReady: () => Promise.resolve({ ok: true, diagnostics: [] }) },
+			io: captured.io,
+		});
+		expect(code).toBe(0);
+		expect(JSON.parse(captured.stdout.join(""))).toMatchObject({ ok: true, restarted: "papyrus" });
+		expect(events).toEqual(["stop:armada-papyrus.service", "start:armada-papyrus.service"]);
+	});
+
 	it("upserts integration Vehicle files into the authoritative manifest", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
 		const manifestPath = join(directory, "armada.json");

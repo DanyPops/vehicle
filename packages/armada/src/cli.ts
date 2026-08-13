@@ -11,7 +11,7 @@ import { decodeArmadaManifest, MAX_MANIFEST_BYTES, type ManifestDecodeOutcome } 
 import { removeManifestVehicle, upsertManifestVehicle } from "./fleet/manifest-store.js";
 import { planFleet } from "./fleet/planner.js";
 import { createHandleReadinessProbe, readVehicleHandleFile } from "./fleet/readiness.js";
-import { reconcileFleet } from "./fleet/reconciler.js";
+import { reconcileFleet, restartVehicle } from "./fleet/reconciler.js";
 import { buildFleetStatus, type ObservedProcess } from "./fleet/status.js";
 import { createNativeController, defaultDescriptorRoot, processCommandRunner, strategyForNativeManager } from "./native/controller.js";
 import type { NativeManagerKind, NativeServiceController, NativeServiceManager, ReadinessProbe } from "./native/service-manager.js";
@@ -88,7 +88,12 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			index++;
 			continue;
 		}
-		if ((command === "cleanup" || command === "remove") && vehicle === undefined && argument !== undefined && !argument.startsWith("--")) {
+		if (
+			(command === "cleanup" || command === "remove" || command === "restart") &&
+			vehicle === undefined &&
+			argument !== undefined &&
+			!argument.startsWith("--")
+		) {
 			vehicle = argument;
 			continue;
 		}
@@ -141,7 +146,8 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 		command !== "doctor" &&
 		command !== "cleanup" &&
 		command !== "upsert" &&
-		command !== "remove"
+		command !== "remove" &&
+		command !== "restart"
 	) {
 		writeDiagnostics(
 			[
@@ -149,7 +155,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 					"CLI_COMMAND_UNKNOWN",
 					"error",
 					command ?? "",
-					"usage: armada <plan|reconcile|status|doctor|cleanup|upsert|remove> [--manifest <path>] [--json]",
+					"usage: armada <plan|reconcile|status|doctor|cleanup|upsert|remove|restart> [--manifest <path>] [--json]",
 				),
 			],
 			false,
@@ -300,6 +306,31 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 			return 1;
 		}
 		dependencies.io.stdout(`${JSON.stringify({ ok: true, terminatedPids: executed.terminatedPids })}\n`);
+		return 0;
+	}
+	if (command === "restart") {
+		const vehicle = decoded.manifest.vehicles.find((item) => item.name === parsed.arguments.vehicle);
+		if (!vehicle || !dependencies.controller) {
+			writeDiagnostics(
+				[diagnostic("RESTART_VEHICLE_UNKNOWN", "error", "/vehicle", "restart requires a declared Vehicle and native controller")],
+				parsed.arguments.json,
+				dependencies.io,
+			);
+			return 2;
+		}
+		const restarted = await restartVehicle(vehicle.name, decoded.manifest, strategy, {
+			controller: dependencies.controller,
+			readiness: dependencies.readiness ?? createHandleReadinessProbe(),
+		});
+		if (!restarted.ok) {
+			writeDiagnostics(restarted.diagnostics, parsed.arguments.json, dependencies.io);
+			return 1;
+		}
+		if (parsed.arguments.json) {
+			dependencies.io.stdout(`${JSON.stringify({ ok: true, restarted: vehicle.name, diagnostics: restarted.diagnostics })}\n`);
+			return 0;
+		}
+		dependencies.io.stdout(`restarted: ${vehicle.name} via ${dependencies.controller.kind}\n`);
 		return 0;
 	}
 	if (command === "status" || command === "doctor") {

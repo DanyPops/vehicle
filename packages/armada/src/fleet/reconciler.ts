@@ -49,11 +49,13 @@ async function startAndWait(
 	return undefined;
 }
 
+type ApplyDependencies = Pick<ReconcileRequest, "controller" | "readiness">;
+
 async function applyOperation(
 	operation: PlanOperation,
 	vehicle: VehicleSpec,
 	descriptor: NativeServiceDescriptor,
-	request: ReconcileRequest,
+	request: ApplyDependencies,
 	diagnostics: Diagnostic[],
 ): Promise<ReconcileOutcome | undefined> {
 	switch (operation.kind) {
@@ -93,6 +95,37 @@ async function applyOperation(
 
 function vehicleByName(manifest: ArmadaManifest, name: VehicleName): VehicleSpec | undefined {
 	return manifest.vehicles.find((vehicle) => vehicle.name === name);
+}
+
+/**
+ * Force one named Vehicle to stop+start now, bypassing plan/manifest-hash
+ * staleness checks entirely. reconcileFleet only proposes a restart when the
+ * declared spec or native state actually diverges -- a dependency bump
+ * underneath a fixed interpreted entry point (e.g. `bun cli.ts serve`)
+ * changes neither, so plan/reconcile alone can never recover from it. This is
+ * the primitive a caller reaches for after an out-of-band update it knows
+ * invalidated the running process, without waiting for the next drift.
+ */
+export async function restartVehicle(
+	name: VehicleName,
+	manifest: ArmadaManifest,
+	strategy: NativeServiceStrategy,
+	dependencies: ApplyDependencies,
+): Promise<ReconcileOutcome> {
+	const vehicle = vehicleByName(manifest, name);
+	if (!vehicle) {
+		return {
+			ok: false,
+			diagnostics: [diagnostic("RECONCILE_VEHICLE_MISSING", "error", `/vehicles/${name}`, "vehicle is not declared in the manifest")],
+		};
+	}
+	const generated = strategy.generateDescriptor(vehicle);
+	if (!generated.ok) return generated;
+	const diagnostics: Diagnostic[] = [...generated.diagnostics];
+	const operation: PlanOperation = { kind: "restart", name };
+	const failure = await applyOperation(operation, vehicle, generated.descriptor, dependencies, diagnostics);
+	if (failure) return failure;
+	return { ok: true, applied: Object.freeze([operation]), diagnostics: Object.freeze(diagnostics) };
 }
 
 export async function reconcileFleet(request: ReconcileRequest): Promise<ReconcileOutcome> {

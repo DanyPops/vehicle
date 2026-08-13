@@ -7,6 +7,7 @@ import {
 	planFleet,
 	type ReadinessProbe,
 	reconcileFleet,
+	restartVehicle,
 	systemdStrategy,
 } from "../src/index.js";
 import { manifest, vehicle } from "./fixtures.js";
@@ -141,6 +142,31 @@ describe("reconcileFleet", () => {
 			readiness,
 		});
 		expect(outcome).toMatchObject({ ok: true, applied: [] });
+		expect(events).toEqual([]);
+	});
+});
+
+describe("restartVehicle", () => {
+	it("stops then starts and waits for readiness, even when nothing about the spec changed", async () => {
+		const spec = vehicle();
+		const desired = manifest([spec]);
+		// actual state already matches the desired spec exactly -- plan/reconcile would
+		// see zero drift here, which is precisely the case restartVehicle must not defer to.
+		const actual: NativeServiceState[] = [{ name: spec.name, status: "running", specHash: specHashOf(spec) }];
+		const { controller, readiness, events } = harness(actual);
+		const outcome = await restartVehicle(spec.name, desired, systemdStrategy, { controller, readiness });
+		expect(outcome).toMatchObject({ ok: true, applied: [{ kind: "restart", name: spec.name }] });
+		expect(events).toEqual([`stop:armada-${spec.name}.service`, `start:armada-${spec.name}.service`, `ready:${spec.name}`]);
+	});
+
+	it("fails with a clear diagnostic for a name the manifest never declared", async () => {
+		const desired = manifest([vehicle()]);
+		const { controller, readiness, events } = harness();
+		const outcome = await restartVehicle("never-declared" as ReturnType<typeof vehicle>["name"], desired, systemdStrategy, {
+			controller,
+			readiness,
+		});
+		expect(outcome).toMatchObject({ ok: false, diagnostics: [{ code: "RECONCILE_VEHICLE_MISSING" }] });
 		expect(events).toEqual([]);
 	});
 });

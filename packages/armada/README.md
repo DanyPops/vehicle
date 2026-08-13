@@ -90,6 +90,15 @@ Remove an Armada-owned service and its manifest declaration with:
 armada remove example --json
 ```
 
+Force one named Vehicle to stop+start now, bypassing plan/manifest-hash drift
+detection entirely -- for a caller that knows something changed underneath a
+fixed entry point (e.g. a dependency bump) even though the declared spec
+didn't:
+
+```bash
+armada restart example --json
+```
+
 Use `--manifest <path>` with any command to select a different manifest.
 
 ## Testing integrations
