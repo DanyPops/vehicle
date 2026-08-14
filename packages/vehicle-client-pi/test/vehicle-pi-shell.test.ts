@@ -124,6 +124,70 @@ describe("registerVehicleTools with shell activation", () => {
 		}
 	});
 
+	describe('tools_list mode:"regex" -- apropos\'s own default matching behavior', () => {
+		it("matches a real regex against the operation name, apropos-default parity", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(manifest([operation("tasks.create"), operation("tasks.depend"), operation("docs.list")])),
+				{
+					shell: {},
+				},
+			);
+
+			const result = (await callTool(tools, "tools_list", { query: "^test-vehicle:tasks\\.", mode: "regex" })) as {
+				content: Array<{ text: string }>;
+			};
+			expect(result.content[0]?.text).toContain("tasks.create");
+			expect(result.content[0]?.text).toContain("tasks.depend");
+			expect(result.content[0]?.text).not.toContain("docs.list");
+		});
+
+		it("matches a regex against the description too, same as substring mode's name-or-description semantics", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(manifest([operation("tasks.create", { description: "Creates a real dependency chain." }), operation("docs.list")])),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_list", { query: "depend\\w+ chain", mode: "regex" })) as {
+				content: Array<{ text: string }>;
+			};
+			expect(result.content[0]?.text).toContain("tasks.create");
+			expect(result.content[0]?.text).not.toContain("docs.list");
+		});
+
+		it("is case-insensitive, matching apropos's own case-insensitivity", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+			const result = (await callTool(tools, "tools_list", { query: "TASKS\\.CREATE", mode: "regex" })) as {
+				content: Array<{ text: string }>;
+			};
+			expect(result.content[0]?.text).toContain("tasks.create");
+		});
+
+		it("an invalid regex degrades to a clear error message, never an uncaught exception", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+			const result = (await callTool(tools, "tools_list", { query: "(unclosed", mode: "regex" })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain('Invalid regex "(unclosed"');
+		});
+
+		it('the default (omitted mode, or mode:"substring") behaves exactly as before regex mode existed', async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.list")])), { shell: {} });
+
+			const omitted = (await callTool(tools, "tools_list", { query: "docs" })) as { content: Array<{ text: string }> };
+			const explicit = (await callTool(tools, "tools_list", { query: "docs", mode: "substring" })) as { content: Array<{ text: string }> };
+			expect(omitted.content[0]?.text).toBe(explicit.content[0]?.text);
+			expect(omitted.content[0]?.text).toContain("docs.list");
+			expect(omitted.content[0]?.text).not.toContain("tasks.create");
+		});
+	});
+
 	it("tools_man recursively documents nested schemas, constraints, enums, and examples", async () => {
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(

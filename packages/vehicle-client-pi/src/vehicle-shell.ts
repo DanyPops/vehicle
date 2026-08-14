@@ -101,6 +101,33 @@ function shellQueryScore(descriptor: VehicleOperationDescriptor, query: string):
 	return `${descriptor.name} ${descriptor.description}`.toLowerCase().includes(rawNeedle) ? 3 : undefined;
 }
 
+/**
+ * `apropos`'s own default matching mode: query is a regular expression (case-insensitive, matching
+ * apropos's own case-insensitivity), tested against the operation's name and description
+ * independently -- same "match name OR description" semantics shellQueryScore already has, just a
+ * genuinely different match algorithm (substring/prefix vs. a real regex) rather than a different
+ * field scope. A name match ranks ahead of a description-only match, mirroring shellQueryScore's
+ * own name-before-description ordering; there's no meaningful prefix/substring tier to preserve
+ * once the needle is an arbitrary pattern rather than literal text. An empty query matches
+ * everything (rank 0), same as shellQueryScore's own empty-query behavior.
+ *
+ * Deliberately does NOT set RegExp's "g" flag: a global regex's own `.test()` mutates its
+ * `lastIndex` across calls, which would silently skip matches on the second and later operations
+ * tested against the same compiled instance -- every call here must be independent.
+ */
+export function compileShellQueryRegex(query: string): RegExp {
+	return new RegExp(query, "i");
+}
+
+function regexQueryScore(descriptor: VehicleOperationDescriptor, regex: RegExp): number | undefined {
+	// An empty pattern (new RegExp("")) matches every string for free via .test() -- zero characters
+	// are always found at position 0 -- so an empty query already "matches everything" here with no
+	// special-casing needed, exactly mirroring shellQueryScore's own empty-query behavior.
+	if (regex.test(descriptor.name)) return 0;
+	if (regex.test(descriptor.description)) return 1;
+	return undefined;
+}
+
 /** Separator-insensitive operation-name matching plus the existing raw description substring match. */
 export function matchesShellQuery(descriptor: VehicleOperationDescriptor, query: string): boolean {
 	return shellQueryScore(descriptor, query) !== undefined;
@@ -503,21 +530,46 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 	return {
 		name: listToolName,
 		label: "List Tools",
-		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description. Use ${manToolName} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
+		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description. mode:"regex" treats query as a case-insensitive regular expression instead of a plain substring/prefix match (apropos's own default matching mode). Use ${manToolName} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
 		parameters: Type.Object({
 			query: Type.Optional(
 				Type.String({ description: "Keyword to filter by (matched against operation name and description); omit to list everything." }),
 			),
+			mode: Type.Optional(
+				Type.Union([Type.Literal("substring"), Type.Literal("regex")], {
+					description:
+						'"substring" (default): today\'s plain substring/prefix match. "regex": treat query as a case-insensitive regular expression instead, matched against name and description independently.',
+				}),
+			),
 		}),
 		async execute(_toolCallId, params) {
-			const query = (params as { query?: string }).query ?? "";
+			const { query = "", mode = "substring" } = params as { query?: string; mode?: "substring" | "regex" };
 			reportToolsListExecute("vehicle", query);
 			const vehicles = await discoverAllVehicles();
 			const operations = await namespacedOperationsOf(vehicles);
+
+			let score: (descriptor: VehicleOperationDescriptor) => number | undefined;
+			if (mode === "regex") {
+				let regex: RegExp;
+				try {
+					regex = compileShellQueryRegex(query);
+				} catch (error) {
+					// Never an uncaught exception into the tool-calling harness -- an invalid regex is a
+					// normal, expected user input, not a bug.
+					return {
+						content: [{ type: "text", text: `Invalid regex "${query}": ${error instanceof Error ? error.message : String(error)}` }],
+						details: {},
+					};
+				}
+				score = (descriptor) => regexQueryScore(descriptor, regex);
+			} else {
+				score = (descriptor) => shellQueryScore(descriptor, query);
+			}
+
 			const matches = operations
 				.flatMap((descriptor, index) => {
-					const score = shellQueryScore(descriptor, query);
-					return score === undefined ? [] : [{ descriptor, index, score }];
+					const thisScore = score(descriptor);
+					return thisScore === undefined ? [] : [{ descriptor, index, score: thisScore }];
 				})
 				.sort((left, right) => left.score - right.score || left.index - right.index)
 				.map((entry) => entry.descriptor);
