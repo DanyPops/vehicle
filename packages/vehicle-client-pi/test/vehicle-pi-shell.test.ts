@@ -243,6 +243,125 @@ describe("registerVehicleTools with shell activation", () => {
 		});
 	});
 
+	describe('tools_list scope:"name" -- apropos --names-only parity', () => {
+		it('scope:"name" matches only the operation name, never an unrelated description', async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([
+						operation("tasks.create", { description: "Creates a task." }),
+						operation("docs.list", { description: "Mentions tasks in passing." }),
+					]),
+				),
+				{ shell: {} },
+			);
+
+			const allScope = (await callTool(tools, "tools_list", { query: "tasks" })) as { content: Array<{ text: string }> };
+			expect(allScope.content[0]?.text).toContain("tasks.create");
+			expect(allScope.content[0]?.text).toContain("docs.list"); // matches via description under the default scope
+
+			const nameScope = (await callTool(tools, "tools_list", { query: "tasks", scope: "name" })) as { content: Array<{ text: string }> };
+			expect(nameScope.content[0]?.text).toContain("tasks.create");
+			expect(nameScope.content[0]?.text).not.toContain("docs.list");
+		});
+
+		it('scope:"name" also applies in regex mode', async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([
+						operation("tasks.create", { description: "Creates a task." }),
+						operation("docs.list", { description: "Mentions tasks in passing." }),
+					]),
+				),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_list", { query: "tasks", mode: "regex", scope: "name" })) as {
+				content: Array<{ text: string }>;
+			};
+			expect(result.content[0]?.text).toContain("tasks.create");
+			expect(result.content[0]?.text).not.toContain("docs.list");
+		});
+
+		it("omitting scope preserves today's exact name-or-description default", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(manifest([operation("tasks.create", { description: "Mentions docs in passing." }), operation("docs.list")])),
+				{ shell: {} },
+			);
+
+			const omitted = (await callTool(tools, "tools_list", { query: "docs" })) as { content: Array<{ text: string }> };
+			const explicit = (await callTool(tools, "tools_list", { query: "docs", scope: "all" })) as { content: Array<{ text: string }> };
+			expect(omitted.content[0]?.text).toBe(explicit.content[0]?.text);
+			expect(omitted.content[0]?.text).toContain("tasks.create");
+			expect(omitted.content[0]?.text).toContain("docs.list");
+		});
+	});
+
+	describe('tools_list verbosity:"high" -- man/whatis-style terse-vs-full spectrum', () => {
+		it("appends each match's own parameter/schema summary", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([
+						operation("tasks.create", {
+							inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+						}),
+					]),
+				),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_list", { verbosity: "high" })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("test-vehicle:tasks.create -- Run tasks.create.");
+			expect(result.content[0]?.text).toContain("parameters:");
+			expect(result.content[0]?.text).toContain("title (string, required)");
+		});
+
+		it("never activates anything or performs a separate tools_man call -- purely a formatting choice", async () => {
+			const { pi, tools, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+			await callTool(tools, "tools_list", { verbosity: "high" });
+			expect(harness.activeTools).not.toContain("tasks_create");
+		});
+
+		it("an operation with no declared parameters gets just the one-liner, no empty parameters: section", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create", { inputSchema: { type: "object" } })])), {
+				shell: {},
+			});
+
+			const result = (await callTool(tools, "tools_list", { query: "test-vehicle:tasks.create", verbosity: "high" })) as {
+				content: Array<{ text: string }>;
+			};
+			expect(result.content[0]?.text).toBe("test-vehicle:tasks.create -- Run tasks.create.");
+		});
+
+		it('omitting verbosity (or verbosity:"low") preserves today\'s exact one-liner-only output', async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([operation("tasks.create", { inputSchema: { type: "object", properties: { title: { type: "string" } } } })]),
+				),
+				{ shell: {} },
+			);
+
+			const omitted = (await callTool(tools, "tools_list", { query: "test-vehicle:tasks.create" })) as { content: Array<{ text: string }> };
+			const explicit = (await callTool(tools, "tools_list", { query: "test-vehicle:tasks.create", verbosity: "low" })) as {
+				content: Array<{ text: string }>;
+			};
+			expect(omitted.content[0]?.text).toBe("test-vehicle:tasks.create -- Run tasks.create.");
+			expect(omitted.content[0]?.text).toBe(explicit.content[0]?.text);
+		});
+	});
+
 	it("tools_man recursively documents nested schemas, constraints, enums, and examples", async () => {
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(

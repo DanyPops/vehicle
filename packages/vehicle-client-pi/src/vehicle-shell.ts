@@ -93,18 +93,25 @@ function normalizeShellTerms(value: string): string {
 		.replace(/[._\s-]+/g, " ");
 }
 
-function shellQueryScore(descriptor: VehicleOperationDescriptor, query: string): number | undefined {
+/** "all" (default): match name OR description, today's exact existing behavior. "name": name-only
+ * -- mirrors apropos --names-only ("match only page names, not page descriptions, as with
+ * whatis(1)"), tighter and avoids a false positive from an unrelated description merely
+ * mentioning the keyword. */
+export type ShellQueryScope = "all" | "name";
+
+function shellQueryScore(descriptor: VehicleOperationDescriptor, query: string, scope: ShellQueryScope = "all"): number | undefined {
 	const rawNeedle = query.trim().toLowerCase();
 	if (rawNeedle.length === 0) return 0;
 	const normalizedNeedle = normalizeShellTerms(query);
 	const normalizedName = normalizeShellTerms(descriptor.name);
+	const haystack = (scope === "all" ? `${descriptor.name} ${descriptor.description}` : descriptor.name).toLowerCase();
 	if (normalizedNeedle.length === 0) {
-		return `${descriptor.name} ${descriptor.description}`.toLowerCase().includes(rawNeedle) ? 3 : undefined;
+		return haystack.includes(rawNeedle) ? 3 : undefined;
 	}
 	if (normalizedName === normalizedNeedle) return 0;
 	if (normalizedName.startsWith(normalizedNeedle)) return 1;
 	if (normalizedName.includes(normalizedNeedle)) return 2;
-	return `${descriptor.name} ${descriptor.description}`.toLowerCase().includes(rawNeedle) ? 3 : undefined;
+	return haystack.includes(rawNeedle) ? 3 : undefined;
 }
 
 /**
@@ -125,12 +132,12 @@ export function compileShellQueryRegex(query: string): RegExp {
 	return new RegExp(query, "i");
 }
 
-function regexQueryScore(descriptor: VehicleOperationDescriptor, regex: RegExp): number | undefined {
+function regexQueryScore(descriptor: VehicleOperationDescriptor, regex: RegExp, scope: ShellQueryScope = "all"): number | undefined {
 	// An empty pattern (new RegExp("")) matches every string for free via .test() -- zero characters
 	// are always found at position 0 -- so an empty query already "matches everything" here with no
 	// special-casing needed, exactly mirroring shellQueryScore's own empty-query behavior.
 	if (regex.test(descriptor.name)) return 0;
-	if (regex.test(descriptor.description)) return 1;
+	if (scope === "all" && regex.test(descriptor.description)) return 1;
 	return undefined;
 }
 
@@ -233,6 +240,20 @@ export function formatOperationManPage(descriptor: VehicleOperationDescriptor, t
 	lines.push("", "parameters:");
 	lines.push(...(properties.length > 0 ? properties : ["  (none)"]));
 	return lines.join("\n");
+}
+
+/**
+ * tools_list's own verbosity:"high" line -- the one-liner PLUS its parameter/schema summary,
+ * mirroring the terse-vs-full spectrum real `whatis` (terse) vs `man` (full) vs `apropos -l`/
+ * `--long` (don't trim) already embody. Deliberately narrower than formatOperationManPage: no
+ * effect/permissions/idempotency header, since this is a browsing aid for several operations at
+ * once, not a single operation's own full documentation (tools_man already owns that).
+ */
+function formatOperationOneLinerVerbose(descriptor: VehicleManifestOperation): string {
+	const oneLiner = formatOperationOneLiner(descriptor);
+	const properties = formatSchemaProperties(descriptor.inputSchema);
+	if (properties.length === 0) return oneLiner;
+	return [oneLiner, "  parameters:", ...properties].join("\n");
 }
 
 const DEFAULT_LIST_TOOL_NAME = "tools_list";
@@ -536,7 +557,7 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 	return {
 		name: listToolName,
 		label: "List Tools",
-		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description, and/or by effect (${VEHICLE_EFFECTS.join(" | ")}) -- e.g. effect:"read" to browse only side-effect-free operations first. mode:"regex" treats query as a case-insensitive regular expression instead of a plain substring/prefix match (apropos's own default matching mode). Use ${manToolName} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
+		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description, and/or by effect (${VEHICLE_EFFECTS.join(" | ")}) -- e.g. effect:"read" to browse only side-effect-free operations first. mode:"regex" treats query as a case-insensitive regular expression instead of a plain substring/prefix match (apropos's own default matching mode). scope:"name" restricts matching to the name alone, skipping the description. verbosity:"high" adds each match's own parameter/schema summary, avoiding a separate ${manToolName} round trip when browsing several operations' shape at once. Use ${manToolName} on a name from this list (or any name you already know) to see its full documentation (permissions/effect/idempotency too) and make it callable.`,
 		parameters: Type.Object({
 			query: Type.Optional(
 				Type.String({ description: "Keyword to filter by (matched against operation name and description); omit to list everything." }),
@@ -556,9 +577,33 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 					},
 				),
 			),
+			scope: Type.Optional(
+				Type.Union([Type.Literal("all"), Type.Literal("name")], {
+					description:
+						'"all" (default): match query against name OR description, today\'s exact existing behavior. "name": match against the operation name only (apropos --names-only parity).',
+				}),
+			),
+			verbosity: Type.Optional(
+				Type.Union([Type.Literal("low"), Type.Literal("high")], {
+					description:
+						'"low" (default): today\'s exact one-liner-per-match output. "high": each match\'s one-liner plus its parameter/schema summary.',
+				}),
+			),
 		}),
 		async execute(_toolCallId, params) {
-			const { query = "", mode = "substring", effect } = params as { query?: string; mode?: "substring" | "regex"; effect?: VehicleEffect };
+			const {
+				query = "",
+				mode = "substring",
+				effect,
+				scope = "all",
+				verbosity = "low",
+			} = params as {
+				query?: string;
+				mode?: "substring" | "regex";
+				effect?: VehicleEffect;
+				scope?: ShellQueryScope;
+				verbosity?: "low" | "high";
+			};
 			reportToolsListExecute("vehicle", query);
 			const vehicles = await discoverAllVehicles();
 			const operations = await namespacedOperationsOf(vehicles);
@@ -576,9 +621,9 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 						details: {},
 					};
 				}
-				score = (descriptor) => regexQueryScore(descriptor, regex);
+				score = (descriptor) => regexQueryScore(descriptor, regex, scope);
 			} else {
-				score = (descriptor) => shellQueryScore(descriptor, query);
+				score = (descriptor) => shellQueryScore(descriptor, query, scope);
 			}
 
 			const matches = operations
@@ -589,10 +634,11 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 				})
 				.sort((left, right) => left.score - right.score || left.index - right.index)
 				.map((entry) => entry.descriptor);
+			const formatMatch = verbosity === "high" ? formatOperationOneLinerVerbose : formatOperationOneLiner;
 			const text =
 				matches.length === 0
 					? `No operations matched "${query}"${effect ? ` with effect "${effect}"` : ""}.`
-					: matches.map((descriptor) => formatOperationOneLiner(descriptor)).join("\n");
+					: matches.map((descriptor) => formatMatch(descriptor)).join("\n");
 			return {
 				content: [{ type: "text", text }],
 				details: { operations: matches.map((descriptor) => ({ name: descriptor.name, description: descriptor.description })) },
