@@ -491,4 +491,75 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 		expect(harness.activeTools).toContain("tools_list");
 		expect(harness.activeTools).toContain("tools_man");
 	});
+
+	describe("tools_man bare (unprefixed) name resolution -- type -a parity", () => {
+		it("resolves a bare name to its one real owning vehicle, exactly as if it had been fully namespaced", async () => {
+			const { pi, tools, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")], "papyrus")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_man", { names: ["tasks.depend"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("tasks_depend (papyrus:tasks.depend, v1)");
+			expect(result.content[0]?.text).toContain("now callable as tasks_depend");
+			expect(harness.activeTools).toContain("tasks_depend");
+		});
+
+		it("a bare name with zero matches keeps today's exact unknown-operation message", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")], "papyrus")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_man", { names: ["nonexistent"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toBe("nonexistent: no such operation. Use tools_list to browse available names.");
+		});
+
+		// Two vehicles both eagerly pre-registering the SAME operation name (e.g. via registerVehicleTools
+		// for both) would collide at Pi-tool-registration time regardless of this feature -- a real,
+		// pre-existing constraint unrelated to bare-name resolution. The genuinely realistic shape for two
+		// vehicles sharing an operation name is each one discovered live (registerInProcessVehicle,
+		// exactly like the existing "packed" tests below), where nothing is registered until tools_man
+		// actually activates it -- so an ambiguous bare name never needs to reach activation at all.
+		it("a bare name matching more than one vehicle's own operation refuses to guess, listing every real candidate", async () => {
+			const { pi, tools, harness } = fakePi();
+			const papyrusManifest = manifest([operation("docs.create")], "papyrus");
+			const webSpiderManifest = manifest([operation("docs.create")], "web-spider");
+			registerInProcessVehicle("papyrus", papyrusManifest, { manifest: () => Promise.resolve(papyrusManifest) } as VehicleClient, () => {
+				throw new Error("must never be called -- ambiguity must be caught before any activation attempt");
+			});
+			registerInProcessVehicle(
+				"web-spider",
+				webSpiderManifest,
+				{ manifest: () => Promise.resolve(webSpiderManifest) } as VehicleClient,
+				() => {
+					throw new Error("must never be called -- ambiguity must be caught before any activation attempt");
+				},
+			);
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "unrelated")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_man", { names: ["docs.create"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("ambiguous");
+			expect(result.content[0]?.text).toContain("papyrus:docs.create");
+			expect(result.content[0]?.text).toContain("web-spider:docs.create");
+			expect(harness.activeTools).not.toContain("docs_create");
+		});
+
+		it("the existing fully-namespaced path is completely unaffected by bare-name resolution existing", async () => {
+			const { pi, tools, harness } = fakePi();
+			const papyrusManifest = manifest([operation("docs.create")], "papyrus");
+			const webSpiderManifest = manifest([operation("docs.create")], "web-spider");
+			registerInProcessVehicle("papyrus", papyrusManifest, { manifest: () => Promise.resolve(papyrusManifest) } as VehicleClient, () => {
+				throw new Error("must never be called in this test");
+			});
+			registerInProcessVehicle(
+				"web-spider",
+				webSpiderManifest,
+				{ manifest: () => Promise.resolve(webSpiderManifest) } as VehicleClient,
+				() => "web_spider_docs_create",
+			);
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "unrelated")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_man", { names: ["web-spider:docs.create"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("docs_create (web-spider:docs.create, v1)");
+			expect(result.content[0]?.text).toContain("now callable as web_spider_docs_create");
+			expect(harness.activeTools).toContain("web_spider_docs_create");
+		});
+	});
 });

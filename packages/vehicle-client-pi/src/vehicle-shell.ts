@@ -367,6 +367,45 @@ function splitNamespacedName(name: string): { vehicleName: string; operationName
 	return { vehicleName: name.slice(0, separator), operationName: name.slice(separator + 1) };
 }
 
+export type OperationNameResolution =
+	| { readonly kind: "none" }
+	| { readonly kind: "ambiguous"; readonly candidates: readonly string[] }
+	| {
+			readonly kind: "unique";
+			readonly vehicleName: string;
+			readonly operationName: string;
+			readonly descriptor: VehicleManifestOperation;
+	  };
+
+/**
+ * Resolves a tools_man name argument to exactly one operation against `operations` (already
+ * namespaced, e.g. namespacedOperationsOf's own output) -- the shared logic behind both today's
+ * fully-namespaced "vehicle:operation" lookup (unchanged: a direct match against the namespaced
+ * name) and bare-name resolution (no ":" at all): search every vehicle's own operations for an
+ * EXACT match on the bare operation name alone, mirroring bash's `type -a` -- show every binding
+ * rather than silently pick one when more than one vehicle happens to expose the same operation
+ * name. Zero matches and exactly one match behave identically whether the input was namespaced or
+ * bare; only the ambiguous case is bare-name-specific (a fully-namespaced name is either the one
+ * real operation or nothing at all -- there is nothing left to disambiguate).
+ */
+export function resolveOperationName(name: string, operations: readonly VehicleManifestOperation[]): OperationNameResolution {
+	const split = splitNamespacedName(name);
+	if (split) {
+		const descriptor = operations.find((op) => op.name === name);
+		return descriptor
+			? { kind: "unique", vehicleName: split.vehicleName, operationName: split.operationName, descriptor }
+			: { kind: "none" };
+	}
+	const matches = operations.flatMap((op) => {
+		const opSplit = splitNamespacedName(op.name);
+		return opSplit && opSplit.operationName === name ? [{ op, opSplit }] : [];
+	});
+	if (matches.length === 0) return { kind: "none" };
+	if (matches.length > 1) return { kind: "ambiguous", candidates: matches.map((match) => match.op.name) };
+	const only = matches[0]!;
+	return { kind: "unique", vehicleName: only.opSplit.vehicleName, operationName: only.opSplit.operationName, descriptor: only.op };
+}
+
 function createToolsListTool(listToolName: string, manToolName: string): ToolDefinition {
 	return {
 		name: listToolName,
@@ -411,9 +450,12 @@ function createToolsManTool(
 	return {
 		name: manToolName,
 		label: "Tool Manual",
-		description: `Shows full documentation for one or more Vehicle operations by their exact namespaced name (as seen from ${listToolName} or already known) and makes each one callable starting next turn. A name doesn't need to have been listed first.`,
+		description: `Shows full documentation for one or more Vehicle operations by their exact namespaced name (as seen from ${listToolName} or already known) and makes each one callable starting next turn. A name doesn't need to have been listed first. A bare, unprefixed name (no "vehicle:" part) also resolves as long as exactly one vehicle provides it -- ambiguous across more than one vehicle refuses and lists every real candidate instead of guessing.`,
 		parameters: Type.Object({
-			names: Type.Array(Type.String(), { description: 'Exact operation name(s), e.g. "papyrus:tasks.create".', minItems: 1 }),
+			names: Type.Array(Type.String(), {
+				description: 'Exact operation name(s), namespaced ("papyrus:tasks.create") or bare ("tasks.create") when unambiguous.',
+				minItems: 1,
+			}),
 		}),
 		async execute(_toolCallId, params) {
 			const names = (params as { names: string[] }).names;
@@ -421,42 +463,47 @@ function createToolsManTool(
 			const byKey = new Map(handle.managedTools.map((tool) => [`${tool.vehicleName}:${tool.operationName}`, tool]));
 			const vehicles = await discoverAllVehicles();
 			const byVehicleName = new Map(vehicles.map((vehicle) => [vehicle.name, vehicle]));
+			// Computed once for the whole batch, feeding both the fully-namespaced lookup (replacing the
+			// old per-name single-vehicle client.manifest() call with the exact same "fresh, fallback to
+			// snapshot on failure" semantics namespacedOperationsOf already provides -- and avoiding a
+			// redundant re-fetch of the same vehicle when a batch names more than one of its operations)
+			// and bare-name resolution across every vehicle.
+			const allOperations = await namespacedOperationsOf(vehicles);
 
 			const pages = await Promise.all(
 				names.map(async (name) => {
-					const split = splitNamespacedName(name);
-					if (!split) return `${name}: no such operation. Use ${listToolName} to browse available names.`;
-					const vehicle = byVehicleName.get(split.vehicleName);
-					if (!vehicle) return `${name}: no such operation. Use ${listToolName} to browse available names.`;
-					const descriptor = await vehicle.client.manifest().then(
-						(manifest) => manifest.operations.find((op) => op.name === split.operationName),
-						() => vehicle.manifest.operations.find((op) => op.name === split.operationName),
-					);
-					if (!descriptor) return `${name}: no such operation. Use ${listToolName} to browse available names.`;
-					const namespaced = namespacedDescriptor(split.vehicleName, descriptor);
+					const resolved = resolveOperationName(name, allOperations);
+					if (resolved.kind === "none") return `${name}: no such operation. Use ${listToolName} to browse available names.`;
+					if (resolved.kind === "ambiguous") {
+						return `${name}: ambiguous -- provided by ${resolved.candidates.length} vehicles (${resolved.candidates.join(", ")}). Use one of these exact names instead.`;
+					}
+					const { vehicleName, operationName, descriptor: namespaced } = resolved;
+					const fullName = `${vehicleName}:${operationName}`;
+					const vehicle = byVehicleName.get(vehicleName);
+					if (!vehicle) return `${fullName}: no such operation. Use ${listToolName} to browse available names.`;
 
-					const managed = byKey.get(name);
+					const managed = byKey.get(fullName);
 					if (managed) {
-						if (!managed.available) return `${name}: currently unavailable (${manToolName} cannot activate it right now).`;
-						if (managed.blocked) return `${name}: blocked by the current safety policy -- not activatable.`;
+						if (!managed.available) return `${fullName}: currently unavailable (${manToolName} cannot activate it right now).`;
+						if (managed.blocked) return `${fullName}: blocked by the current safety policy -- not activatable.`;
 						handle.tracker.seed(managed.toolName, discoveredTtlTurns);
 						return `${formatOperationManPage(namespaced, managed.toolName)}\n\n(now callable as ${managed.toolName})`;
 					}
 
 					const activateOperation = "activateOperation" in vehicle ? vehicle.activateOperation : undefined;
 					if (!activateOperation) {
-						return `${name}: known -- provided by Vehicle "${split.vehicleName}", discovered live via the shared Vehicle Handle Directory. Cross-process activation isn't wired here; not yet callable in this process.`;
+						return `${fullName}: known -- provided by Vehicle "${vehicleName}", discovered live via the shared Vehicle Handle Directory. Cross-process activation isn't wired here; not yet callable in this process.`;
 					}
+					// activateOperation needs the vehicle's own RAW (un-namespaced) descriptor -- `namespaced.name`
+					// is "vehicle:operation", but activation/dispatch always uses the vehicle's own bare name.
+					const rawDescriptor: VehicleManifestOperation = { ...namespaced, name: operationName };
 					let toolName: string;
 					try {
-						toolName = activateOperation(descriptor);
+						toolName = activateOperation(rawDescriptor);
 					} catch (error) {
-						return `${name}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
+						return `${fullName}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
 					}
-					handle.managedTools = [
-						...handle.managedTools,
-						{ vehicleName: split.vehicleName, toolName, operationName: descriptor.name, available: true, blocked: false },
-					];
+					handle.managedTools = [...handle.managedTools, { vehicleName, toolName, operationName, available: true, blocked: false }];
 					handle.tracker.seed(toolName, discoveredTtlTurns);
 					return `${formatOperationManPage(namespaced, toolName)}\n\n(now callable as ${toolName})`;
 				}),

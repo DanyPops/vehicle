@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { VehicleManifestOperation } from "@danypops/vehicle-core";
-import { formatOperationManPage, formatOperationOneLiner, matchesShellQuery, VehicleShellTtlTracker } from "../src/vehicle-shell.ts";
+import {
+	formatOperationManPage,
+	formatOperationOneLiner,
+	matchesShellQuery,
+	resolveOperationName,
+	VehicleShellTtlTracker,
+} from "../src/vehicle-shell.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
 
@@ -127,6 +133,45 @@ describe("formatOperationManPage", () => {
 		expect(page).toContain("checklist (object, optional)");
 		expect(page).toContain("values (object)");
 		expect(page).toContain("proof (array, required; minItems: 1)");
+	});
+});
+
+describe("resolveOperationName", () => {
+	function namespaced(vehicleName: string, opName: string): VehicleManifestOperation {
+		return descriptor({ name: `${vehicleName}:${opName}` });
+	}
+
+	it("a fully-namespaced name resolves directly, exactly as today", () => {
+		const resolved = resolveOperationName("papyrus:tasks.depend", [namespaced("papyrus", "tasks.depend")]);
+		expect(resolved).toEqual({
+			kind: "unique",
+			vehicleName: "papyrus",
+			operationName: "tasks.depend",
+			descriptor: namespaced("papyrus", "tasks.depend"),
+		});
+	});
+
+	it("a fully-namespaced name with no matching operation resolves to none", () => {
+		expect(resolveOperationName("papyrus:nonexistent", [namespaced("papyrus", "tasks.depend")])).toEqual({ kind: "none" });
+	});
+
+	it("a bare name with exactly one owning vehicle resolves the same as if it had been namespaced", () => {
+		const resolved = resolveOperationName("tasks.depend", [namespaced("papyrus", "tasks.depend"), namespaced("papyrus", "docs.create")]);
+		expect(resolved).toEqual({
+			kind: "unique",
+			vehicleName: "papyrus",
+			operationName: "tasks.depend",
+			descriptor: namespaced("papyrus", "tasks.depend"),
+		});
+	});
+
+	it("a bare name matching zero operations resolves to none", () => {
+		expect(resolveOperationName("nonexistent", [namespaced("papyrus", "tasks.depend")])).toEqual({ kind: "none" });
+	});
+
+	it("a bare name matching more than one vehicle's own operation resolves to every real candidate, never picking one", () => {
+		const resolved = resolveOperationName("docs.create", [namespaced("papyrus", "docs.create"), namespaced("web-spider", "docs.create")]);
+		expect(resolved).toEqual({ kind: "ambiguous", candidates: ["papyrus:docs.create", "web-spider:docs.create"] });
 	});
 });
 
