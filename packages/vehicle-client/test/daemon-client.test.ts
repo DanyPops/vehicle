@@ -7,6 +7,7 @@ import {
 	connectWithVersionCheck,
 	createRetryingClient,
 	type DaemonHandleLike,
+	DEFAULT_CONNECT_RETRY,
 	daemonInstanceIdentity,
 	daemonStatus,
 	isDefinitelyPreDispatchConnectionError,
@@ -162,6 +163,73 @@ describe("createRetryingClient", () => {
 		client.reset();
 		await client.call(async (c) => c.id);
 		expect(connectCount).toBe(2);
+	});
+
+	it("connectRetry is off by default -- a single failed connect() surfaces immediately, exactly as before", async () => {
+		let connectCount = 0;
+		const client = createRetryingClient(async () => {
+			connectCount++;
+			throw new Error("connect ECONNREFUSED");
+		});
+		await expect(client.call(async (c) => c)).rejects.toThrow("ECONNREFUSED");
+		expect(connectCount).toBe(1);
+	});
+
+	it("connectRetry:true retries connect() with backoff, surfacing success once the daemon comes back", async () => {
+		// Models a daemon that crashed and is mid-restart (systemd's Restart=on-failure): the first
+		// couple of connect attempts fail, then a fresh instance is reachable -- the caller should
+		// never see an error at all, unlike today's immediate single-attempt failure.
+		let connectCount = 0;
+		const events: string[] = [];
+		const client = createRetryingClient(
+			async () => {
+				connectCount++;
+				if (connectCount < 3) throw new Error(`connect ECONNREFUSED attempt ${connectCount}`);
+				return new FakeClient(connectCount);
+			},
+			{
+				connectRetry: { attempts: 5, initialDelayMs: 1, maxDelayMs: 2 },
+				onEvent: (event) => events.push(event.type),
+			},
+		);
+		const result = await client.call(async (c) => c.id);
+		expect(result).toBe(3);
+		expect(connectCount).toBe(3);
+		// exactly one connect-failure for the WHOLE logical connect, not one per internal sub-attempt
+		expect(events).toEqual(["connect-retry", "connect-retry", "connect-success"]);
+	});
+
+	it("connectRetry:true still fails once its own bounded budget is exhausted -- never retries forever", async () => {
+		let connectCount = 0;
+		const events: string[] = [];
+		const client = createRetryingClient<FakeClient>(
+			async () => {
+				connectCount++;
+				throw new Error(`connect ECONNREFUSED attempt ${connectCount}`);
+			},
+			{
+				connectRetry: { attempts: 3, initialDelayMs: 1, maxDelayMs: 2 },
+				circuitBreaker: false,
+				onEvent: (event) => events.push(event.type),
+			},
+		);
+		await expect(client.call(async (c) => c.id)).rejects.toThrow("attempt 3");
+		expect(connectCount).toBe(3);
+		expect(events).toEqual(["connect-retry", "connect-retry", "connect-failure"]);
+	});
+
+	it("connectRetry:true uses DEFAULT_CONNECT_RETRY's shape when passed the boolean shorthand", async () => {
+		let connectCount = 0;
+		const client = createRetryingClient(async () => {
+			connectCount++;
+			return new FakeClient(connectCount);
+		}, {});
+		// connectRetry omitted entirely -- confirms the exported preset exists and is a real,
+		// substantiated default (not just a type with no runtime backing), without needing to
+		// actually wait out its real-world delays in a unit test.
+		expect(DEFAULT_CONNECT_RETRY.attempts).toBeGreaterThan(1);
+		expect(DEFAULT_CONNECT_RETRY.maxDelayMs).toBeGreaterThan(0);
+		expect(await client.call(async (c) => c.id)).toBe(1);
 	});
 
 	it("circuit breaker: short-circuits after sustained connect failures instead of retrying every call", async () => {

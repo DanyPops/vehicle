@@ -174,6 +174,20 @@ export interface CreateRetryingClientOptions {
 	 */
 	circuitBreaker?: CircuitBreakerOptions | false;
 	/**
+	 * Background retry budget around connect() itself -- the fix for a daemon that crashed and is
+	 * mid-restart (systemd's Restart=on-failure/RestartSec, or Armada's own reconcile) rather than
+	 * genuinely gone. Without this, a caller's very first call() during that window gets exactly one
+	 * immediate reconnect attempt (see the `call()` doc comment) which almost always also fails --
+	 * the replacement process hasn't finished starting yet -- and the error propagates all the way to
+	 * whatever's calling the vehicle, telling a human to restart it by hand even though it was already
+	 * on its way back up. `true` uses DEFAULT_CONNECT_RETRY (tuned to comfortably outlast one
+	 * RestartSec=2 cycle plus real startup time); a full ConnectRetryOptions overrides it; omitted or
+	 * `false` preserves the exact pre-existing single-attempt behavior. Only wraps connect() -- never
+	 * retries operation(client) itself (see call()/callOnce()'s own, separate stale-connection retry),
+	 * so a slow-to-fail in-flight request is never silently re-run.
+	 */
+	connectRetry?: ConnectRetryOptions | boolean;
+	/**
 	 * Fired at every internal retry/breaker decision point -- purely observational, never changes
 	 * behavior. A caller hitting a scrubbed, deliberately generic error at some outer boundary (e.g.
 	 * pi-pipes' withConnectorDiagnostics, which strips the raw cause/URL/token before it reaches a
@@ -186,9 +200,67 @@ export interface CreateRetryingClientOptions {
 	onEvent?: (event: RetryingClientDiagnosticEvent) => void;
 }
 
+export interface ConnectRetryOptions {
+	/** Total attempts at connect(), including the first. Defaults to 6. */
+	readonly attempts?: number;
+	/** Delay before the second attempt. Defaults to 250ms. */
+	readonly initialDelayMs?: number;
+	/** No retry delay is ever allowed to exceed this. Defaults to 2000ms. */
+	readonly maxDelayMs?: number;
+	/** Multiplier applied to the delay after each failed attempt. Defaults to 1.8. */
+	readonly growFactor?: number;
+}
+
+/**
+ * Tuned to comfortably survive one systemd Restart=on-failure cycle (RestartSec=2 in every
+ * Armada-managed unit -- see systemd.ts) plus real daemon startup time (handle file + health
+ * endpoint), without making a genuinely-gone daemon's caller wait dramatically longer than
+ * today's immediate failure. Worst case ~5s of delay (250+450+810+1458+2000ms across 5 retries
+ * after the first attempt) before the pre-existing error surfaces exactly as it does today.
+ */
+export const DEFAULT_CONNECT_RETRY: Required<ConnectRetryOptions> = {
+	attempts: 6,
+	initialDelayMs: 250,
+	maxDelayMs: 2000,
+	growFactor: 1.8,
+};
+
+function resolveConnectRetry(option: ConnectRetryOptions | boolean | undefined): Required<ConnectRetryOptions> | undefined {
+	if (!option) return undefined;
+	if (option === true) return DEFAULT_CONNECT_RETRY;
+	return { ...DEFAULT_CONNECT_RETRY, ...option };
+}
+
+/** Same jittered exponential-backoff formula as versionCheckRetryDelayMs/connectPushChannel's
+ * reconnect delay -- kept as its own copy per this file's "no imports of its own" invariant. */
+function connectRetryDelayMs(attempt: number, options: Required<ConnectRetryOptions>): number {
+	const raw = Math.min(options.initialDelayMs * options.growFactor ** (attempt - 1), options.maxDelayMs);
+	return raw * (0.8 + Math.random() * 0.4); // +/-20% jitter
+}
+
+async function connectWithRetryBudget<Client>(
+	connect: () => Promise<Client>,
+	options: Required<ConnectRetryOptions>,
+	onEvent?: (event: RetryingClientDiagnosticEvent) => void,
+): Promise<Client> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await connect();
+		} catch (error) {
+			if (attempt >= options.attempts) throw error;
+			onEvent?.({ type: "connect-retry", error, attempt });
+			await new Promise((resolve) => setTimeout(resolve, connectRetryDelayMs(attempt, options)));
+		}
+	}
+}
+
 /**
  * One retry/breaker decision, in the order they can occur:
- *  - connect-success / connect-failure: a real connect() attempt just resolved or rejected.
+ *  - connect-success / connect-failure: a real connect() attempt just resolved or rejected --
+ *    connect-failure fires only once per logical connect (i.e. after connectRetry's own budget,
+ *    if any, is exhausted), never once per internal sub-attempt.
+ *  - connect-retry: connectRetry is enabled and a connect() sub-attempt just failed with another
+ *    attempt still budgeted -- fires before each backoff delay, never on the final exhausted one.
  *  - breaker-open-short-circuit: call()/callOnce() rejected immediately from the breaker's last
  *    recorded failure, without attempting a new connect() at all this call.
  *  - stale-connection-retry: call() saw a stale-connection error from operation(client) and is
@@ -204,6 +276,7 @@ export interface RetryingClientDiagnosticEvent {
 	type:
 		| "connect-success"
 		| "connect-failure"
+		| "connect-retry"
 		| "breaker-open-short-circuit"
 		| "stale-connection-retry"
 		| "pre-dispatch-retry"
@@ -294,6 +367,7 @@ export function createRetryingClient<Client>(
 		options.circuitBreaker === false
 			? NULL_BREAKER
 			: new CircuitBreaker(options.circuitBreaker?.failureThreshold ?? 3, options.circuitBreaker?.cooldownMs ?? 10_000);
+	const connectRetry = resolveConnectRetry(options.connectRetry);
 	let generation = 0;
 	let cached: { promise: Promise<Client>; generation: number } | undefined;
 	let currentIdentity: DaemonInstanceIdentity | undefined;
@@ -324,7 +398,7 @@ export function createRetryingClient<Client>(
 	function resolveClient(): { promise: Promise<Client>; generation: number } {
 		if (!cached) {
 			const createdGeneration = generation;
-			const promise = connect()
+			const promise = (connectRetry ? connectWithRetryBudget(connect, connectRetry, options.onEvent) : connect())
 				.then((client) => {
 					breaker.recordSuccess();
 					options.onEvent?.({ type: "connect-success" });
