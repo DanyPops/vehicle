@@ -311,6 +311,50 @@ works with nothing else running).
 | Setup | A daemon, a port, a systemd unit (or manual start) | Nothing -- just the extension |
 | Upgrade path | N/A -- already the durable shape | Move `register()` into a daemon, swap the client |
 
+### Vehicle Shell: discoverable meta-tools instead of one tool per operation
+
+Pass `shell: {}` (or a `VehicleShellOptions` object) to `registerVehicleTools()`
+and every Vehicle in the process shares three process-wide meta-tools instead
+of projecting every operation onto its own always-visible Pi tool --
+deliberately mirroring the real Unix man-page tooling family (`man`,
+`apropos`, `type`):
+
+- **`tools_list`** (~ `apropos`/`man -k`) -- one line per operation, namespaced
+  `<vehicle>:<operation>` (e.g. `papyrus:tasks.create`). `query` filters by
+  keyword (name or description, `mode:"regex"` for a real case-insensitive
+  regular expression instead of substring/prefix, `scope:"name"` to match the
+  name only -- apropos's own `--names-only`). `effect` filters to one
+  classification (`read`/`local-write`/`external-write`/`destructive`/
+  `open-world`), combining with `query` as AND. `verbosity:"high"` appends each
+  match's own parameter/schema summary, avoiding a separate `tools_man` round
+  trip when browsing several operations' shape at once. An exact-name query
+  already sorts first, so a dedicated `whatis`-style tool is unnecessary.
+- **`tools_man`** (~ `man`) -- full documentation (parameters, effect,
+  permissions, idempotency, and a `see also:` line cross-referencing sibling
+  operations sharing the same dot-separated namespace prefix) for one or more
+  names, and makes each one callable starting next turn. A name doesn't need
+  to have been listed first, and doesn't need its vehicle prefix as long as
+  it's unambiguous (`type -a` parity: more than one vehicle providing the same
+  bare operation name refuses to guess, listing every real candidate instead).
+- **`tools_type`** (~ `type`) -- read-only resolution status for one or more
+  names, without activating anything or touching any TTL: `active` (callable
+  now, with its live tool name and remaining turns before it decays),
+  `dormant` (known, `tools_man` would activate it), `blocked` (known but
+  currently unavailable or blocked by safety policy), `unreachable` (a
+  namespaced name whose vehicle used to be known to this process but produces
+  nothing live right now), `unknown`, or `ambiguous`.
+
+Everything not explicitly declared `coreOperations` boots *inactive* --
+reachable via `tools_list`/`tools_man` but invisible to the model's tool-calling
+surface until actually activated, each with its own decaying TTL
+(`coreTtlTurns`/`discoveredTtlTurns`) so a long-idle operation doesn't stay
+active forever. `tools_list` itself can optionally cache its own aggregated
+cross-vehicle discovery for `aggregateCacheTtlMs` milliseconds (default `0` --
+always a live fetch); `tools_man`/`tools_type` never read that cache regardless
+of the setting, since activation and status-checking must always see live
+state. Set `VEHICLE_SHELL_DISABLED` to force every operation active
+immediately instead, bypassing shell mode entirely.
+
 ### Surviving a daemon restart
 
 `registerVehicleTools()` captures whatever `VehicleClient` you pass it forever,
