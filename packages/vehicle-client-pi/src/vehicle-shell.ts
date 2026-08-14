@@ -339,6 +339,25 @@ export interface VehicleShellOptions {
 	/** Pi tool name for the type meta-tool. Default "tools_type". See listToolName's own note on
 	 * first-writer-wins scope. */
 	readonly typeToolName?: string;
+	/**
+	 * Opt-in short-TTL cache, in milliseconds, over tools_list's own aggregated cross-vehicle
+	 * discovery + manifest listing -- mirrors apropos/whatis's own "query a periodically-rebuilt
+	 * index, don't rescan every page live" pattern (mandb), applied here so N discovered vehicles
+	 * cost N live round trips only once per TTL window, not on every single tools_list call, and one
+	 * slow/hung vehicle can't delay every call indefinitely.
+	 *
+	 * Default 0 -- OFF, always a live fetch, never cached. This is a deliberate choice, not just a
+	 * conservative default: a real, pre-existing, explicitly-tested guarantee ("tools_list converges
+	 * dynamically within one already-running pi process ... with no pi restart") genuinely regressed
+	 * the moment ANY caching was enabled by default -- two tools_list calls closer together than the
+	 * TTL saw a real live daemon mutation made in between as invisible until expiry. Opt in explicitly
+	 * only if that tradeoff (fewer round trips/one-slow-vehicle isolation, vs. up to this many
+	 * milliseconds of staleness) is genuinely worth it for your own consumer.
+	 *
+	 * tools_man/tools_type deliberately never read this cache regardless of this setting -- their own
+	 * activation/documentation/status-check paths must always see live state.
+	 */
+	readonly aggregateCacheTtlMs?: number;
 }
 
 export interface VehicleShellHandle {
@@ -354,6 +373,11 @@ export interface VehicleShellHandle {
 	/** Starting TTL a core operation is (re-)seeded with -- kept on the handle so a later refresh
 	 * can seed a core operation that just became available the same way initial registration did. */
 	readonly coreTtlTurns: number;
+	/** tools_list's own aggregate cache TTL, in milliseconds -- see VehicleShellOptions.aggregateCacheTtlMs. */
+	readonly aggregateCacheTtlMs: number;
+	/** Mutable cache slot tools_list reads/writes through cachedAggregatedOperations -- undefined
+	 * until first populated, or once expired and about to be refreshed. */
+	aggregateCache?: { readonly expiresAt: number; readonly operations: readonly VehicleManifestOperation[] };
 }
 
 /**
@@ -457,6 +481,46 @@ async function namespacedOperationsOf(
 		}),
 	);
 	return perVehicle.flat();
+}
+
+/**
+ * Default OFF (0 -- always a live fetch, never cached) -- see cachedAggregatedOperations' own doc
+ * comment for why. Set explicitly via VehicleShellOptions.aggregateCacheTtlMs to opt in.
+ */
+export const DEFAULT_AGGREGATE_CACHE_TTL_MS = 0;
+
+/**
+ * tools_list's own cached front-end onto discoverAllVehicles()+namespacedOperationsOf(): a cache
+ * hit within `ttlMs` of the last real fetch returns the SAME array reference without touching any
+ * vehicle again; a miss (first call, past expiry, or ttlMs <= 0) does a genuinely fresh fetch and
+ * refreshes the cache. `now` is injectable so a test can exercise expiry deterministically without
+ * a real sleep -- real callers always use the default (Date.now).
+ *
+ * `ttlMs <= 0` (the default) never caches at all -- confirmed live as a real, deliberate choice,
+ * not just a conservative default: a real, pre-existing, explicitly-tested guarantee
+ * ("tools_list converges dynamically within one already-running pi process ... with no pi
+ * restart", vehicle-pi-dynamic-tools.test.ts) genuinely regressed the instant ANY caching was
+ * introduced by default -- two tools_list calls closer together than the TTL (entirely realistic:
+ * that suite's own real-process scripted turns run well under a second apart) saw a real live
+ * daemon mutation made in between as invisible until expiry. A caller who explicitly wants the
+ * round-trip-reduction/one-slow-vehicle-isolation tradeoff opts in via aggregateCacheTtlMs;
+ * nobody gets it by surprise.
+ *
+ * Deliberately never called from tools_man/tools_type -- see their own comments for why their
+ * resolution/activation/status-check paths must always see live state regardless of this setting.
+ */
+async function cachedAggregatedOperations(
+	handle: Pick<VehicleShellHandle, "aggregateCache">,
+	ttlMs: number,
+	now: () => number = Date.now,
+): Promise<readonly VehicleManifestOperation[]> {
+	if (ttlMs <= 0) return namespacedOperationsOf(await discoverAllVehicles());
+	const nowMs = now();
+	if (handle.aggregateCache && handle.aggregateCache.expiresAt > nowMs) return handle.aggregateCache.operations;
+	const vehicles = await discoverAllVehicles();
+	const operations = await namespacedOperationsOf(vehicles);
+	handle.aggregateCache = { expiresAt: nowMs + ttlMs, operations };
+	return operations;
 }
 
 /** Splits a namespaced "<vehicle>:<operation>" name; undefined when name carries no vehicle prefix at all. */
@@ -586,7 +650,7 @@ export function formatOperationTypeLine(name: string, result: OperationTypeResul
 	}
 }
 
-function createToolsListTool(listToolName: string, manToolName: string): ToolDefinition {
+function createToolsListTool(listToolName: string, manToolName: string, handle: VehicleShellHandle): ToolDefinition {
 	return {
 		name: listToolName,
 		label: "List Tools",
@@ -638,8 +702,7 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 				verbosity?: "low" | "high";
 			};
 			reportToolsListExecute("vehicle", query);
-			const vehicles = await discoverAllVehicles();
-			const operations = await namespacedOperationsOf(vehicles);
+			const operations = await cachedAggregatedOperations(handle, handle.aggregateCacheTtlMs);
 
 			let score: (descriptor: VehicleOperationDescriptor) => number | undefined;
 			if (mode === "regex") {
@@ -707,7 +770,9 @@ function createToolsManTool(
 			// old per-name single-vehicle client.manifest() call with the exact same "fresh, fallback to
 			// snapshot on failure" semantics namespacedOperationsOf already provides -- and avoiding a
 			// redundant re-fetch of the same vehicle when a batch names more than one of its operations)
-			// and bare-name resolution across every vehicle.
+			// and bare-name resolution across every vehicle. Deliberately NEVER goes through tools_list's
+			// own cachedAggregatedOperations -- activation/documentation is consequential enough (and rare
+			// enough per turn) that it must always see live state, never something up to a TTL window stale.
 			const allOperations = await namespacedOperationsOf(vehicles);
 
 			const pages = await Promise.all(
@@ -768,6 +833,8 @@ function createToolsTypeTool(listToolName: string, manToolName: string, typeTool
 		}),
 		async execute(_toolCallId, params) {
 			const names = (params as { names: string[] }).names;
+			// Same as tools_man: deliberately always fresh, never tools_list's own cache -- a status check
+			// that itself lags reality would defeat its whole diagnostic purpose.
 			const vehicles = await discoverAllVehicles();
 			const allOperations = await namespacedOperationsOf(vehicles);
 			const results = names.map((name) => ({
@@ -816,6 +883,7 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 		managedTools: [],
 		coreOperationNames: new Set(),
 		coreTtlTurns: options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS,
+		aggregateCacheTtlMs: options.aggregateCacheTtlMs ?? DEFAULT_AGGREGATE_CACHE_TTL_MS,
 	};
 	holder[SHELL_HANDLE_KEY] = handle;
 
@@ -828,7 +896,7 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	const claimedElsewhere = runtime.status === "ready" && runtime.value.some((tool) => tool.name === listToolName);
 	reportShellRegistered("vehicle", listToolName, manToolName, !claimedElsewhere);
 	if (!claimedElsewhere) {
-		pi.registerTool(createToolsListTool(listToolName, manToolName));
+		pi.registerTool(createToolsListTool(listToolName, manToolName, handle));
 		pi.registerTool(createToolsManTool(pi, listToolName, manToolName, handle, options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS));
 		pi.registerTool(createToolsTypeTool(listToolName, manToolName, typeToolName, handle));
 	}

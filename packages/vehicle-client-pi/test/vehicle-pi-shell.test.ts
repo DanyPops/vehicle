@@ -35,8 +35,10 @@ function manifest(operations: readonly VehicleManifestOperation[], name = "test-
 }
 
 class FakeClient implements VehicleClient {
+	manifestCalls = 0;
 	constructor(public value: VehicleManifest) {}
 	manifest(): Promise<VehicleManifest> {
+		this.manifestCalls++;
 		return Promise.resolve(this.value);
 	}
 	async invoke<Output = unknown>(_name: string, _version: number, _input: unknown, _options?: VehicleInvocationOptions): Promise<Output> {
@@ -926,5 +928,81 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 			})) as { content: Array<{ text: string }>; details: { results: Array<{ name: string; status: string }> } };
 			expect(result.details.results.map((entry) => entry.status)).toEqual(["active", "dormant", "unknown"]);
 		});
+	});
+});
+
+describe("tools_list's opt-in aggregate cache (mandb-style index vs. live rescan)", () => {
+	it("defaults to OFF -- every call fetches fresh, exactly as before this feature existed", async () => {
+		const { pi, tools } = fakePi();
+		const client = new FakeClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+		// registerVehicleTools' own initial setup already did one unrelated manifest() fetch to build
+		// its own Pi tool projection -- reset the counter so this test measures only what its own two
+		// explicit tools_list calls below actually do.
+		client.manifestCalls = 0;
+
+		await callTool(tools, "tools_list", {});
+		await callTool(tools, "tools_list", {});
+		expect(client.manifestCalls).toBe(2);
+	});
+
+	it("opting in (aggregateCacheTtlMs > 0): a second call within the TTL is served from cache, no redundant fetch", async () => {
+		const { pi, tools } = fakePi();
+		const client = new FakeClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: { aggregateCacheTtlMs: 60_000 } });
+		client.manifestCalls = 0;
+
+		await callTool(tools, "tools_list", {});
+		await callTool(tools, "tools_list", {});
+		expect(client.manifestCalls).toBe(1);
+	});
+
+	it("a cache hit still reflects the real operations -- serving from cache is invisible to the caller", async () => {
+		const { pi, tools } = fakePi();
+		const client = new FakeClient(manifest([operation("tasks.create"), operation("docs.list")]));
+		await registerVehicleTools(pi, client, { shell: { aggregateCacheTtlMs: 60_000 } });
+		client.manifestCalls = 0;
+
+		await callTool(tools, "tools_list", {});
+		const second = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(second.content[0]?.text).toContain("tasks.create");
+		expect(second.content[0]?.text).toContain("docs.list");
+		expect(client.manifestCalls).toBe(1);
+	});
+
+	it("past expiry, a fresh fetch happens again -- a real Vehicle version bump is never invisible past the TTL", async () => {
+		const { pi, tools } = fakePi();
+		const client = new FakeClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: { aggregateCacheTtlMs: 10 } });
+		client.manifestCalls = 0;
+
+		await callTool(tools, "tools_list", {});
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		await callTool(tools, "tools_list", {});
+		expect(client.manifestCalls).toBe(2);
+	});
+
+	it("tools_man stays always-fresh regardless of tools_list's own cache -- a real new operation is immediately activatable even while a huge TTL would still hide it from tools_list", async () => {
+		const { pi, tools } = fakePi();
+		const client = new FakeClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: { aggregateCacheTtlMs: 60_000 } });
+
+		// Populates tools_list's own cache with the pre-mutation manifest.
+		const before = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(before.content[0]?.text).not.toContain("test-vehicle:tasks.depend");
+
+		// A real live mutation, well within the still-live 60s TTL -- reassigning the client's own
+		// manifest is what a real daemon's own live manifest re-fetch would produce.
+		client.value = manifest([operation("tasks.create"), operation("tasks.depend")]);
+
+		// tools_list still doesn't see it -- serving the cached snapshot exactly as configured.
+		const stillCached = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(stillCached.content[0]?.text).not.toContain("test-vehicle:tasks.depend");
+
+		// tools_man, unaffected by tools_list's cache, activates it immediately.
+		const manResult = (await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] })) as {
+			content: Array<{ text: string }>;
+		};
+		expect(manResult.content[0]?.text).toContain("now callable as test_vehicle_tasks_depend");
 	});
 });
