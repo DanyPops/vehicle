@@ -6,6 +6,7 @@ import {
 	formatOperationOneLiner,
 	formatOperationTypeLine,
 	matchesShellQuery,
+	relatedOperationNames,
 	resolveOperationName,
 	type VehicleShellManagedTool,
 	VehicleShellTtlTracker,
@@ -136,6 +137,54 @@ describe("formatOperationManPage", () => {
 		expect(page).toContain("checklist (object, optional)");
 		expect(page).toContain("values (object)");
 		expect(page).toContain("proof (array, required; minItems: 1)");
+	});
+
+	it("appends a see also line naming every related operation, when given any", () => {
+		const page = formatOperationManPage(descriptor(), "tasks_depend", ["papyrus:tasks.contain", "papyrus:tasks.create"]);
+		expect(page).toContain("see also: papyrus:tasks.contain, papyrus:tasks.create");
+	});
+
+	it("omits the see also section entirely (not an empty line) when there's nothing related", () => {
+		const page = formatOperationManPage(descriptor(), "tasks_depend");
+		expect(page).not.toContain("see also");
+		expect(page).not.toContain("see also:");
+	});
+});
+
+describe("relatedOperationNames", () => {
+	function namespaced(vehicleName: string, opName: string): VehicleManifestOperation {
+		return descriptor({ name: `${vehicleName}:${opName}` });
+	}
+
+	it("finds every other operation from the same vehicle sharing the same dot-separated namespace prefix", () => {
+		const related = relatedOperationNames("papyrus", "tasks.create", [
+			namespaced("papyrus", "tasks.create"),
+			namespaced("papyrus", "tasks.depend"),
+			namespaced("papyrus", "tasks.contain"),
+			namespaced("papyrus", "docs.create"),
+		]);
+		expect(related).toEqual(["papyrus:tasks.depend", "papyrus:tasks.contain"]);
+	});
+
+	it("never includes the operation itself", () => {
+		const related = relatedOperationNames("papyrus", "tasks.create", [namespaced("papyrus", "tasks.create")]);
+		expect(related).toEqual([]);
+	});
+
+	it("never crosses vehicles, even for the identical operation namespace prefix", () => {
+		const related = relatedOperationNames("papyrus", "tasks.create", [namespaced("pipes", "tasks.depend")]);
+		expect(related).toEqual([]);
+	});
+
+	it("an operation name with no dot at all (no namespace prefix) has nothing to relate it to", () => {
+		const related = relatedOperationNames("papyrus", "flatname", [namespaced("papyrus", "flatname"), namespaced("papyrus", "flatname2")]);
+		expect(related).toEqual([]);
+	});
+
+	it("is bounded, never dominating the page for a vehicle with a huge flat tasks.* namespace", () => {
+		const everyTaskOperation = Array.from({ length: 20 }, (_, index) => namespaced("papyrus", `tasks.op${index}`));
+		const related = relatedOperationNames("papyrus", "tasks.create", everyTaskOperation);
+		expect(related.length).toBe(5);
 	});
 });
 

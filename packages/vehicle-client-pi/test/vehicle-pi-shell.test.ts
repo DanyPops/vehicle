@@ -362,6 +362,31 @@ describe("registerVehicleTools with shell activation", () => {
 		});
 	});
 
+	describe("tools_man SEE ALSO -- related-operations cross-referencing (man's own convention)", () => {
+		it("lists every other operation from the same vehicle sharing the same dot-separated namespace prefix", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([operation("tasks.create"), operation("tasks.depend"), operation("tasks.contain"), operation("docs.create")]),
+				),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.create"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("see also: test-vehicle:tasks.depend, test-vehicle:tasks.contain");
+			expect(result.content[0]?.text).not.toContain("docs.create");
+		});
+
+		it("omits the section entirely when the vehicle has no other operation sharing this namespace prefix", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
+
+			const result = (await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.create"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).not.toContain("see also");
+		});
+	});
+
 	it("tools_man recursively documents nested schemas, constraints, enums, and examples", async () => {
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(

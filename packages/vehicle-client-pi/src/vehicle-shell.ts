@@ -227,7 +227,7 @@ function formatSchemaProperties(schema: JsonSchema): string[] {
 
 /** The full man page for one operation -- description, parameters, and the safety-relevant facts
  * (permissions/effect/idempotency) a model needs before deciding whether and how to call it. */
-export function formatOperationManPage(descriptor: VehicleOperationDescriptor, toolName: string): string {
+export function formatOperationManPage(descriptor: VehicleOperationDescriptor, toolName: string, seeAlso: readonly string[] = []): string {
 	const lines = [
 		`${toolName} (${descriptor.name}, v${descriptor.version})`,
 		descriptor.description,
@@ -239,7 +239,40 @@ export function formatOperationManPage(descriptor: VehicleOperationDescriptor, t
 	const properties = formatSchemaProperties(descriptor.inputSchema);
 	lines.push("", "parameters:");
 	lines.push(...(properties.length > 0 ? properties : ["  (none)"]));
+	// Real man pages end with a SEE ALSO section cross-referencing related pages (e.g. printf(3) ->
+	// sprintf(3)). Omitted entirely (not an empty "see also:" line) when there's nothing to relate --
+	// see relatedOperationNames' own doc comment for what counts as related.
+	if (seeAlso.length > 0) lines.push("", `see also: ${seeAlso.join(", ")}`);
 	return lines.join("\n");
+}
+
+const MAX_SEE_ALSO = 5;
+
+/**
+ * Every OTHER operation from the SAME vehicle sharing this operation's own dot-separated namespace
+ * prefix (e.g. every other tasks.* operation for tasks.create) -- tools_man's own SEE ALSO section.
+ * Bounded to MAX_SEE_ALSO so a vehicle with a huge flat namespace can't dominate the page; a
+ * namespace-prefix-free operation name (no "." at all) has nothing to relate it to anything else,
+ * by design -- there's no real signal to group it with.
+ */
+export function relatedOperationNames(
+	vehicleName: string,
+	operationName: string,
+	operations: readonly VehicleManifestOperation[],
+): readonly string[] {
+	const dot = operationName.indexOf(".");
+	if (dot <= 0) return [];
+	const prefix = operationName.slice(0, dot + 1);
+	const related: string[] = [];
+	for (const op of operations) {
+		const split = splitNamespacedName(op.name);
+		if (!split || split.vehicleName !== vehicleName) continue;
+		if (split.operationName === operationName) continue;
+		if (!split.operationName.startsWith(prefix)) continue;
+		related.push(op.name);
+		if (related.length >= MAX_SEE_ALSO) break;
+	}
+	return related;
 }
 
 /**
@@ -688,13 +721,14 @@ function createToolsManTool(
 					const fullName = `${vehicleName}:${operationName}`;
 					const vehicle = byVehicleName.get(vehicleName);
 					if (!vehicle) return `${fullName}: no such operation. Use ${listToolName} to browse available names.`;
+					const seeAlso = relatedOperationNames(vehicleName, operationName, allOperations);
 
 					const managed = byKey.get(fullName);
 					if (managed) {
 						if (!managed.available) return `${fullName}: currently unavailable (${manToolName} cannot activate it right now).`;
 						if (managed.blocked) return `${fullName}: blocked by the current safety policy -- not activatable.`;
 						handle.tracker.seed(managed.toolName, discoveredTtlTurns);
-						return `${formatOperationManPage(namespaced, managed.toolName)}\n\n(now callable as ${managed.toolName})`;
+						return `${formatOperationManPage(namespaced, managed.toolName, seeAlso)}\n\n(now callable as ${managed.toolName})`;
 					}
 
 					const activateOperation = "activateOperation" in vehicle ? vehicle.activateOperation : undefined;
@@ -712,7 +746,7 @@ function createToolsManTool(
 					}
 					handle.managedTools = [...handle.managedTools, { vehicleName, toolName, operationName, available: true, blocked: false }];
 					handle.tracker.seed(toolName, discoveredTtlTurns);
-					return `${formatOperationManPage(namespaced, toolName)}\n\n(now callable as ${toolName})`;
+					return `${formatOperationManPage(namespaced, toolName, seeAlso)}\n\n(now callable as ${toolName})`;
 				}),
 			);
 			applyShellActivation(pi, handle);
