@@ -188,6 +188,61 @@ describe("registerVehicleTools with shell activation", () => {
 		});
 	});
 
+	describe("tools_list effect filter -- man -s / apropos -s section-scoping parity", () => {
+		it("restricts to operations with exactly the given effect", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([
+						operation("tasks.create", { effect: "local-write" }),
+						operation("tasks.list", { effect: "read" }),
+						operation("tasks.remove", { effect: "destructive" }),
+					]),
+				),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_list", { effect: "read" })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("tasks.list");
+			expect(result.content[0]?.text).not.toContain("tasks.create");
+			expect(result.content[0]?.text).not.toContain("tasks.remove");
+		});
+
+		it("combines with query as AND, not a replacement for it", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(
+					manifest([
+						operation("tasks.list", { effect: "read" }),
+						operation("tasks.create", { effect: "local-write" }),
+						operation("docs.list", { effect: "read" }),
+					]),
+				),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_list", { query: "tasks", effect: "read" })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("test-vehicle:tasks.list -- Run tasks.list.");
+			expect(result.content[0]?.text).not.toContain("test-vehicle:tasks.create");
+			expect(result.content[0]?.text).not.toContain("test-vehicle:docs.list");
+		});
+
+		it("omitting effect preserves today's exact every-effect default", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(manifest([operation("tasks.create", { effect: "local-write" }), operation("tasks.list", { effect: "read" })])),
+				{ shell: {} },
+			);
+
+			const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("tasks.create");
+			expect(result.content[0]?.text).toContain("tasks.list");
+		});
+	});
+
 	it("tools_man recursively documents nested schemas, constraints, enums, and examples", async () => {
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(

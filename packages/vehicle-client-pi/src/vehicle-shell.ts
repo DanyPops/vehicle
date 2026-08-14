@@ -1,4 +1,10 @@
-import type { JsonSchema, VehicleManifestOperation, VehicleOperationDescriptor } from "@danypops/vehicle-core";
+import {
+	type JsonSchema,
+	VEHICLE_EFFECTS,
+	type VehicleEffect,
+	type VehicleManifestOperation,
+	type VehicleOperationDescriptor,
+} from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { reportModuleLoad, reportShellRegistered, reportToolsListExecute, reportToolsManExecute } from "./client-diagnostics.js";
@@ -530,7 +536,7 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 	return {
 		name: listToolName,
 		label: "List Tools",
-		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description. mode:"regex" treats query as a case-insensitive regular expression instead of a plain substring/prefix match (apropos's own default matching mode). Use ${manToolName} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
+		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description, and/or by effect (${VEHICLE_EFFECTS.join(" | ")}) -- e.g. effect:"read" to browse only side-effect-free operations first. mode:"regex" treats query as a case-insensitive regular expression instead of a plain substring/prefix match (apropos's own default matching mode). Use ${manToolName} on a name from this list (or any name you already know) to see its full parameters and make it callable.`,
 		parameters: Type.Object({
 			query: Type.Optional(
 				Type.String({ description: "Keyword to filter by (matched against operation name and description); omit to list everything." }),
@@ -541,9 +547,18 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 						'"substring" (default): today\'s plain substring/prefix match. "regex": treat query as a case-insensitive regular expression instead, matched against name and description independently.',
 				}),
 			),
+			effect: Type.Optional(
+				Type.Union(
+					VEHICLE_EFFECTS.map((value) => Type.Literal(value)),
+					{
+						description:
+							"Restrict to operations with exactly this effect classification; omit to list every effect (today's default). Combines with query as AND, not a replacement for it.",
+					},
+				),
+			),
 		}),
 		async execute(_toolCallId, params) {
-			const { query = "", mode = "substring" } = params as { query?: string; mode?: "substring" | "regex" };
+			const { query = "", mode = "substring", effect } = params as { query?: string; mode?: "substring" | "regex"; effect?: VehicleEffect };
 			reportToolsListExecute("vehicle", query);
 			const vehicles = await discoverAllVehicles();
 			const operations = await namespacedOperationsOf(vehicles);
@@ -568,6 +583,7 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 
 			const matches = operations
 				.flatMap((descriptor, index) => {
+					if (effect !== undefined && descriptor.effect !== effect) return [];
 					const thisScore = score(descriptor);
 					return thisScore === undefined ? [] : [{ descriptor, index, score: thisScore }];
 				})
@@ -575,7 +591,7 @@ function createToolsListTool(listToolName: string, manToolName: string): ToolDef
 				.map((entry) => entry.descriptor);
 			const text =
 				matches.length === 0
-					? `No operations matched "${query}".`
+					? `No operations matched "${query}"${effect ? ` with effect "${effect}"` : ""}.`
 					: matches.map((descriptor) => formatOperationOneLiner(descriptor)).join("\n");
 			return {
 				content: [{ type: "text", text }],
