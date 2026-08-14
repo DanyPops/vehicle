@@ -130,6 +130,40 @@ describe("startDaemon", () => {
 		expect(statSync(handlePath).mode & 0o777).toBe(0o644);
 	});
 
+	/**
+	 * Real gap this closes: a bare setInterval(fn, intervalMs) never calls fn until the FULL
+	 * interval has first elapsed. For a long-interval maintenance task (pi-packed's own
+	 * vehicle-reconcile, 30 minutes by default) this means a daemon that just restarted --
+	 * exactly when it's most likely to need to self-heal drift accumulated while it was down
+	 * or superseded by an out-of-band update -- silently waits up to the full interval before
+	 * its first check. Confirmed live: pi-packed's own CLI help text already claims "the daemon
+	 * also runs this on its own interval and at startup", but startDaemon() never actually did
+	 * the "at startup" half.
+	 */
+	it("runs each maintenance task once immediately at startup, not only after its first full interval elapses", async () => {
+		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
+		const handlePath = join(dir, "handle.json");
+		let runs = 0;
+		daemon = await startDaemon({
+			daemonLabel: "Acme",
+			handlePath,
+			buildApp: trivialApp,
+			maintenanceTasks: [
+				{
+					name: "slow",
+					// Long enough that, without an immediate first run, nothing would have
+					// happened yet by the time this test's own short wait below elapses.
+					intervalMs: 60_000,
+					run: () => {
+						runs++;
+					},
+				},
+			],
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(runs).toBe(1);
+	});
+
 	it("a failing maintenance task does not stop other maintenance tasks from running", async () => {
 		dir = mkdtempSync(join(tmpdir(), "daemon-kit-daemon-"));
 		const handlePath = join(dir, "handle.json");

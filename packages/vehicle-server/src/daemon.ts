@@ -418,24 +418,32 @@ export async function startDaemon(options: StartDaemonOptions): Promise<RunningD
 
 	const timers: ReturnType<typeof setInterval>[] = [];
 	for (const task of options.maintenanceTasks ?? []) {
-		timers.push(
-			setInterval(() => {
-				// `task.run` may return a Promise; awaiting inside this IIFE (rather than the historical
-				// `try { void task.run() } catch`) is load-bearing. A synchronous throw is caught either
-				// way, but a *rejected* Promise from an async run() would otherwise become an unhandled
-				// rejection outside this try/catch entirely -- Bun does not swallow that, it crashes the
-				// process (verified directly against a consuming daemon's own now-redundant guard against
-				// exactly this: jittor's reportMaintenanceFailure existed only because `void somePromise()`
-				// with no `.catch` was fatal). A consumer daemon must get that protection for free.
-				void (async () => {
-					try {
-						await task.run();
-					} catch (error) {
-						logger.error(`maintenance task failed: ${task.name}`, { error: error instanceof Error ? error.message : String(error) });
-					}
-				})();
-			}, task.intervalMs),
-		);
+		// `task.run` may return a Promise; awaiting inside this IIFE (rather than the historical
+		// `try { void task.run() } catch`) is load-bearing. A synchronous throw is caught either
+		// way, but a *rejected* Promise from an async run() would otherwise become an unhandled
+		// rejection outside this try/catch entirely -- Bun does not swallow that, it crashes the
+		// process (verified directly against a consuming daemon's own now-redundant guard against
+		// exactly this: jittor's reportMaintenanceFailure existed only because `void somePromise()`
+		// with no `.catch` was fatal). A consumer daemon must get that protection for free.
+		const runTask = () => {
+			void (async () => {
+				try {
+					await task.run();
+				} catch (error) {
+					logger.error(`maintenance task failed: ${task.name}`, { error: error instanceof Error ? error.message : String(error) });
+				}
+			})();
+		};
+		// Real gap this closes: a bare setInterval never fires until its full interval first
+		// elapses -- for a long-interval task (e.g. pi-packed's own 30-minute vehicle-reconcile,
+		// which exists specifically to self-heal drift a running daemon never picked up) that
+		// means a daemon which just started -- exactly when accumulated drift is most likely --
+		// silently waits up to the full interval before its first check. Running once immediately
+		// here, in addition to the interval below, matches what a maintenance task's own callers
+		// already assume (pi-packed's CLI help text already claims "the daemon also runs this on
+		// its own interval and at startup" -- this makes that claim true).
+		runTask();
+		timers.push(setInterval(runTask, task.intervalMs));
 	}
 
 	const effectiveIdleBudgetMs = resolveIdleBudgetMs(options.idleBudgetMs, provenance);
