@@ -163,6 +163,6 @@ describe("registerVehicleToolsWhenReady", () => {
 		await emit("session_start");
 		await ready;
 
-		expect(activeTools().sort()).toEqual(["tasks_create", "tools_list", "tools_man"].sort());
+		expect(activeTools().sort()).toEqual(["tasks_create", "tools_list", "tools_man", "tools_type"].sort());
 	});
 });

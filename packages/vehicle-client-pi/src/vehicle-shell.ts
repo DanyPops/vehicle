@@ -64,6 +64,13 @@ export class VehicleShellTtlTracker {
 	isTracked(toolName: string): boolean {
 		return this.entries.has(toolName);
 	}
+
+	/** Turns remaining before this tool decays out, or undefined when it isn't currently tracked --
+	 * the read-only counterpart to seed()/tick(), for a caller (tools_type) that needs to report
+	 * "how much longer is this callable" without mutating anything itself. */
+	remainingTurns(toolName: string): number | undefined {
+		return this.entries.get(toolName)?.current;
+	}
 }
 
 /** The NAME section of a real man page: one line, no wrapping, safe to list alongside dozens of others. */
@@ -197,6 +204,7 @@ export function formatOperationManPage(descriptor: VehicleOperationDescriptor, t
 
 const DEFAULT_LIST_TOOL_NAME = "tools_list";
 const DEFAULT_MAN_TOOL_NAME = "tools_man";
+const DEFAULT_TYPE_TOOL_NAME = "tools_type";
 /** Illustrative starting points, not load-bearing constants -- tune from real usage (see the
  * Vehicle Shell design discussion this implements). Tuned up from an initial 10/3: a discovered
  * tool decaying in 3 unused turns proved too aggressive in practice -- a normal multi-step
@@ -241,12 +249,16 @@ export interface VehicleShellOptions {
 	/** Pi tool name for the man meta-tool. Default "tools_man". See listToolName's own note on
 	 * first-writer-wins scope. */
 	readonly manToolName?: string;
+	/** Pi tool name for the type meta-tool. Default "tools_type". See listToolName's own note on
+	 * first-writer-wins scope. */
+	readonly typeToolName?: string;
 }
 
 export interface VehicleShellHandle {
 	readonly tracker: VehicleShellTtlTracker;
 	readonly listToolName: string;
 	readonly manToolName: string;
+	readonly typeToolName: string;
 	/** Live, mutable view of every vehicle's own managed tools in this process -- refreshVehicleShellManagedTools
 	 * keeps this current across a refreshVehicleToolAvailability call, since the per-turn decay
 	 * handler and the man-page tool both close over this same handle rather than a stale snapshot. */
@@ -279,15 +291,15 @@ export function refreshVehicleShellManagedTools(handle: VehicleShellHandle, inco
 }
 
 /** Every Pi tool name this handle could ever legitimately activate -- the full `managed` superset
- * syncManagedActiveTools requires. The two meta-tools are always included: they're a single,
+ * syncManagedActiveTools requires. The three meta-tools are always included: they're a single,
  * process-wide capability now, never contingent on any one vehicle's own "did I win ownership"
  * check the way they used to be. */
 function allManagedNames(handle: VehicleShellHandle): string[] {
-	return [...handle.managedTools.map((tool) => tool.toolName), handle.listToolName, handle.manToolName];
+	return [...handle.managedTools.map((tool) => tool.toolName), handle.listToolName, handle.manToolName, handle.typeToolName];
 }
 
 /**
- * The active set a shell handle wants right now: its two meta-tools (always active), every
+ * The active set a shell handle wants right now: its three meta-tools (always active), every
  * vehicle's core operations that are currently available and unblocked, and whatever tools_man has
  * activated that hasn't yet decayed out -- re-filtered against current availability so a tool that
  * became unavailable/blocked since it was seeded doesn't stay active just because its TTL hasn't
@@ -299,7 +311,7 @@ export function desiredShellActiveNames(handle: VehicleShellHandle): string[] {
 		const tool = byToolName.get(toolName);
 		return tool?.available === true && !tool.blocked;
 	});
-	return [...new Set([handle.listToolName, handle.manToolName, ...tracked])];
+	return [...new Set([handle.listToolName, handle.manToolName, handle.typeToolName, ...tracked])];
 }
 
 function applyShellActivation(pi: ExtensionAPI, handle: VehicleShellHandle): void {
@@ -361,7 +373,7 @@ async function namespacedOperationsOf(
 }
 
 /** Splits a namespaced "<vehicle>:<operation>" name; undefined when name carries no vehicle prefix at all. */
-function splitNamespacedName(name: string): { vehicleName: string; operationName: string } | undefined {
+export function splitNamespacedName(name: string): { vehicleName: string; operationName: string } | undefined {
 	const separator = name.indexOf(":");
 	if (separator <= 0 || separator === name.length - 1) return undefined;
 	return { vehicleName: name.slice(0, separator), operationName: name.slice(separator + 1) };
@@ -404,6 +416,87 @@ export function resolveOperationName(name: string, operations: readonly VehicleM
 	if (matches.length > 1) return { kind: "ambiguous", candidates: matches.map((match) => match.op.name) };
 	const only = matches[0]!;
 	return { kind: "unique", vehicleName: only.opSplit.vehicleName, operationName: only.opSplit.operationName, descriptor: only.op };
+}
+
+export type OperationTypeResult =
+	| { readonly status: "active"; readonly toolName: string; readonly remainingTtlTurns: number | undefined }
+	| { readonly status: "dormant" }
+	| { readonly status: "blocked"; readonly reason: string }
+	| { readonly status: "unreachable"; readonly vehicleName: string }
+	| { readonly status: "unknown" }
+	| { readonly status: "ambiguous"; readonly candidates: readonly string[] };
+
+/**
+ * The `type`-equivalent classification behind tools_type -- read-only, never activates anything
+ * or touches the TTL tracker's own state (unlike tools_man's resolution, which seeds/refreshes a
+ * tool's TTL as a side effect of documenting it).
+ *
+ * - "active": already a real, currently-tracked Pi tool -- callable this turn, with its live
+ *   toolName and however many turns remain before it decays (VehicleShellTtlTracker.remainingTurns).
+ * - "dormant": a known operation (live in `operations`) that tools_man hasn't activated (or has
+ *   decayed back out of activity) -- calling tools_man on it would work right now.
+ * - "blocked": known and pre-registered, but currently unavailable or blocked by safety policy --
+ *   mirrors tools_man's own managed.available/managed.blocked distinction exactly, folded into one
+ *   status with a distinguishing `reason` rather than reimplementing two parallel checks.
+ * - "unreachable": a namespaced name whose vehicle prefix was previously known to this process
+ *   (it appears in `managedTools` -- i.e. this process registered at least one of its operations
+ *   at some point) but currently produces zero live operations at all -- the vehicle itself seems
+ *   to have gone away, not just this one operation. Real motivating incident: Papyrus silently
+ *   vanishing from discovery for an extended stretch, indistinguishable at the time from Papyrus
+ *   never having existed at all. Deliberately narrower than "any name that ever existed": a BARE
+ *   name with zero live matches is reported as "unknown", not "unreachable" -- there is no vehicle
+ *   prefix to check history against, and guessing which of possibly several past vehicles the
+ *   caller meant would be worse than an honest "not found".
+ * - "unknown": no live vehicle currently produces this operation, and (for a namespaced name) its
+ *   vehicle prefix was never known to this process either.
+ * - "ambiguous": a bare name matching more than one vehicle's own operation -- see
+ *   resolveOperationName's own doc comment.
+ */
+export function classifyOperationName(
+	name: string,
+	operations: readonly VehicleManifestOperation[],
+	managedTools: readonly VehicleShellManagedTool[],
+	tracker: VehicleShellTtlTracker,
+): OperationTypeResult {
+	const resolved = resolveOperationName(name, operations);
+	if (resolved.kind === "ambiguous") return { status: "ambiguous", candidates: resolved.candidates };
+	if (resolved.kind === "unique") {
+		const managed = managedTools.find((tool) => tool.vehicleName === resolved.vehicleName && tool.operationName === resolved.operationName);
+		if (!managed) return { status: "dormant" };
+		if (!managed.available) return { status: "blocked", reason: "currently unavailable" };
+		if (managed.blocked) return { status: "blocked", reason: "blocked by the current safety policy" };
+		if (tracker.isTracked(managed.toolName)) {
+			return { status: "active", toolName: managed.toolName, remainingTtlTurns: tracker.remainingTurns(managed.toolName) };
+		}
+		return { status: "dormant" };
+	}
+	const split = splitNamespacedName(name);
+	if (split) {
+		const vehicleStillLive = operations.some((op) => splitNamespacedName(op.name)?.vehicleName === split.vehicleName);
+		const vehiclePreviouslyKnown = managedTools.some((tool) => tool.vehicleName === split.vehicleName);
+		if (!vehicleStillLive && vehiclePreviouslyKnown) return { status: "unreachable", vehicleName: split.vehicleName };
+	}
+	return { status: "unknown" };
+}
+
+/** One human-readable line per classifyOperationName result, for tools_type's own text output. */
+export function formatOperationTypeLine(name: string, result: OperationTypeResult, manToolName: string, listToolName: string): string {
+	switch (result.status) {
+		case "active": {
+			const ttl = result.remainingTtlTurns !== undefined ? ` (${result.remainingTtlTurns} turn(s) remaining before it decays)` : "";
+			return `${name}: active -- callable now as ${result.toolName}${ttl}.`;
+		}
+		case "dormant":
+			return `${name}: dormant -- known, not yet activated. Call ${manToolName} on it to make it callable.`;
+		case "blocked":
+			return `${name}: blocked -- ${result.reason}.`;
+		case "unreachable":
+			return `${name}: unreachable -- vehicle "${result.vehicleName}" was previously known but produces no operations right now.`;
+		case "unknown":
+			return `${name}: unknown -- no such operation is currently discoverable. Use ${listToolName} to browse available names.`;
+		case "ambiguous":
+			return `${name}: ambiguous -- provided by ${result.candidates.length} vehicles (${result.candidates.join(", ")}). Use one of these exact names instead.`;
+	}
 }
 
 function createToolsListTool(listToolName: string, manToolName: string): ToolDefinition {
@@ -514,6 +607,34 @@ function createToolsManTool(
 	};
 }
 
+function createToolsTypeTool(listToolName: string, manToolName: string, typeToolName: string, handle: VehicleShellHandle): ToolDefinition {
+	return {
+		name: typeToolName,
+		label: "Tool Type",
+		description: `Reports how each name currently resolves -- "active" (callable right now, with the real toolName and turns remaining before it decays), "dormant" (known, needs ${manToolName} to activate), "blocked" (known but currently unavailable or blocked by safety policy), "unreachable" (a namespaced name whose vehicle used to be known but produces nothing live right now), "ambiguous" (a bare name matching more than one vehicle -- use one of the listed full names), or "unknown" (no such operation anywhere currently discoverable). Read-only -- unlike ${manToolName}, never activates anything or extends any TTL, so calling this never changes what's callable.`,
+		parameters: Type.Object({
+			names: Type.Array(Type.String(), {
+				description: 'Exact or bare operation name(s), e.g. "papyrus:tasks.create" or "tasks.create".',
+				minItems: 1,
+			}),
+		}),
+		async execute(_toolCallId, params) {
+			const names = (params as { names: string[] }).names;
+			const vehicles = await discoverAllVehicles();
+			const allOperations = await namespacedOperationsOf(vehicles);
+			const results = names.map((name) => ({
+				name,
+				result: classifyOperationName(name, allOperations, handle.managedTools, handle.tracker),
+			}));
+			const text = results.map(({ name, result }) => formatOperationTypeLine(name, result, manToolName, listToolName)).join("\n");
+			return {
+				content: [{ type: "text", text }],
+				details: { results: results.map(({ name, result }) => ({ name, ...result })) },
+			};
+		},
+	};
+}
+
 const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle");
 
 /**
@@ -538,10 +659,12 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 
 	const listToolName = options.listToolName ?? DEFAULT_LIST_TOOL_NAME;
 	const manToolName = options.manToolName ?? DEFAULT_MAN_TOOL_NAME;
+	const typeToolName = options.typeToolName ?? DEFAULT_TYPE_TOOL_NAME;
 	const handle: VehicleShellHandle = {
 		tracker: new VehicleShellTtlTracker(),
 		listToolName,
 		manToolName,
+		typeToolName,
 		managedTools: [],
 		coreOperationNames: new Set(),
 		coreTtlTurns: options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS,
@@ -559,6 +682,7 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	if (!claimedElsewhere) {
 		pi.registerTool(createToolsListTool(listToolName, manToolName));
 		pi.registerTool(createToolsManTool(pi, listToolName, manToolName, handle, options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS));
+		pi.registerTool(createToolsTypeTool(listToolName, manToolName, typeToolName, handle));
 	}
 
 	pi.on("tool_execution_end", (event) => {

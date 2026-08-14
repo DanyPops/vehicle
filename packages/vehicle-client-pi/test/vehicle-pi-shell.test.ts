@@ -87,7 +87,7 @@ describe("registerVehicleTools with shell activation", () => {
 			},
 		);
 
-		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man"].sort());
+		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man", "tools_type"].sort());
 	});
 
 	it("tools_list returns every operation as a one-liner, namespaced by vehicle name, without activating any of them", async () => {
@@ -305,7 +305,7 @@ describe("registerVehicleTools honors VEHICLE_SHELL_DISABLED", () => {
 			shell: { coreOperations: ["tasks.create"] },
 		});
 
-		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man"].sort());
+		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man", "tools_type"].sort());
 	});
 });
 
@@ -442,7 +442,7 @@ describe("the shared meta-tools discover every vehicle in the process, regardles
 });
 
 describe("the shared meta-tools are registered exactly once, no matter how many vehicles enable shell mode", () => {
-	it("a second vehicle's own registerVehicleTools() call never registers a redundant tools_list/tools_man -- pure dead weight, Pi has no unregisterTool()", async () => {
+	it("a second vehicle's own registerVehicleTools() call never registers a redundant tools_list/tools_man/tools_type -- pure dead weight, Pi has no unregisterTool()", async () => {
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
 		const countAfterFirst = tools.filter((tool) => tool.name === "tools_list").length;
@@ -451,6 +451,7 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 		expect(countAfterFirst).toBe(1);
 		expect(tools.filter((tool) => tool.name === "tools_list").length).toBe(1);
 		expect(tools.filter((tool) => tool.name === "tools_man").length).toBe(1);
+		expect(tools.filter((tool) => tool.name === "tools_type").length).toBe(1);
 	});
 
 	it("an extension with a pre-existing tools_list registered by something else entirely never registers its own -- and still registers/activates its own core operations normally", async () => {
@@ -482,14 +483,16 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 		expect(harness.activeTools).toContain("tools_man");
 	});
 
-	it("without any pre-existing tools_list, registers both meta-tools exactly once", async () => {
+	it("without any pre-existing tools_list, registers all three meta-tools exactly once", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: {} });
 
 		expect(tools.find((tool) => tool.name === "tools_list")).toBeDefined();
 		expect(tools.find((tool) => tool.name === "tools_man")).toBeDefined();
+		expect(tools.find((tool) => tool.name === "tools_type")).toBeDefined();
 		expect(harness.activeTools).toContain("tools_list");
 		expect(harness.activeTools).toContain("tools_man");
+		expect(harness.activeTools).toContain("tools_type");
 	});
 
 	describe("tools_man bare (unprefixed) name resolution -- type -a parity", () => {
@@ -560,6 +563,105 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 			expect(result.content[0]?.text).toContain("docs_create (web-spider:docs.create, v1)");
 			expect(result.content[0]?.text).toContain("now callable as web_spider_docs_create");
 			expect(harness.activeTools).toContain("web_spider_docs_create");
+		});
+	});
+
+	describe("tools_type -- a real type-equivalent resolution-status meta-tool", () => {
+		it("reports a core operation as active, with its real toolName and remaining TTL", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), {
+				shell: { coreOperations: ["tasks.create"], coreTtlTurns: 20 },
+			});
+
+			const result = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.create"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toBe(
+				"papyrus:tasks.create: active -- callable now as tasks_create (20 turn(s) remaining before it decays).",
+			);
+		});
+
+		it("reports a non-core operation as dormant until tools_man activates it, then active afterward", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")], "papyrus")), { shell: {} });
+
+			const before = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.depend"] })) as { content: Array<{ text: string }> };
+			expect(before.content[0]?.text).toContain("dormant");
+
+			await callTool(tools, "tools_man", { names: ["papyrus:tasks.depend"] });
+
+			const after = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.depend"] })) as { content: Array<{ text: string }> };
+			expect(after.content[0]?.text).toContain("active -- callable now as tasks_depend");
+		});
+
+		it("never activates anything or extends any TTL itself, unlike tools_man -- purely read-only", async () => {
+			const { pi, tools, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")], "papyrus")), {
+				shell: { discoveredTtlTurns: 2 },
+			});
+			await callTool(tools, "tools_man", { names: ["papyrus:tasks.depend"] });
+			expect(harness.activeTools).toContain("tasks_depend");
+
+			// Two full turns of calling ONLY tools_type (never tools_man, never the activated tool itself) --
+			// if tools_type refreshed the TTL as a side effect, this would still be active; it must decay
+			// exactly as if tools_type had never been called at all.
+			await callTool(tools, "tools_type", { names: ["papyrus:tasks.depend"] });
+			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
+			await callTool(tools, "tools_type", { names: ["papyrus:tasks.depend"] });
+			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] });
+
+			expect(harness.activeTools).not.toContain("tasks_depend");
+		});
+
+		it("reports an unavailable operation as blocked", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend", { available: false })], "papyrus")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.depend"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("blocked");
+		});
+
+		it("reports a completely unknown name as unknown, distinct from a real vehicle's unreachable one", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_type", { names: ["nonexistent:operation"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toBe(
+				"nonexistent:operation: unknown -- no such operation is currently discoverable. Use tools_list to browse available names.",
+			);
+		});
+
+		it("reports a bare name matching more than one vehicle as ambiguous, listing every real candidate", async () => {
+			const { pi, tools } = fakePi();
+			const papyrusManifest = manifest([operation("docs.create")], "papyrus");
+			const webSpiderManifest = manifest([operation("docs.create")], "web-spider");
+			registerInProcessVehicle("papyrus", papyrusManifest, { manifest: () => Promise.resolve(papyrusManifest) } as VehicleClient, () => {
+				throw new Error("must never be called");
+			});
+			registerInProcessVehicle(
+				"web-spider",
+				webSpiderManifest,
+				{ manifest: () => Promise.resolve(webSpiderManifest) } as VehicleClient,
+				() => {
+					throw new Error("must never be called");
+				},
+			);
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "unrelated")), { shell: {} });
+
+			const result = (await callTool(tools, "tools_type", { names: ["docs.create"] })) as { content: Array<{ text: string }> };
+			expect(result.content[0]?.text).toContain("ambiguous");
+			expect(result.content[0]?.text).toContain("papyrus:docs.create");
+			expect(result.content[0]?.text).toContain("web-spider:docs.create");
+		});
+
+		it("handles several names in one call, each classified independently", async () => {
+			const { pi, tools } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("tasks.depend")], "papyrus")), {
+				shell: { coreOperations: ["tasks.create"] },
+			});
+
+			const result = (await callTool(tools, "tools_type", {
+				names: ["papyrus:tasks.create", "papyrus:tasks.depend", "nonexistent"],
+			})) as { content: Array<{ text: string }>; details: { results: Array<{ name: string; status: string }> } };
+			expect(result.details.results.map((entry) => entry.status)).toEqual(["active", "dormant", "unknown"]);
 		});
 	});
 });
