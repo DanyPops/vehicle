@@ -1,6 +1,6 @@
 {
   "name": "@danypops/armada",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Cross-platform desired-state control for local Vehicle fleets",
   "license": "MIT",
   "type": "module",
