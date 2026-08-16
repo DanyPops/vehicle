@@ -38,5 +38,17 @@
 		"formatter": {
 			"quoteStyle": "double"
 		}
-	}
+	},
+	"overrides": [
+		{
+			"includes": ["packages/vehicle-core/**/*.ts"],
+			"linter": {
+				"rules": {
+					"complexity": {
+						"useLiteralKeys": "off"
+					}
+				}
+			}
+		}
+	]
 }

@@ -19,9 +19,9 @@ function isVehicleEffect(value: unknown): value is VehicleEffect {
 function isVehiclePrincipal(value: unknown): value is VehiclePrincipal {
 	if (typeof value !== "object" || value === null) return false;
 	const candidate = value as Record<string, unknown>;
-	if (typeof candidate.id !== "string") return false;
-	if (candidate.claims === undefined) return true;
-	return typeof candidate.claims === "object" && candidate.claims !== null && !Array.isArray(candidate.claims);
+	if (typeof candidate["id"] !== "string") return false;
+	if (candidate["claims"] === undefined) return true;
+	return typeof candidate["claims"] === "object" && candidate["claims"] !== null && !Array.isArray(candidate["claims"]);
 }
 
 /** Set once at registry-configuration time (VehicleRegistry.configureApprovals()); never on a per-invoke basis. */
@@ -102,22 +102,22 @@ const requestedPayloadSchema = defineVehicleSchema<VehicleApprovalRequest>({
 		if (typeof value !== "object" || value === null) return { success: false, issues: [{ path: [], message: "input must be an object" }] };
 		const row = value as Record<string, unknown>;
 		if (
-			typeof row.requestId !== "string" ||
-			typeof row.operationName !== "string" ||
-			typeof row.operationVersion !== "number" ||
-			!Number.isInteger(row.operationVersion) ||
-			row.operationVersion < 1 ||
-			!isVehicleEffect(row.effect) ||
-			typeof row.requestedAt !== "number" ||
-			!Number.isFinite(row.requestedAt) ||
-			typeof row.expiresAt !== "number" ||
-			!Number.isFinite(row.expiresAt) ||
-			typeof row.inputHash !== "string" ||
-			!SHA256_HEX_PATTERN.test(row.inputHash)
+			typeof row["requestId"] !== "string" ||
+			typeof row["operationName"] !== "string" ||
+			typeof row["operationVersion"] !== "number" ||
+			!Number.isInteger(row["operationVersion"]) ||
+			row["operationVersion"] < 1 ||
+			!isVehicleEffect(row["effect"]) ||
+			typeof row["requestedAt"] !== "number" ||
+			!Number.isFinite(row["requestedAt"]) ||
+			typeof row["expiresAt"] !== "number" ||
+			!Number.isFinite(row["expiresAt"]) ||
+			typeof row["inputHash"] !== "string" ||
+			!SHA256_HEX_PATTERN.test(row["inputHash"])
 		) {
 			return { success: false, issues: [{ path: [], message: "invalid approval request payload" }] };
 		}
-		if (row.principal !== undefined && !isVehiclePrincipal(row.principal)) {
+		if (row["principal"] !== undefined && !isVehiclePrincipal(row["principal"])) {
 			return { success: false, issues: [{ path: ["principal"], message: "invalid approval request principal" }] };
 		}
 		return { success: true, value: row as unknown as VehicleApprovalRequest };
@@ -141,17 +141,17 @@ const resolvedPayloadSchema = defineVehicleSchema<VehicleApprovalOutcome>({
 		if (typeof value !== "object" || value === null) return { success: false, issues: [{ path: [], message: "input must be an object" }] };
 		const row = value as Record<string, unknown>;
 		if (
-			typeof row.requestId !== "string" ||
-			(row.decision !== "granted" && row.decision !== "denied") ||
-			typeof row.decidedAt !== "number" ||
-			!Number.isFinite(row.decidedAt)
+			typeof row["requestId"] !== "string" ||
+			(row["decision"] !== "granted" && row["decision"] !== "denied") ||
+			typeof row["decidedAt"] !== "number" ||
+			!Number.isFinite(row["decidedAt"])
 		) {
 			return { success: false, issues: [{ path: [], message: "invalid approval outcome payload" }] };
 		}
-		if (row.decidedBy !== undefined && typeof row.decidedBy !== "string") {
+		if (row["decidedBy"] !== undefined && typeof row["decidedBy"] !== "string") {
 			return { success: false, issues: [{ path: ["decidedBy"], message: "decidedBy must be a string" }] };
 		}
-		if (row.comment !== undefined && typeof row.comment !== "string") {
+		if (row["comment"] !== undefined && typeof row["comment"] !== "string") {
 			return { success: false, issues: [{ path: ["comment"], message: "comment must be a string" }] };
 		}
 		return { success: true, value: row as unknown as VehicleApprovalOutcome };

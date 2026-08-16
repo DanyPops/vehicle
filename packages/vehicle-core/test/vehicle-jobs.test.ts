@@ -95,7 +95,7 @@ describe("VehicleJobWakeLog", () => {
 	it("throws for a non-JSON-serializable progress value instead of silently dropping it", () => {
 		const log = new VehicleJobWakeLog({ notifyMode: "always", budget: { maxCount: 10, maxBytes: 10_000 } });
 		const circular: Record<string, unknown> = {};
-		circular.self = circular;
+		circular["self"] = circular;
 		expect(() => log.append(circular)).toThrow("not JSON-serializable");
 	});
 

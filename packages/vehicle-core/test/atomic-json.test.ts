@@ -138,7 +138,7 @@ describe("createAtomicJsonWriter", () => {
 		const fs = createFakeFs();
 		const writer = createAtomicJsonWriter({ fs });
 		const circular: Record<string, unknown> = {};
-		circular.self = circular;
+		circular["self"] = circular;
 		await expect(writer.write("/state/jobs.json", circular)).rejects.toThrow("not JSON-serializable");
 		expect(fs.files.size).toBe(0);
 	});
