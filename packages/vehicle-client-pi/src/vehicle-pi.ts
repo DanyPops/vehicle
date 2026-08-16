@@ -211,19 +211,18 @@ export interface RegisterVehicleToolsRenderingOptions {
 	/** Human-selected glyph strategy for the generic renderer's progress bars. Geometry/math is unchanged. */
 	readonly progressBarGlyphs?: ProgressBarGlyphs | ProgressBarGlyphStyle;
 	/**
-	 * Opt-in coverage audit: the real fix for a renderer-coverage gap silently degrading to
-	 * raw JSON forever, discovered live (papyrus's tasks.mutation_status had no curated
-	 * renderer, 15 of 41 tasks.* operations total). `operations` declares every operation name
-	 * this Vehicle's own `renderers`/`presentations` factory genuinely curates (renders as
-	 * something other than the generic Vehicle fallback) -- a static, explicit declaration
-	 * rather than trying to shape-probe a renderer's own runtime behavior, which would be
-	 * neither simple nor deterministic. Every manifest operation NOT in that set is reported
-	 * once, at registration time, to onGap (defaulting to a console.warn naming the vehicle and
-	 * every gap operation) -- turning a permanently invisible degradation into a visible signal
-	 * the moment a new/renamed operation ships without a curated renderer. The improved generic
-	 * fallback (vehicle-render.ts's recordEnvelope/multiArrayEnvelope) already renders many
-	 * "uncovered" shapes reasonably -- this audit is about visibility into what's ACTUALLY still
-	 * uncovered, not a claim that every gap is bad.
+	 * Opt-in coverage audit: the fix for a renderer-coverage gap silently degrading to raw JSON
+	 * forever, with no signal that it happened. `operations` declares every operation name this
+	 * Vehicle's own `renderers`/`presentations` factory genuinely curates (renders as something
+	 * other than the generic Vehicle fallback) -- a static, explicit declaration rather than
+	 * trying to shape-probe a renderer's own runtime behavior, which would be neither simple nor
+	 * deterministic. Every manifest operation NOT in that set is reported once, at registration
+	 * time, to onGap (defaulting to a console.warn naming the vehicle and every gap operation) --
+	 * turning a permanently invisible degradation into a visible signal the moment a new/renamed
+	 * operation ships without a curated renderer. The improved generic fallback
+	 * (vehicle-render.ts's recordEnvelope/multiArrayEnvelope) already renders many "uncovered"
+	 * shapes reasonably -- this audit is about visibility into what's ACTUALLY still uncovered,
+	 * not a claim that every gap is bad.
 	 */
 	readonly renderCoverage?: {
 		readonly operations: readonly string[];
@@ -250,9 +249,9 @@ export interface RegisterVehicleToolsRenderingOptions {
 
 /**
  * Every field below is optional and additive: omitting it preserves pre-existing behavior
- * exactly, for every consumer that hasn't opted in. Each field's own comment documents the
- * real incident/gap it closes and what enabling it changes -- not what omitting it preserves,
- * since that's this one invariant, true of the whole interface, not worth restating per field.
+ * exactly, for every consumer that hasn't opted in. Each field's own comment documents what
+ * enabling it changes and why -- not what omitting it preserves, since that's this one
+ * invariant, true of the whole interface, not worth restating per field.
  *
  * The `rendering`/`safety`/`approval`/`jobs` groups below are the current, preferred shape for
  * the option clusters each one covers -- each field they replace still works flat exactly as
@@ -321,20 +320,17 @@ export interface RegisterVehicleToolsOptions {
 	 */
 	readonly manifestCache?: { readonly filePath: string; readonly fs: AtomicJsonFsAdapter };
 	/**
-	 * Bounded retry/backoff around the initial manifest handshake -- the real-world gap this
-	 * closes: a Pi extension's session_start calls registerVehicleTools() exactly once, and a
-	 * daemon that is transiently unreachable at that exact moment (mid-restart from a
-	 * legitimate version-check kill/respawn, or a package update swapping files out from under
-	 * a live process) previously meant every Vehicle-projected tool was silently, permanently
-	 * missing for the rest of that session -- no reload required to trigger it, and no reload
-	 * could fix it either, since the next session_start would just race the same restart again
-	 * if it was still in progress. Modeled on connectPushChannel's own jittered exponential
-	 * backoff (min/max/growFactor, +/-20% jitter) and gRPC/Kubernetes-style bounded readiness
-	 * probing: retry a few times over roughly half a second, then give up -- long enough to
-	 * survive a real restart (observed ~100-300ms in production), short enough that a
+	 * Bounded retry/backoff around the initial manifest handshake: a Pi extension's session_start
+	 * calls registerVehicleTools() exactly once, so a daemon that is transiently unreachable at
+	 * that exact moment (mid-restart from a version-check kill/respawn, or a package update
+	 * swapping files out from under a live process) needs a few retries here, not a hard failure
+	 * -- session_start itself never re-runs mid-session to give a second chance. Modeled on
+	 * connectPushChannel's own jittered exponential backoff (min/max/growFactor, +/-20% jitter)
+	 * and gRPC/Kubernetes-style bounded readiness probing: retry a few times over roughly half a
+	 * second, then give up -- long enough to survive a real restart, short enough that a
 	 * genuinely-down daemon still fails fast. Defaults to attempts:4, initialDelayMs:50,
-	 * maxDelayMs:500, growFactor:2.5. Set attempts:1 to restore the old immediate-failure
-	 * behavior exactly.
+	 * maxDelayMs:500, growFactor:2.5. Set attempts:1 for an immediate, single-attempt handshake
+	 * with no retry at all.
 	 */
 	readonly handshake?: RegisterVehicleToolsHandshakeOptions;
 	/**
