@@ -13,8 +13,10 @@ import type {
 	VehicleSchemaResult,
 } from "@danypops/vehicle-core";
 import { boundedCauseMessage, boundedValidationDetails, isVehicleError, VehicleError, vehicleEventTopic } from "@danypops/vehicle-core";
+import { Result } from "better-result";
 import { VehicleApprovalPolicyManager } from "./vehicle-registry/approval-policy.js";
 import { VehicleEventPubSub } from "./vehicle-registry/event-pubsub.js";
+import { runInvokePreflight, throwForInvokePreflightError } from "./vehicle-registry/invoke-preflight.js";
 import { readPackageVersion } from "./version.js";
 
 export type {
@@ -454,50 +456,20 @@ export class VehicleRegistry {
 	async invoke(name: string, version: number, input: unknown, options: VehicleInvocationOptions = {}): Promise<unknown> {
 		const operationId = options.operationId ?? randomUUID();
 		const key = operationKey(name, version);
-		const registration = this.registrations.get(key);
-		if (!registration) {
-			throw new VehicleError("not-found", `No Vehicle operation is registered for ${key}`, {
-				category: "not_found",
-				operationId,
-			});
-		}
-		const availability = this.availability.get(key);
-		if (availability?.available === false) {
-			throw new VehicleError("operation-unavailable", availability.reason ?? `${key} is currently unavailable`, {
-				category: "unavailable",
-				operationId,
-				retryable: true,
-			});
-		}
-
-		enforcePayloadSize(input, registration.descriptor.limits.maxRequestBytes, "request", key, operationId);
-		const granted = new Set(options.permissions ?? []);
-		const missing = registration.descriptor.permissions.filter((permission) => !granted.has(permission));
-		if (missing.length > 0) {
-			throw new VehicleError("permission-denied", `${key} requires permissions: ${missing.join(", ")}`, {
-				category: "authorization",
-				operationId,
-				details: { missing },
-			});
-		}
-
-		this.enforceApprovalGate(key, registration.descriptor, options.principal, input, operationId, options.approvalCapability);
-
-		if (registration.descriptor.idempotency.mode === "keyed" && !options.idempotencyKey?.trim()) {
-			throw new VehicleError("idempotency-key-required", `${key} requires an idempotency key`, {
-				category: "validation",
-				operationId,
-			});
-		}
-		const parsedInput = registration.parseInput(input, operationId);
-		const deadline = effectiveDeadline(registration.descriptor, options.deadline);
-		const timeoutMs = deadline - Date.now();
-		if (deadline <= Date.now()) {
-			throw new VehicleError("deadline-exceeded", `${key} deadline has already elapsed`, {
-				category: "timeout",
-				operationId,
-			});
-		}
+		const preflight = runInvokePreflight({
+			registrations: this.registrations,
+			availability: this.availability,
+			key,
+			input,
+			operationId,
+			invocation: options,
+			enforcePayloadSize,
+			effectiveDeadline,
+			enforceApprovalGate: (gateKey, descriptor, principal, gateInput, gateOperationId, presentedCapability) =>
+				this.enforceApprovalGate(gateKey, descriptor, principal, gateInput, gateOperationId, presentedCapability),
+		});
+		if (Result.isError(preflight)) throwForInvokePreflightError(preflight.error);
+		const { registration, parsedInput, deadline, timeoutMs } = preflight.value;
 		const signals = [AbortSignal.timeout(Math.max(1, deadline - Date.now()))];
 		if (options.signal) signals.push(options.signal);
 		const signal = AbortSignal.any(signals);

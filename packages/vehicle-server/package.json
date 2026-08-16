@@ -88,6 +88,7 @@
 	"dependencies": {
 		"@danypops/armada": "workspace:*",
 		"@danypops/vehicle-core": "workspace:*",
+		"better-result": "^3.0.1",
 		"pino": "^10.3.1"
 	},
 	"devDependencies": {
