@@ -18,19 +18,37 @@ import type { PiHitlContext } from "./hitl-prompt.js";
  * awaiting an answer -- starting a second, concurrent turn that reasons about the very Discussion
  * this call is already resolving, independently of it. driveActiveTasks checks isLiveAskPending()
  * and skips queuing while true.
+ *
+ * globalThis + Symbol.for() (see activity-broker.ts/vehicle-shell-registry.ts for the same
+ * convention), not a plain module-level counter: this coordinates ACROSS extensions on purpose --
+ * one extension's ask-prompt marking pending must be visible to a DIFFERENT extension's
+ * continuation driver checking isLiveAskPending(). Several nested copies of vehicle-client-pi can
+ * be loaded in one process (each extension's own semver-pinned dependency range, hoisted or
+ * nested independently) -- a plain `let` would give each duplicate copy its own independent
+ * counter, silently defeating the cross-extension coordination this exists for: extension A marks
+ * its own copy pending, extension B's continuation driver reads its own, still-zero copy, and
+ * queues the nudge anyway while the human is still mid-answer. Versioned key ("@1") so a future
+ * breaking shape change -- there is none today, a bare count -- gets a fresh slot instead of
+ * corrupting this one.
  */
-let livePendingCount = 0;
+const LIVE_PENDING_COUNT_KEY = Symbol.for("vehicle.pi.hitl-ask-pending@1");
+
+function livePendingCountHolder(): { count: number } {
+	const holder = globalThis as { [LIVE_PENDING_COUNT_KEY]?: { count: number } };
+	if (!holder[LIVE_PENDING_COUNT_KEY]) holder[LIVE_PENDING_COUNT_KEY] = { count: 0 };
+	return holder[LIVE_PENDING_COUNT_KEY];
+}
 
 export function isLiveAskPending(): boolean {
-	return livePendingCount > 0;
+	return livePendingCountHolder().count > 0;
 }
 
 export function markAskPromptPending(): void {
-	livePendingCount += 1;
+	livePendingCountHolder().count += 1;
 }
 
 export function markAskPromptSettled(): void {
-	livePendingCount -= 1;
+	livePendingCountHolder().count -= 1;
 }
 
 const DISCUSS_TYPING_COURTESY_DEFAULT_POLL_MS = 100;

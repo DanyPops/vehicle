@@ -34,7 +34,13 @@ export interface VehicleActivityBroker {
 	publish(event: VehicleActivityEvent): void;
 }
 
-const ACTIVITY_BROKER_SYMBOL = Symbol.for("vehicle.pi.activity");
+// Versioned key (see secrets-registry.ts/vehicle-safety-registry.ts for the same convention):
+// several nested copies of vehicle-client-pi (independently semver-pinned by different
+// consumers) can be loaded in one process. A bare, unversioned key lets two genuinely
+// different code versions silently share one slot even if VehicleActivityEvent's shape ever
+// drifts between them; the "@1" suffix means a future breaking change gets its own fresh key
+// instead of corrupting this one.
+const ACTIVITY_BROKER_SYMBOL = Symbol.for("vehicle.pi.activity@1");
 
 /** Structural duck typing only -- a broker registered by any extension (Vehicle-authored or not) that exposes a `.publish()` method qualifies. */
 function activityBroker(): VehicleActivityBroker | undefined {

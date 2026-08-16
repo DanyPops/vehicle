@@ -22,7 +22,11 @@
 import type { VehicleClient, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { DiscoveredVehicle } from "./vehicle-shell-broker.js";
 
-const REGISTRY_KEY = Symbol.for("vehicle.shell.in-process-registry");
+// Versioned key, matching secrets-registry.ts/vehicle-safety-registry.ts's own convention: a
+// bare, unversioned key lets two genuinely different loaded code versions of this file (see
+// this file's own doc comment above) silently share one slot even if InProcessRegistryEntry's
+// shape ever drifts between them; "@1" means a future breaking change gets its own fresh key.
+const REGISTRY_KEY = Symbol.for("vehicle.shell.in-process-registry@1");
 
 /** A discovered in-process vehicle that can also activate one of its own operations as a real,
  * fully policy-wrapped Pi tool -- built from THAT vehicle's own RegisterVehicleToolsOptions, never
