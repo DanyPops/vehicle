@@ -8,6 +8,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { reportModuleLoad, reportShellRegistered } from "../client-diagnostics.js";
 import { tryExtensionRuntimeAction } from "../pi-tool-availability.js";
 import {
+	__resetVehicleShellReregistrationFlagForTests,
+	markVehicleShellNeedsReregistration,
+	vehicleShellNeedsReregistration,
+} from "./reregistration.js";
+import {
 	computeToolContextBudget,
 	DEFAULT_BUDGET_FRACTION_OF_REMAINING,
 	DEFAULT_FALLBACK_BUDGET_TOKENS,
@@ -51,6 +56,56 @@ reportModuleLoad(import.meta.url);
 const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle@1");
 
 /**
+ * Marks the shared handle as needing re-registration next time ensureVehicleShellHandle runs,
+ * WITHOUT touching pi.getAllTools() -- see ensureVehicleShellHandle's own doc comment for why a
+ * live tool-presence probe races against Pi's real multi-extension load order (confirmed live: a
+ * second, genuinely-concurrent extension's own first-ever registration attempt can run before the
+ * first extension's own pi.registerTool() calls are visible in pi.getAllTools() yet, which made a
+ * presence-based check misfire as "needs re-registration" and re-attempt pi.registerTool() for an
+ * already-in-flight tool name -- a real, Pi-enforced conflict, not a reload at all).
+ * session_shutdown is Pi's own authoritative signal for "this extension instance's own
+ * registrations are about to be torn down" (reload, a session switch/new/resume/fork all funnel
+ * through it per extensions.md) -- reacting to that event directly, instead of inferring it from
+ * tool-list contents, can never race with concurrent first-time extension loading.
+ */
+function armReregistrationDetection(pi: ExtensionAPI): void {
+	pi.on("session_shutdown", () => {
+		markVehicleShellNeedsReregistration();
+	});
+}
+
+/**
+ * Registers the two/three meta-tools plus the tool_execution_end/turn_end listeners a shell
+ * handle needs to actually function, against whichever ExtensionAPI is calling right now.
+ *
+ * Split out of ensureVehicleShellHandle so it can run in TWO situations, not just handle creation:
+ * a brand-new handle, and an existing handle (surfaced from a *previous* extension instance) whose
+ * own registrations were torn down by a `/reload` -- see ensureVehicleShellHandle's own doc
+ * comment for why those are genuinely different conditions, not the same thing.
+ */
+function registerShellToolsAndListeners(pi: ExtensionAPI, handle: VehicleShellHandle, claimedElsewhere: boolean): void {
+	reportShellRegistered("vehicle", handle.listToolName, handle.manToolName, !claimedElsewhere);
+	if (!claimedElsewhere) {
+		pi.registerTool(createToolsListTool(handle.listToolName, handle.manToolName, handle));
+		pi.registerTool(createToolsManTool(pi, handle.listToolName, handle.manToolName, handle));
+		pi.registerTool(createToolsTypeTool(handle.listToolName, handle.manToolName, handle.typeToolName, handle));
+	}
+
+	pi.on("tool_execution_end", (event) => {
+		const toolName = (event as { toolName?: unknown }).toolName;
+		if (typeof toolName === "string") handle.tracker.recordCall(toolName);
+	});
+	// The real Phase 3 wiring: ctx.getContextUsage() is a genuine, already-exported Pi SDK API,
+	// reachable from this same handler signature all along -- it was simply never read before this.
+	pi.on("turn_end", (_event, ctx) => {
+		const budget = computeToolContextBudget(ctx.getContextUsage(), handle.budgetOptions, handle.lastKnownBudgetTokens);
+		handle.lastKnownBudgetTokens = budget;
+		handle.tracker.evictToBudget(budget);
+		applyShellActivation(pi, handle);
+	});
+}
+
+/**
  * The single, process-wide, vehicle-agnostic Vehicle Shell handle -- created by whichever vehicle's
  * own registerVehicleShell() call happens to run first, exactly like vehicle-shell-registry.ts's
  * own in-process vehicle registry, and for the same reason: `globalThis[Symbol.for(...)]` survives
@@ -60,15 +115,41 @@ const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle@1");
  *
  * This is the fix for the "whichever domain vehicle happens to load first becomes the accidental,
  * arbitrarily-named owner of tools_list/tools_man" problem: nobody "wins" anymore. The two
- * meta-tools are registered here, exactly once, bound to nothing vehicle-specific -- their own
- * closures always read every vehicle currently in the process (discoverAllVehicles), never one
- * particular vehicle's own manifest. Every subsequent call (from every other vehicle) is a pure
- * no-op that just returns the same shared handle to fold its own managed tools into.
+ * meta-tools are registered here, exactly once per live registration, bound to nothing
+ * vehicle-specific -- their own closures always read every vehicle currently in the process
+ * (discoverAllVehicles), never one particular vehicle's own manifest.
+ *
+ * Real incident: `globalThis` survives a `/reload` (it's process-wide, not tied to any one
+ * extension instance), but pi's own reload flow "reloads and rebinds extensions" -- every
+ * pi.registerTool()/pi.on() call the OLD extension instance made is gone once the new instance's
+ * own registration code runs. Naively treating "the handle object already exists" as "the tools
+ * and listeners are still live" (this function's own behavior before this fix) meant Vehicle
+ * Shell's entire tools_list/tools_man/tools_type surface -- and its recordCall/evictToBudget event
+ * wiring -- silently vanished process-wide after ANY /reload, for every vehicle, until a full
+ * process restart. Confirmed live: reloading after a vehicle-client-pi upgrade left tools_list and
+ * tools_man both reporting "Tool ... not found" while flat, non-shell tools kept working fine.
+ *
+ * Every call here now checks vehicleShellNeedsReregistration() (armed via session_shutdown, see
+ * armReregistrationDetection) and re-registers against the SAME shared handle (preserving its
+ * accumulated tracker/budget state -- real history, not something to discard) when a reload
+ * genuinely happened. Deliberately NOT a pi.getAllTools() presence probe (an earlier version of
+ * this fix used one, and it raced against real multi-extension load order: a second, genuinely
+ * concurrent extension's own first-ever registration can run before the first extension's own
+ * pi.registerTool() calls are visible in pi.getAllTools() yet, misfiring as "needs
+ * re-registration" and re-attempting pi.registerTool() for an already-in-flight tool name -- a
+ * real, Pi-enforced "Tool ... conflicts with ..." load failure, confirmed live against
+ * vehicle-pi-real-separate-extensions.test.ts's own two-genuinely-separate-extension-files
+ * topology). session_shutdown is Pi's own authoritative signal for "this extension instance's
+ * registrations are about to be torn down" and can never race with first-time loading that way.
  */
 function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions): VehicleShellHandle {
 	const holder = globalThis as { [SHELL_HANDLE_KEY]?: VehicleShellHandle };
 	const existing = holder[SHELL_HANDLE_KEY];
-	if (existing) return existing;
+	if (existing) {
+		if (vehicleShellNeedsReregistration()) registerShellToolsAndListeners(pi, existing, /* claimedElsewhere */ false);
+		armReregistrationDetection(pi);
+		return existing;
+	}
 
 	const listToolName = options.listToolName ?? DEFAULT_LIST_TOOL_NAME;
 	const manToolName = options.manToolName ?? DEFAULT_MAN_TOOL_NAME;
@@ -99,33 +180,17 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	// pure dead weight; skip it, but still track/decay our own operations exactly as normal.
 	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
 	const claimedElsewhere = runtime.status === "ready" && runtime.value.some((tool) => tool.name === listToolName);
-	reportShellRegistered("vehicle", listToolName, manToolName, !claimedElsewhere);
-	if (!claimedElsewhere) {
-		pi.registerTool(createToolsListTool(listToolName, manToolName, handle));
-		pi.registerTool(createToolsManTool(pi, listToolName, manToolName, handle));
-		pi.registerTool(createToolsTypeTool(listToolName, manToolName, typeToolName, handle));
-	}
-
-	pi.on("tool_execution_end", (event) => {
-		const toolName = (event as { toolName?: unknown }).toolName;
-		if (typeof toolName === "string") handle.tracker.recordCall(toolName);
-	});
-	// The real Phase 3 wiring: ctx.getContextUsage() is a genuine, already-exported Pi SDK API,
-	// reachable from this same handler signature all along -- it was simply never read before this.
-	pi.on("turn_end", (_event, ctx) => {
-		const budget = computeToolContextBudget(ctx.getContextUsage(), handle.budgetOptions, handle.lastKnownBudgetTokens);
-		handle.lastKnownBudgetTokens = budget;
-		handle.tracker.evictToBudget(budget);
-		applyShellActivation(pi, handle);
-	});
+	registerShellToolsAndListeners(pi, handle, claimedElsewhere);
+	armReregistrationDetection(pi);
 
 	return handle;
 }
 
-/** Test-only: clears the process-wide shell handle singleton so each test gets a fresh one. Not
- * exported from the package's own public entry point. */
+/** Test-only: clears the process-wide shell handle singleton (and its own reload-detection flag)
+ * so each test gets a fresh one. Not exported from the package's own public entry point. */
 export function __resetVehicleShellHandleForTests(): void {
 	delete (globalThis as { [SHELL_HANDLE_KEY]?: VehicleShellHandle })[SHELL_HANDLE_KEY];
+	__resetVehicleShellReregistrationFlagForTests();
 }
 
 /**

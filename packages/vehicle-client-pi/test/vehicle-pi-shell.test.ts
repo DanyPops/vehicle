@@ -1035,3 +1035,68 @@ describe("tools_list's opt-in aggregate cache (mandb-style index vs. live rescan
 		expect(manResult.content[0]?.text).toContain("now callable as test_vehicle_tasks_depend");
 	});
 });
+
+/**
+ * Real incident: globalThis[Symbol.for("vehicle.shell.handle@1")] is process-wide, not tied to
+ * any one extension instance, so it survives a real /reload -- but pi's own reload flow "reloads
+ * and rebinds extensions" (extensions.md), tearing down every pi.registerTool()/pi.on() call the
+ * OLD extension instance made. ensureVehicleShellHandle's own "if (existing) return existing"
+ * short-circuit (before this suite's own fix) treated the handle's mere existence as proof its
+ * tools/listeners were still live, silently leaving tools_list/tools_man/tools_type (and the
+ * recordCall/evictToBudget event wiring) gone process-wide after ANY reload, for every vehicle,
+ * until a full process restart. Confirmed live: reloading this exact package after an upgrade left
+ * tools_list/tools_man both reporting "Tool ... not found" while flat, non-shell tools kept
+ * working fine -- exactly the asymmetry this suite reproduces with createExtensionHarness's own
+ * reload() (which faithfully mirrors AgentSession.reload()'s real "brand-new ExtensionRunner with
+ * an empty tools Map, same api, fresh factory() call" semantics, not a hand-rolled approximation).
+ */
+describe("Vehicle Shell's own meta-tools across a simulated /reload", () => {
+	function shellStyleFactory(client: VehicleClient) {
+		return (pi: ExtensionAPI) => {
+			pi.on("session_start", async () => {
+				await registerVehicleTools(pi, client, { shell: { coreOperations: ["tasks.create"] } });
+			});
+		};
+	}
+
+	it("tools_list/tools_man/tools_type are all still registered and callable after reload, not silently gone", async () => {
+		const client = new FakeClient(manifest([operation("tasks.create"), operation("docs.list")]));
+		const h = createExtensionHarness(shellStyleFactory(client));
+		await h.boot();
+
+		expect(h.tools.has("tools_list")).toBe(true);
+		expect(h.tools.has("tools_man")).toBe(true);
+		expect(h.tools.has("tools_type")).toBe(true);
+
+		await h.reload();
+
+		expect(h.tools.has("tools_list")).toBe(true);
+		expect(h.tools.has("tools_man")).toBe(true);
+		expect(h.tools.has("tools_type")).toBe(true);
+
+		// Not just "registered" -- genuinely callable, returning real data, against the fresh
+		// post-reload ExtensionAPI instance.
+		const result = (await h.invokeTool("tools_list", {})) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("test-vehicle:docs.list");
+	});
+
+	it("the tool_execution_end/turn_end event wiring is re-armed too, not just tool registration -- a call after reload is still tracked", async () => {
+		const client = new FakeClient(manifest([operation("tasks.create"), operation("docs.list")]));
+		const h = createExtensionHarness(shellStyleFactory(client));
+		await h.boot();
+		await h.reload();
+
+		// tools_man activates docs.list; if tool_execution_end's own recordCall wiring survived
+		// the reload, calling the newly-activated tool marks it active and tracked -- if the
+		// listener silently vanished (the bug this test guards against), the tool would still
+		// technically exist post-reload but its usage would never reach the tracker at all.
+		await h.invokeTool("tools_man", { names: ["test-vehicle:docs.list"] });
+		await h.emit("tool_execution_end", { toolName: "docs_list" });
+
+		// turn_end re-applies activation from the tracker's own live state -- if it never fired
+		// (the other half of the same bug), this call itself would reject rather than settling
+		// cleanly, failing the test.
+		await h.emit("turn_end", {});
+		expect(h.activeTools).toContain("docs_list");
+	});
+});
