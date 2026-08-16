@@ -22,6 +22,7 @@ import {
 	Key,
 	type Keybinding,
 	type KeybindingsManager,
+	type KeyId,
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
@@ -33,6 +34,13 @@ import {
 } from "@earendil-works/pi-tui";
 import { SeparatorLine } from "malevich-tui-components";
 import { type PiAskPromptOption, renderSingleSelectRows } from "./hitl-ask-prompt-layout.js";
+import {
+	ensureTypingCourtesyTracking,
+	isRecentlyTyping,
+	markAskPromptPending,
+	markAskPromptSettled,
+	waitForTypingCourtesy,
+} from "./hitl-ask-typing-courtesy.js";
 import { hostDualPresentationComponent, OVERLAY_MAX_HEIGHT_RATIO, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.js";
 import { createMultiSelectList, type MultiSelectListItem, type MultiSelectList as SharedMultiSelectList } from "./multi-select-list.js";
 
@@ -266,7 +274,10 @@ function isValidShortcutSpec(spec: string): boolean {
 }
 
 function buildShortcut(spec: string): ResolvedShortcut {
-	return { disabled: false, spec, matches: (data: string) => matchesKey(data, spec as any) };
+	// spec is a caller-configurable string (e.g. from an extension option), validated only at
+	// runtime by isValidShortcutSpec -- it can never be statically narrowed to KeyId's own closed
+	// template-literal union, so this cast is the honest boundary, not a laundered `any`.
+	return { disabled: false, spec, matches: (data: string) => matchesKey(data, spec as KeyId) };
 }
 
 function resolveShortcut(paramValue: string | null | undefined, defaultSpec: string): ResolvedShortcut {
@@ -706,7 +717,7 @@ class AskComponent extends Container {
 	}
 	set focused(value: boolean) {
 		this._focused = value;
-		if (this.editor && (this.mode === "freeform" || this.mode === "comment")) (this.editor as any).focused = value;
+		if (this.editor && (this.mode === "freeform" || this.mode === "comment")) this.editor.focused = value;
 	}
 
 	constructor(
@@ -1114,17 +1125,14 @@ class AskComponent extends Container {
 
 	private saveEditorDraft(): void {
 		if (!this.editor) return;
-		const getText = (this.editor as any).getText;
-		if (typeof getText !== "function") return;
-		const currentText = String(getText.call(this.editor) ?? "");
+		const currentText = this.editor.getText();
 		if (this.mode === "freeform") this.freeformDraft = currentText;
 		else if (this.mode === "comment") this.commentDraft = currentText;
 	}
 
 	private setEditorText(text: string): void {
 		const editor = this.ensureEditor();
-		const setText = (editor as any).setText;
-		if (typeof setText === "function") setText.call(editor, text);
+		editor.setText(text);
 	}
 
 	private handleSelectionSubmit(selections: string[], wantsComment: boolean): void {
@@ -1165,7 +1173,7 @@ class AskComponent extends Container {
 		this.modeContainer.clear();
 		const editor = this.ensureEditor();
 		this.setEditorText(this.freeformDraft);
-		(editor as any).focused = this._focused;
+		editor.focused = this._focused;
 		// Only meaningful when reached by escaping OUT of a real select list ("instead of these
 		// options, here's a custom one") -- with no options at all there's nothing to contrast
 		// against, so the label is pure noise.
@@ -1185,7 +1193,7 @@ class AskComponent extends Container {
 		this.modeContainer.clear();
 		const editor = this.ensureEditor();
 		this.setEditorText(this.commentDraft);
-		(editor as any).focused = this._focused;
+		editor.focused = this._focused;
 		const selectedLabel = this.pendingSelections.length === 1 ? "Selected option:" : "Selected options:";
 		this.modeContainer.addChild(new Text(this.theme.fg("accent", this.theme.bold(selectedLabel)), 1, 0));
 		this.modeContainer.addChild(new Text(this.theme.fg("text", this.pendingSelections.join(", ")), 1, 0));
@@ -1319,133 +1327,6 @@ async function askViaDialogs(
 }
 
 /**
- * Tracks whether a live ask is genuinely mid-flight, blocked on the human. `ExtensionContext.isIdle()`
- * means "not streaming a model response" -- it reads true while a slow, human-blocking tool call
- * like this one is still pending, since the model already finished emitting the tool_call and
- * is not itself generating anything. Left unguarded, that lets the active-task continuation
- * driver (extension/src/index.ts's driveActiveTasks, on agent_settled) queue a "continue the
- * active task" nudge as a `deliverAs: "nextTurn"` message while this exact live ask is still
- * awaiting an answer -- starting a second, concurrent turn that reasons about the very Discussion
- * this call is already resolving, independently of it. driveActiveTasks checks isLiveAskPending()
- * and skips queuing while true.
- */
-let livePendingCount = 0;
-
-export function isLiveAskPending(): boolean {
-	return livePendingCount > 0;
-}
-
-const DISCUSS_TYPING_COURTESY_DEFAULT_POLL_MS = 100;
-const DISCUSS_TYPING_COURTESY_DEFAULT_INITIAL_QUIET_MS = 1_500;
-const DISCUSS_TYPING_COURTESY_DEFAULT_QUIET_FLOOR_MS = 300;
-const DISCUSS_TYPING_COURTESY_DEFAULT_DECAY_HORIZON_MS = 10_000;
-
-let typingCourtesyPollMs = DISCUSS_TYPING_COURTESY_DEFAULT_POLL_MS;
-let typingCourtesyInitialQuietMs = DISCUSS_TYPING_COURTESY_DEFAULT_INITIAL_QUIET_MS;
-let typingCourtesyQuietFloorMs = DISCUSS_TYPING_COURTESY_DEFAULT_QUIET_FLOOR_MS;
-let typingCourtesyDecayHorizonMs = DISCUSS_TYPING_COURTESY_DEFAULT_DECAY_HORIZON_MS;
-
-/** Test-only: the real decay curve runs over seconds, too slow to exercise at its real scale in a unit test. */
-export function setTypingCourtesyTimingForTests(overrides?: {
-	pollMs?: number;
-	initialQuietMs?: number;
-	floorMs?: number;
-	decayHorizonMs?: number;
-}): void {
-	typingCourtesyPollMs = overrides?.pollMs ?? DISCUSS_TYPING_COURTESY_DEFAULT_POLL_MS;
-	typingCourtesyInitialQuietMs = overrides?.initialQuietMs ?? DISCUSS_TYPING_COURTESY_DEFAULT_INITIAL_QUIET_MS;
-	typingCourtesyQuietFloorMs = overrides?.floorMs ?? DISCUSS_TYPING_COURTESY_DEFAULT_QUIET_FLOOR_MS;
-	typingCourtesyDecayHorizonMs = overrides?.decayHorizonMs ?? DISCUSS_TYPING_COURTESY_DEFAULT_DECAY_HORIZON_MS;
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		if (signal?.aborted) {
-			resolve();
-			return;
-		}
-		const timer = setTimeout(resolve, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-	});
-}
-
-/**
- * Required quiet gap (no keystroke) before a live ask may open, as a function of how long we've
- * already been waiting. Starts wide (a natural inter-word pause shouldn't count as "done typing")
- * and decays toward a floor -- someone typing continuously gets pickier treatment over time
- * rather than never being asked. No outer cap: someone typing with sub-floor gaps forever waits
- * forever, same as the picker itself already waits indefinitely for a real human answer once open.
- */
-function requiredQuietMsAt(elapsedMs: number): number {
-	const t = Math.min(1, Math.max(0, elapsedMs / typingCourtesyDecayHorizonMs));
-	return typingCourtesyInitialQuietMs - t * (typingCourtesyInitialQuietMs - typingCourtesyQuietFloorMs);
-}
-
-/**
- * Ambient, session-lifetime keystroke clock -- deliberately NOT scoped per-ask. A per-ask listener
- * would only see keystrokes from the moment the tool call happens to start, missing typing already
- * in progress when it began (the exact case this feature exists to protect). Attached once per
- * distinct ui instance (reference equality; a session's real ui object is stable for its lifetime)
- * and left attached -- there is no unregister, matching onTerminalInput's own listener-return-value
- * contract elsewhere in this file.
- */
-let lastKeystrokeAt = 0;
-let trackedUi: PiHitlContext["ui"] | undefined;
-
-export function ensureTypingCourtesyTracking(ui: PiHitlContext["ui"]): void {
-	if (typeof ui.onTerminalInput !== "function" || trackedUi === ui) return;
-	trackedUi = ui;
-	ui.onTerminalInput(() => {
-		lastKeystrokeAt = Date.now();
-		return undefined;
-	});
-}
-
-/** Test-only: clears the ambient keystroke clock so one test's simulated typing can't bleed into another's. */
-export function resetTypingCourtesyTrackingForTests(): void {
-	lastKeystrokeAt = 0;
-	trackedUi = undefined;
-}
-
-/**
- * Whether there is real, recent typing activity to wait out right now -- a plain synchronous read
- * of the ambient keystroke clock so the common case (nobody typing) never forces the caller
- * through an extra microtask. Deliberately not folded into waitForTypingCourtesy itself: an
- * unconditional `await` there -- even one that resolves immediately -- still yields once, which is
- * enough to let a signal aborted synchronously right after invoking askQuestion race past the
- * abort listener registered deeper in askQuestionBlocking and get missed entirely.
- */
-export function isRecentlyTyping(): boolean {
-	return lastKeystrokeAt > 0 && Date.now() - lastKeystrokeAt < typingCourtesyInitialQuietMs;
-}
-
-/**
- * Waits out real keystroke activity (not editor text content -- that can't distinguish "actively
- * typing" from "a stale draft sitting there", and misses a mid-thought erase-and-resume) before
- * popping the live ask over it. Only call when isRecentlyTyping() is already true.
- */
-export async function waitForTypingCourtesy(params: Pick<PiAskPromptOptions, "onUpdate" | "signal">): Promise<void> {
-	const startedAt = Date.now();
-	let announced = false;
-	while (lastKeystrokeAt > 0 && !params.signal?.aborted) {
-		const elapsed = Date.now() - startedAt;
-		if (Date.now() - lastKeystrokeAt >= requiredQuietMsAt(elapsed)) return;
-		if (!announced) {
-			announced = true;
-			params.onUpdate?.({ content: [{ type: "text", text: "Waiting for you to finish typing before asking..." }], details: undefined });
-		}
-		await sleep(typingCourtesyPollMs, params.signal);
-	}
-}
-
-/**
  * Interactive AskComponent when a real TUI is available, dialog fallback (ctx.ui.select/input) in
  * RPC/headless mode, no-op undefined without any interactive UI at all. Never fabricates an
  * answer: cancel, timeout, and non-interactive contexts all resolve to undefined.
@@ -1464,7 +1345,7 @@ async function requestPiAskPromptUnguarded(ctx: PiHitlContext, params: PiAskProm
 	const normalizedContext = params.context?.trim() || undefined;
 
 	if (typingCourtesy) ensureTypingCourtesyTracking(ctx.ui);
-	livePendingCount += 1;
+	markAskPromptPending();
 	try {
 		// Only actually awaits (yielding a microtask) when there's real typing activity to wait out --
 		// see isRecentlyTyping's own comment for why the common case must stay synchronous.
@@ -1472,7 +1353,7 @@ async function requestPiAskPromptUnguarded(ctx: PiHitlContext, params: PiAskProm
 		params.onUpdate?.({ content: [{ type: "text", text: "Waiting for human input..." }], details: undefined });
 		return await requestAskPromptBlocking(ctx, params, options, allowMultiple, allowFreeform, allowComment, normalizedContext);
 	} finally {
-		livePendingCount -= 1;
+		markAskPromptSettled();
 	}
 }
 

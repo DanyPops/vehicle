@@ -1,19 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { driveComponent, renderToTerminal } from "@danypops/pi-tui-harness";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { type Component, type EditorTheme, KeybindingsManager, type TUI, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { renderSectionSeparator, requestPiAskPrompt, shouldShowSectionSeparator } from "../src/hitl-ask-prompt.ts";
 import {
 	ensureTypingCourtesyTracking,
 	isLiveAskPending,
 	isRecentlyTyping,
-	renderSectionSeparator,
-	requestPiAskPrompt,
 	resetTypingCourtesyTrackingForTests,
 	setTypingCourtesyTimingForTests,
-	shouldShowSectionSeparator,
 	waitForTypingCourtesy,
-} from "../src/hitl-ask-prompt.ts";
-import { OVERLAY_MAX_HEIGHT_RATIO } from "../src/hitl-prompt.ts";
+} from "../src/hitl-ask-typing-courtesy.ts";
+import { OVERLAY_MAX_HEIGHT_RATIO, type PiHitlContext } from "../src/hitl-prompt.ts";
+
+// Not exported from @earendil-works/pi-coding-agent's own public entrypoint (only its internal
+// core/extensions/types.ts) -- derived via the real setEditorComponent signature instead of an
+// `any` stand-in, so every mock ui.setEditorComponent below stays honestly typed.
+type EditorFactory = NonNullable<Parameters<ExtensionContext["ui"]["setEditorComponent"]>[0]>;
 
 const originalEnv = { ...process.env };
 // The ambient keystroke clock is module-level state (deliberately -- see ensureTypingCourtesyTracking's
@@ -36,7 +39,17 @@ const theme = {
 	strikethrough: (t: string) => t,
 	fg: (_c: string, t: string) => t,
 } as Theme;
-const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
+// EditorFactory's own keybindings parameter is pi-coding-agent's re-exported KeybindingsManager
+// (a distinct, structurally-incompatible nominal type from pi-tui's own, adding
+// configPath/reload/getEffectiveConfig) -- but hitl-ask-prompt.ts's real production code is typed
+// against pi-tui's KeybindingsManager throughout and never touches those extra members, so this
+// is the one cast this file needs to bridge that gap, rather than constructing a second fake
+// KeybindingsManager implementation no test here actually needs.
+const keybindings = new KeybindingsManager(TUI_KEYBINDINGS) as unknown as Parameters<EditorFactory>[2];
+// A minimal stand-in for the real EditorTheme -- only borderColor is ever exercised by this
+// suite's assertions, so the (untyped-at-runtime) selectList placeholder is cast once here
+// rather than at each of this file's many call sites.
+const fakeEditorTheme = { borderColor: (s: string) => s, selectList: {} } as unknown as EditorTheme;
 const ENTER = "\r";
 const ESCAPE = "\x1b";
 
@@ -47,7 +60,7 @@ const ESCAPE = "\x1b";
  * rather than treating it as a new ask.
  */
 function interactiveCtx(keySequence: string[]): ExtensionContext {
-	const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+	const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 	let installed = false;
 	return {
 		cwd: "/tmp",
@@ -63,16 +76,16 @@ function interactiveCtx(keySequence: string[]): ExtensionContext {
 			theme,
 			getEditorText: () => "",
 			getEditorComponent: () => undefined,
-			setEditorComponent: (factory: any) => {
+			setEditorComponent: (factory: EditorFactory) => {
 				if (installed || !factory) {
 					installed = false;
 					return;
 				}
 				installed = true;
-				const host = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				const host = factory(tui, fakeEditorTheme, keybindings);
 				for (const key of keySequence) host.handleInput(key);
 			},
-		} as any,
+		} as unknown as ExtensionContext["ui"],
 	} as ExtensionContext;
 }
 
@@ -88,7 +101,7 @@ function interactiveCtx(keySequence: string[]): ExtensionContext {
  */
 describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-end", () => {
 	it("ctx.signal aborting must NOT cancel the ask -- only the tool call's own passed-through signal should", async () => {
-		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 		const contextSignalController = new AbortController();
 		let component: { handleInput: (data: string) => void } | undefined;
 		const ctx = {
@@ -106,10 +119,10 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 				theme,
 				getEditorText: () => "",
 				getEditorComponent: () => undefined,
-				setEditorComponent: (factory: any) => {
-					if (factory) component = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				setEditorComponent: (factory: EditorFactory) => {
+					if (factory) component = factory(tui, fakeEditorTheme, keybindings);
 				},
-			} as any,
+			} as unknown as ExtensionContext["ui"],
 		} as ExtensionContext;
 		const promise = requestPiAskPrompt(ctx, { question: "Ship or not?", options: [{ title: "Ship Friday" }, { title: "Slip to Monday" }] });
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -126,7 +139,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	});
 
 	it("the tool call's own passed-through signal DOES cancel the ask when it aborts", async () => {
-		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 		const toolCallController = new AbortController();
 		const ctx = {
 			cwd: "/tmp",
@@ -142,10 +155,10 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 				theme,
 				getEditorText: () => "",
 				getEditorComponent: () => undefined,
-				setEditorComponent: (factory: any) => {
-					if (factory) factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				setEditorComponent: (factory: EditorFactory) => {
+					if (factory) factory(tui, fakeEditorTheme, keybindings);
 				},
-			} as any,
+			} as unknown as ExtensionContext["ui"],
 		} as ExtensionContext;
 		const promise = requestPiAskPrompt(ctx, {
 			question: "Ship or not?",
@@ -176,15 +189,15 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 
 	it("boxTitle is a generic, optional caller-supplied label -- no default branding baked into the shared prompt", async () => {
 		const ctx = interactiveCtx([ENTER]);
-		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 		let component: { render: (w: number) => string[]; handleInput: (data: string) => void } | undefined;
 		const captureCtx = {
 			...ctx,
 			ui: {
-				...(ctx as any).ui,
-				setEditorComponent: (factory: any) => {
+				...ctx.ui,
+				setEditorComponent: (factory: EditorFactory) => {
 					if (!factory) return;
-					component = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+					component = factory(tui, fakeEditorTheme, keybindings);
 				},
 			},
 		} as unknown as ExtensionContext;
@@ -197,7 +210,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	});
 
 	it("overlay presentation hosts the same rich component as a blocking popup over the transcript", async () => {
-		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 		let customOptions: unknown;
 		let rendered = "";
 		let editorSwapCalled = false;
@@ -250,7 +263,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	});
 
 	it("overlay's height budget can use (near-)the full terminal instead of integrated's protective 50% ceiling -- confirmed live: an approval prompt's own multi-line body needed scrolling under the old shared ratio even though overlay already floats over the transcript instead of displacing it", async () => {
-		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 		// Long enough that neither presentation's own budget can show it all -- what's under test is
 		// how MUCH each shows, not whether either shows everything.
 		const longContext = Array.from({ length: 60 }, (_, index) => `Line ${index + 1} of a long approval body.`).join("\n");
@@ -261,10 +274,10 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 		const captureIntegratedCtx = {
 			...integratedCtx,
 			ui: {
-				...(integratedCtx as any).ui,
-				setEditorComponent: (factory: any) => {
+				...integratedCtx.ui,
+				setEditorComponent: (factory: EditorFactory) => {
 					if (!factory) return;
-					integratedComponent = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+					integratedComponent = factory(tui, fakeEditorTheme, keybindings);
 				},
 			},
 		} as unknown as ExtensionContext;
@@ -326,7 +339,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	});
 
 	it("multi-select: moving past the four-row viewport keeps the focused topic visible and toggleable", async () => {
-		const tui = { terminal: { rows: 20 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 20 }, requestRender: () => {} } as unknown as TUI;
 		let component: Component | undefined;
 		const ctx = {
 			cwd: "/tmp",
@@ -342,10 +355,10 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 				theme,
 				getEditorText: () => "",
 				getEditorComponent: () => undefined,
-				setEditorComponent: (factory: any) => {
-					if (factory) component = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				setEditorComponent: (factory: EditorFactory) => {
+					if (factory) component = factory(tui, fakeEditorTheme, keybindings);
 				},
-			} as any,
+			} as unknown as ExtensionContext["ui"],
 		} as ExtensionContext;
 		const topics = [
 			"Per-item output budgeting",
@@ -410,7 +423,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	// it -- backwards, live-observed directly. The real content is now the question itself; the
 	// discussion title is a plain dim subtitle, not a labeled section.
 	it("renders the subtitle as plain dim text, never a generic 'Question' header, and never a redundant 'Custom answer' label when there are no options", async () => {
-		const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+		const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 		let component: { render: (w: number) => string[]; handleInput: (data: string) => void } | undefined;
 		const ctx = {
 			cwd: "/tmp",
@@ -426,10 +439,10 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 				theme,
 				getEditorText: () => "",
 				getEditorComponent: () => undefined,
-				setEditorComponent: (factory: any) => {
-					if (factory) component = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+				setEditorComponent: (factory: EditorFactory) => {
+					if (factory) component = factory(tui, fakeEditorTheme, keybindings);
 				},
-			} as any,
+			} as unknown as ExtensionContext["ui"],
 		} as ExtensionContext;
 		const pending = requestPiAskPrompt(ctx, { question: "Should we ship Friday?", subtitle: "Ship or not?" });
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -553,8 +566,11 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	/** The picker is always hosted via ctx.ui.setEditorComponent, Pi's own slash-command menu mechanism. */
 	describe("hosted in the real input editor via setEditorComponent -- the only interactive path", () => {
 		function editorCtx() {
-			const setCalls: Array<((...args: unknown[]) => unknown) | undefined> = [];
-			const previousFactory = () => "previous-editor-sentinel";
+			const setCalls: Array<EditorFactory | undefined> = [];
+			// A pure reference-identity sentinel (compared via toBe below), never actually invoked as a
+			// real editor factory -- cast once here at its own definition rather than laundering the
+			// whole ui mock through `any`.
+			const previousFactory = (() => "previous-editor-sentinel") as unknown as EditorFactory;
 			const ctx = {
 				cwd: "/tmp",
 				hasUI: true,
@@ -569,10 +585,10 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 					theme,
 					getEditorText: () => "human's in-progress draft",
 					getEditorComponent: () => previousFactory,
-					setEditorComponent: (factory: ((...args: unknown[]) => unknown) | undefined) => {
+					setEditorComponent: (factory: EditorFactory | undefined) => {
 						setCalls.push(factory);
 					},
-				} as any,
+				} as unknown as ExtensionContext["ui"],
 			} as ExtensionContext;
 			return { ctx, setCalls, previousFactory };
 		}
@@ -585,9 +601,9 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 			});
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			expect(setCalls).toHaveLength(1);
-			const host = (setCalls[0] as any)(
-				{ terminal: { rows: 40 }, requestRender: () => {} },
-				{ borderColor: (s: string) => s, selectList: {} },
+			const host = setCalls[0]!(
+				{ terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+				fakeEditorTheme,
 				keybindings,
 			);
 			host.handleInput(ENTER);
@@ -599,9 +615,9 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 			const { ctx, setCalls, previousFactory } = editorCtx();
 			const promise = requestPiAskPrompt(ctx, { question: "Ship or not?", options: [{ title: "Ship Friday" }] });
 			await new Promise((resolve) => setTimeout(resolve, 0));
-			const host = (setCalls[0] as any)(
-				{ terminal: { rows: 40 }, requestRender: () => {} },
-				{ borderColor: (s: string) => s, selectList: {} },
+			const host = setCalls[0]!(
+				{ terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+				fakeEditorTheme,
 				keybindings,
 			);
 			// setEditorComponent's own swap logic reads getText() off the outgoing editor to carry a
@@ -630,7 +646,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 						throw new Error("unexpected");
 					},
 					notify: () => {},
-				} as any,
+				} as unknown as ExtensionContext["ui"],
 			} as ExtensionContext;
 			const answer = await requestPiAskPrompt(ctx, { question: "Ship or not?", options: [{ title: "Ship Friday" }] });
 			expect(selectCalls).toHaveLength(1);
@@ -649,20 +665,22 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 	 * above once an unconditional wait was first added).
 	 */
 	describe("typing courtesy: waits out real keystroke activity before asking", () => {
-		function fakeTypingUi(): { ui: any; keystroke: () => void } {
+		function fakeTypingUi(): { ui: PiHitlContext["ui"]; keystroke: () => void } {
 			let handler: ((data: string) => unknown) | undefined;
+			// A deliberately partial mock -- only onTerminalInput is exercised by this suite -- cast
+			// once here rather than typing the whole function's return as `any`.
 			const ui = {
 				onTerminalInput: (h: (data: string) => unknown) => {
 					handler = h;
 					return () => {};
 				},
-			};
+			} as unknown as PiHitlContext["ui"];
 			return { ui, keystroke: () => handler?.("x") };
 		}
 
 		it("isRecentlyTyping: false at rest, and false when onTerminalInput isn't available in this UI mode", () => {
 			expect(isRecentlyTyping()).toBe(false);
-			ensureTypingCourtesyTracking({} as any);
+			ensureTypingCourtesyTracking({} as unknown as PiHitlContext["ui"]);
 			expect(isRecentlyTyping()).toBe(false);
 		});
 
@@ -693,8 +711,9 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 			let waitedMessage: string | undefined;
 			const start = Date.now();
 			await waitForTypingCourtesy({
-				onUpdate: (update: any) => {
-					waitedMessage = update.content?.[0]?.text;
+				onUpdate: (update) => {
+					const first = update.content?.[0];
+					waitedMessage = first?.type === "text" ? first.text : undefined;
 				},
 			});
 			expect(Date.now() - start).toBeGreaterThanOrEqual(35);
@@ -747,7 +766,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 
 		it("end-to-end through requestPiAskPrompt: the picker does not open while real keystrokes are still arriving", async () => {
 			setTypingCourtesyTimingForTests({ pollMs: 5, initialQuietMs: 40, floorMs: 40, decayHorizonMs: 1000 });
-			const tui = { terminal: { rows: 40 }, requestRender: () => {} };
+			const tui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
 			let handler: ((data: string) => unknown) | undefined;
 			let hostedAt = 0;
 			const start = Date.now();
@@ -769,13 +788,13 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 						handler = h;
 						return () => {};
 					},
-					setEditorComponent: (factory: any) => {
+					setEditorComponent: (factory: EditorFactory) => {
 						if (!factory) return;
 						hostedAt = Date.now() - start;
-						const host = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+						const host = factory(tui, fakeEditorTheme, keybindings);
 						host.handleInput(ENTER);
 					},
-				} as any,
+				} as unknown as ExtensionContext["ui"],
 			} as ExtensionContext;
 			ensureTypingCourtesyTracking(ctx.ui);
 			handler?.("x"); // simulates typing already in progress when the ask begins
@@ -826,7 +845,13 @@ describe("shouldShowSectionSeparator: the generic (mode-agnostic) gating rule fo
 describe("renderSectionSeparator: a dim horizontal rule, pure and generic in its own right", () => {
 	it("spans exactly the given width using only the dash character, wrapped through theme.fg('dim', ...)", () => {
 		const calls: Array<{ color: string; text: string }> = [];
-		const spyTheme = { ...theme, fg: (color: string, text: string) => (calls.push({ color, text }), text) } as Theme;
+		const spyTheme = {
+			...theme,
+			fg: (color: string, text: string) => {
+				calls.push({ color, text });
+				return text;
+			},
+		} as Theme;
 		expect(renderSectionSeparator(spyTheme, 10)).toBe("──────────");
 		expect(calls).toEqual([{ color: "dim", text: "──────────" }]);
 	});
@@ -853,16 +878,16 @@ describe("the section separator, end to end through a real AskComponent (select 
 		rows: number,
 		params: { question: string; context?: string; options: Array<{ title: string }> },
 	): Promise<string[]> {
-		const tui = { terminal: { rows }, requestRender: () => {} };
+		const tui = { terminal: { rows }, requestRender: () => {} } as unknown as TUI;
 		const base = interactiveCtx([]);
 		let component: { render: (w: number) => string[]; handleInput: (data: string) => void } | undefined;
 		const captureCtx = {
 			...base,
 			ui: {
-				...(base as any).ui,
-				setEditorComponent: (factory: any) => {
+				...base.ui,
+				setEditorComponent: (factory: EditorFactory) => {
 					if (!factory) return;
-					component = factory(tui, { borderColor: (s: string) => s, selectList: {} }, keybindings);
+					component = factory(tui, fakeEditorTheme, keybindings);
 				},
 			},
 		} as unknown as ExtensionContext;
