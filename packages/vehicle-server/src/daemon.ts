@@ -26,10 +26,9 @@
  * change.
  */
 import { randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
 import { dirname, join } from "node:path";
-import { Readable } from "node:stream";
+import { startBunListener } from "./daemon/bun-listener.ts";
+import { startNodeListener } from "./daemon/node-listener.ts";
 import type { DaemonLifecycleLog } from "./daemon-lifecycle.ts";
 import type { Logger } from "./logging.ts";
 import {
@@ -43,7 +42,6 @@ import {
 	writeDaemonHandle,
 } from "./paths.ts";
 import type { PushChannel } from "./push-channel.ts";
-import { runWithRpcCallId } from "./rpc-correlation.ts";
 
 const isBun = typeof Bun !== "undefined";
 
@@ -210,141 +208,6 @@ function reclaimDepsWithLogging(options: StartDaemonOptions, logger: Logger): Re
 			injected?.log?.(event);
 		},
 	};
-}
-
-interface ListeningServer {
-	port: number;
-	stop(): Promise<void>;
-}
-
-type DaemonApp = { fetch(request: Request): Promise<Response> };
-
-// Bun.serve's own idleTimeout defaults to 10s and applies per-connection regardless of how long a
-// given request is expected to take -- confirmed live against a real running daemon: a genuine
-// cross-process Node client hitting a real Vehicle SSE invoke() response (vehicle-http-provider.ts's
-// wantsStream) that goes quiet between progress ticks got its socket actively closed by Bun at ~12s,
-// surfacing as Node's "fetch failed" / SocketError "other side closed" (UND_ERR_SOCKET) -- independent
-// of and before any operation-level VehicleLimits.maxTimeoutMs deadline ever got a chance to apply.
-// Bounded (not server.timeout(request, 0)'s literal no-timeout) to the same order of magnitude as this
-// ecosystem's longest-lived longRunning operations today.
-//
-// A SECOND, later-confirmed live incident (papyrus task d0eb81b7, vehicle task 59a22737) hit the
-// exact same failure for a PLAIN (non-SSE) POST /vehicle/invoke: a caller-configured
-// background-free operation that itself takes many seconds to tens of seconds (e.g. Papyrus's
-// tasks.run_gates/tasks.complete actually shelling out to and waiting on a caller's own gate
-// command) sends zero response bytes the whole time it runs -- just as exposed to Bun's 10s idle
-// default as the streaming case, and this route was explicitly NOT covered by the
-// Accept:text/event-stream check alone. VehicleLimits.maxTimeoutMs/an operation's own configured
-// timeout are moot if the raw TCP connection is already dead before either ever gets a chance to
-// apply. Every /vehicle/invoke POST now gets this same generous ceiling regardless of Accept --
-// real per-operation timeout enforcement already happens at the application layer (VehicleLimits,
-// AbortController, a gate's own timeoutMs); Bun's own raw idle timeout has no business being the
-// one that fires first. Every OTHER route (manifest, cancel, the Vehicle Jobs submit/poll/tail/
-// steer/cancel routes, all of which are documented as never blocking) keeps Bun's normal 10s.
-const STREAMING_IDLE_TIMEOUT_S = 3_600;
-const VEHICLE_INVOKE_PATH = "/vehicle/invoke";
-
-function startBunListener(options: StartDaemonOptions, app: DaemonApp, pushPath: string, onRequest: () => void): Promise<ListeningServer> {
-	const server = Bun.serve({
-		hostname: LOOPBACK_HOST,
-		port: 0,
-		fetch: (request, bunServer) => {
-			onRequest();
-			const pathname = new URL(request.url).pathname;
-			if (options.pushChannel && pathname === pushPath) {
-				return options.pushChannel.upgrade(request, bunServer) ?? undefined;
-			}
-			if (pathname === VEHICLE_INVOKE_PATH || (request.headers.get("accept") ?? "").includes("text/event-stream")) {
-				bunServer.timeout(request, STREAMING_IDLE_TIMEOUT_S);
-			}
-			return runWithRpcCallId(randomUUID(), () => app.fetch(request));
-		},
-		// Bun's own types require `websocket` whenever `fetch`'s server parameter
-		// carries per-connection data (SubscriberData here) -- a no-op fallback
-		// when there is no pushChannel is safe: server.upgrade() is never called
-		// in that case, so these handlers are never invoked.
-		websocket: options.pushChannel?.websocketHandlers() ?? { message() {} },
-	});
-	return Promise.resolve({
-		port: server.port ?? 0,
-		stop: () => server.stop(true),
-	});
-}
-
-/** Adapts a Node IncomingMessage into a standard Request -- buildApp()'s contract is already Web-standard/portable, so this is the only translation node:http needs. */
-function nodeRequestToWebRequest(request: IncomingMessage): Request {
-	const headers = new Headers();
-	for (const [key, value] of Object.entries(request.headers)) {
-		if (value === undefined) continue;
-		if (Array.isArray(value)) for (const v of value) headers.append(key, v);
-		else headers.append(key, value);
-	}
-	const method = request.method ?? "GET";
-	const hasBody = method !== "GET" && method !== "HEAD";
-	const url = `http://${request.headers.host ?? LOOPBACK_HOST}${request.url ?? "/"}`;
-	const init: RequestInit & { duplex?: "half" } = { method, headers };
-	if (hasBody) {
-		init.body = Readable.toWeb(request) as unknown as ReadableStream;
-		init.duplex = "half"; // required by Node's fetch implementation whenever a request carries a streamed body
-	}
-	return new Request(url, init);
-}
-
-/** Writes a standard Response back onto a Node ServerResponse. */
-async function writeWebResponseToNode(response: Response, res: ServerResponse): Promise<void> {
-	res.statusCode = response.status;
-	response.headers.forEach((value, key) => {
-		res.setHeader(key, value);
-	});
-	if (!response.body) {
-		res.end();
-		return;
-	}
-	await new Promise<void>((resolve, reject) => {
-		const readable = Readable.fromWeb(response.body as never);
-		readable.pipe(res);
-		readable.on("end", resolve);
-		readable.on("error", reject);
-	});
-}
-
-function startNodeListener(app: DaemonApp, onRequest: () => void): Promise<ListeningServer> {
-	return new Promise((resolve, reject) => {
-		const server = createServer((request, res) => {
-			onRequest();
-			void runWithRpcCallId(randomUUID(), async () => {
-				try {
-					const response = await app.fetch(nodeRequestToWebRequest(request));
-					await writeWebResponseToNode(response, res);
-				} catch (error) {
-					res.statusCode = 500;
-					res.end(error instanceof Error ? error.message : String(error));
-				}
-			});
-		});
-		// Tracked so stop() can force-close lingering keep-alive connections --
-		// server.close() alone only stops accepting new ones and waits
-		// indefinitely for existing ones to end on their own, unlike Bun's own
-		// server.stop(true) force semantics this mirrors.
-		const sockets = new Set<Socket>();
-		server.on("connection", (socket) => {
-			sockets.add(socket);
-			socket.on("close", () => sockets.delete(socket));
-		});
-		server.once("error", reject);
-		server.listen(0, LOOPBACK_HOST, () => {
-			const address = server.address();
-			const port = typeof address === "object" && address ? address.port : 0;
-			resolve({
-				port,
-				stop: () =>
-					new Promise<void>((resolveStop) => {
-						for (const socket of sockets) socket.destroy();
-						server.close(() => resolveStop());
-					}),
-			});
-		});
-	});
 }
 
 export async function startDaemon(options: StartDaemonOptions): Promise<RunningDaemon> {
