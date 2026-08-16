@@ -15,12 +15,17 @@ import { awaitGracefulShutdown } from "../../src/supervisor.ts";
 const logPath = process.argv[2];
 if (!logPath) throw new Error("usage: restartable-unit.ts <log-path>");
 
-appendFileSync(logPath, `start:${JSON.stringify(process.env)}\n`);
-
+// Register the shutdown handler BEFORE logging "start:" -- a test's waitFor() treats that log
+// line as "safe to send SIGTERM now", so the handler must already be armed by the time it's
+// written. Reversed, a real SIGTERM delivered between the two calls falls through to the
+// default disposition (immediate termination, no "sigterm" line, non-zero/signal exit) instead
+// of this handler -- a real, if narrow, race window under CPU contention, not just this test's.
 awaitGracefulShutdown(() => {
 	appendFileSync(logPath, "sigterm\n");
 	process.exit(0);
 });
+
+appendFileSync(logPath, `start:${JSON.stringify(process.env)}\n`);
 
 if (process.env.EXIT_CODE !== undefined) {
 	setTimeout(() => process.exit(Number(process.env.EXIT_CODE)), 30);
