@@ -1,11 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
-	VehicleApprovalAuthority,
-	VehicleApprovalRequest,
 	VehicleBackgroundCapability,
-	VehicleEffect,
 	VehicleEvent,
-	VehicleEventDescriptor,
 	VehicleInvocationOptions,
 	VehicleManifest,
 	VehicleManifestIdentity,
@@ -16,23 +12,15 @@ import type {
 	VehicleSchemaCodec,
 	VehicleSchemaResult,
 } from "@danypops/vehicle-core";
-import {
-	bindVehicleOperation,
-	boundedCauseMessage,
-	boundedValidationDetails,
-	DEFAULT_APPROVAL_EFFECTS,
-	DEFAULT_APPROVAL_TIMEOUT_MS,
-	defineVehicleOperation,
-	defineVehicleSchema,
-	isVehicleError,
-	VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
-	VehicleError,
-	vehicleApprovalRequestedEvent,
-	vehicleApprovalResolvedEvent,
-	vehicleEventTopic,
-} from "@danypops/vehicle-core";
-import { HmacApprovalAuthority, hashApprovalInput } from "./vehicle-approval-authority.js";
+import { boundedCauseMessage, boundedValidationDetails, isVehicleError, VehicleError, vehicleEventTopic } from "@danypops/vehicle-core";
+import { VehicleApprovalPolicyManager } from "./vehicle-registry/approval-policy.js";
+import { VehicleEventPubSub } from "./vehicle-registry/event-pubsub.js";
 import { readPackageVersion } from "./version.js";
+
+export type {
+	VehicleApprovalPolicyOptions,
+	VehicleApprovalPolicyUpdate,
+} from "./vehicle-registry/approval-policy.js";
 
 /** Appends the cause's own message to `prefix` when `expose` is true, else returns `prefix` unchanged. */
 function unexpectedFailureMessage(prefix: string, error: unknown, expose: boolean): string {
@@ -84,13 +72,6 @@ interface Registration {
 	invoke(input: unknown, context: InvocationContext): Promise<unknown>;
 }
 
-interface EventRegistration {
-	readonly owner: string;
-	readonly descriptor: VehicleEventDescriptor;
-	parsePayload(value: unknown, eventId: string): unknown;
-	readonly listeners: Set<(payload: unknown) => void>;
-}
-
 /** A publish(topic, payload) sink -- PushChannel satisfies this structurally with zero import needed; see bridgeVehicleEventsToPushChannel below. */
 export interface VehicleEventPublisher {
 	publish(topic: string, payload: unknown): void;
@@ -99,16 +80,6 @@ export interface VehicleEventPublisher {
 function operationKey(name: string, version: number): string {
 	return `${name}@${version}`;
 }
-
-function eventKey(name: string, version: number): string {
-	return `${name}@${version}`;
-}
-
-/** Bounds a single event's local listener set the same way PushChannel bounds its own connections/topics -- defense in depth against an unbounded subscribe() loop, not a limit any real single-bridge-plus-a-few-widgets usage should ever approach. */
-const MAX_LISTENERS_PER_EVENT = 64;
-
-/** Bounds how many gated invoke()s can be simultaneously awaiting a human/authority decision -- the same bounded-resource discipline as every other Vehicle capacity limit. */
-const MAX_PENDING_APPROVALS = 256;
 
 function parseWithSchema<T>(
 	schema: VehicleSchemaCodec<T>,
@@ -135,28 +106,6 @@ function parseWithSchema<T>(
 		throw new VehicleError(`invalid-${kind}`, `${operationKey(descriptor.name, descriptor.version)} received invalid ${kind}`, {
 			category: kind === "input" ? "validation" : "internal",
 			operationId,
-			details: boundedValidationDetails(result.issues),
-		});
-	}
-	return result.value;
-}
-
-function parseEventPayload<T>(schema: VehicleSchemaCodec<T>, value: unknown, descriptor: VehicleEventDescriptor, eventId: string): T {
-	let result: VehicleSchemaResult<T>;
-	const key = eventKey(descriptor.name, descriptor.version);
-	try {
-		result = schema.safeParse(value);
-	} catch (error) {
-		throw new VehicleError("invalid-payload", `${key} received an invalid event payload`, {
-			category: "validation",
-			operationId: eventId,
-			cause: error,
-		});
-	}
-	if (!result.success) {
-		throw new VehicleError("invalid-payload", `${key} received an invalid event payload`, {
-			category: "validation",
-			operationId: eventId,
 			details: boundedValidationDetails(result.issues),
 		});
 	}
@@ -262,52 +211,6 @@ export interface VehicleBackgroundResolution {
 	run(context: VehicleOperationContext<unknown>): Promise<unknown>;
 }
 
-interface ApprovalPolicy {
-	readonly requireApprovalForEffects: ReadonlySet<VehicleEffect>;
-	readonly authority: VehicleApprovalAuthority;
-	readonly timeoutMs: number;
-	/** See {@link VehicleApprovalPolicyOptions.enabled}. */
-	readonly enabled: boolean;
-}
-
-export interface VehicleApprovalPolicyOptions {
-	/** Defaults to DEFAULT_APPROVAL_EFFECTS ([destructive, open-world]) -- the same set vehicle-client-pi historically hardcoded client-side. */
-	readonly requireApprovalForEffects?: readonly VehicleEffect[];
-	/** Defaults to a fresh HmacApprovalAuthority with a random per-instance secret. */
-	readonly authority?: VehicleApprovalAuthority;
-	/** How long a request stays resolvable before it lapses and must be re-requested. Defaults to DEFAULT_APPROVAL_TIMEOUT_MS. */
-	readonly timeoutMs?: number;
-	/**
-	 * Whether the gate is actually active right now. Defaults to true (today's exact
-	 * behavior: configuring approvals means gating is on). Set false to register the
-	 * approval machinery (events, vehicle.approval.resolve) without enabling it yet, then
-	 * flip it live later with updateApprovalPolicy({ enabled }) -- e.g. a consumer whose own
-	 * approval preference is itself a live, user-toggleable setting (not a fixed
-	 * per-deployment constant decided at process-start time) can mirror that setting here
-	 * without recreating the registry.
-	 */
-	readonly enabled?: boolean;
-}
-
-/** Patch accepted by {@link VehicleRegistry.updateApprovalPolicy} -- every field optional, only what's provided changes. */
-export interface VehicleApprovalPolicyUpdate {
-	readonly requireApprovalForEffects?: readonly VehicleEffect[];
-	readonly enabled?: boolean;
-}
-
-interface ApprovalResolveInput {
-	readonly requestId: string;
-	readonly decision: "granted" | "denied";
-	readonly decidedBy?: string;
-	readonly comment?: string;
-}
-
-interface ApprovalResolveOutput {
-	readonly requestId: string;
-	readonly decision: "granted" | "denied";
-	readonly capability?: string;
-}
-
 export interface VehiclePackageManifestIdentity extends Omit<VehicleManifestIdentity, "version"> {
 	readonly packageJsonUrl: URL;
 	readonly version?: never;
@@ -333,6 +236,11 @@ function resolveManifestIdentity(identity: VehicleRegistryIdentity): VehicleMani
  * permanent once registered, only whether `manifest()` reports it available
  * and whether `invoke()` accepts it.
  *
+ * Event pub/sub (see ./vehicle-registry/event-pubsub.ts) and the approval-gating workflow (see
+ * ./vehicle-registry/approval-policy.ts) are injected collaborators rather than implemented
+ * directly on this class -- both are genuinely separable responsibilities that only need a
+ * narrow callback back into register()/emit(), not the whole registry.
+ *
  * Kept separate from `./http`'s `createVehicleHttpApp()` (which exposes a
  * registry over `GET /vehicle/manifest`, `POST /vehicle/invoke`, and
  * `POST /vehicle/cancel`) on purpose: a consumer that only builds/tests a
@@ -342,10 +250,8 @@ export class VehicleRegistry {
 	private readonly registrations = new Map<string, Registration>();
 	private readonly availability = new Map<string, AvailabilityState>();
 	private readonly identity: VehicleManifestIdentity;
-	private readonly events = new Map<string, EventRegistration>();
-	private readonly wildcardListeners = new Set<(name: string, version: number, payload: unknown) => void>();
-	private approvalPolicy?: ApprovalPolicy;
-	private readonly pendingApprovals = new Map<string, VehicleApprovalRequest>();
+	private readonly eventPubSub = new VehicleEventPubSub();
+	private approvalManager?: VehicleApprovalPolicyManager;
 	/** Default false: an unexpected handler exception's message could contain a credential or internal detail. See setExposeHandlerFailureDetails(). */
 	private exposeHandlerFailureDetails = false;
 
@@ -373,151 +279,23 @@ export class VehicleRegistry {
 		this.exposeHandlerFailureDetails = enabled;
 	}
 
-	/**
-	 * Opt-in only -- never called automatically, so a Vehicle that never
-	 * configures approvals keeps today's exact manifest shape and invoke()
-	 * behavior (no gating at all). Registers the two built-in approval
-	 * events and the vehicle.approval.resolve operation at call time (not
-	 * construction), so they only ever appear in a manifest for a Vehicle
-	 * that actually uses them.
-	 */
-	configureApprovals(options: VehicleApprovalPolicyOptions = {}): void {
-		if (this.approvalPolicy) throw new Error("Vehicle approval policy is already configured");
-		this.approvalPolicy = {
-			requireApprovalForEffects: new Set(options.requireApprovalForEffects ?? DEFAULT_APPROVAL_EFFECTS),
-			authority: options.authority ?? new HmacApprovalAuthority(),
-			timeoutMs: options.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
-			enabled: options.enabled ?? true,
-		};
-		this.registerEvent("vehicle-registry", vehicleApprovalRequestedEvent);
-		this.registerEvent("vehicle-registry", vehicleApprovalResolvedEvent);
-		this.registerApprovalResolveOperation();
+	/** See VehicleApprovalPolicyManager.configure -- delegates entirely, injecting this
+	 * registry's own register()/registerEvent()/emit() as the manager's only real coupling
+	 * back to the rest of the registry. */
+	configureApprovals(options: Parameters<VehicleApprovalPolicyManager["configure"]>[0] = {}): void {
+		if (this.approvalManager) throw new Error("Vehicle approval policy is already configured");
+		this.approvalManager = new VehicleApprovalPolicyManager({
+			register: (owner, binding) => this.register(owner, binding),
+			registerEvent: (owner, event) => this.registerEvent(owner, event),
+			emit: (name, version, payload) => this.emit(name, version, payload),
+		});
+		this.approvalManager.configure(options);
 	}
 
-	/**
-	 * Live update to an already-configured approval policy -- unlike configureApprovals()
-	 * itself (a one-shot: it also registers events/the resolve operation, which can't be
-	 * registered twice), this only ever touches the mutable policy fields and can be called
-	 * any number of times. An already-pending approval request (recorded under whatever
-	 * policy existed when enforceApprovalGate() first saw it) is unaffected -- it resolves
-	 * or expires under the policy in effect at that time, the same way it already would if
-	 * nothing here ever changed.
-	 */
-	updateApprovalPolicy(patch: VehicleApprovalPolicyUpdate): void {
-		if (!this.approvalPolicy) throw new Error("Vehicle approval policy is not configured -- call configureApprovals() first");
-		this.approvalPolicy = {
-			...this.approvalPolicy,
-			...(patch.requireApprovalForEffects ? { requireApprovalForEffects: new Set(patch.requireApprovalForEffects) } : {}),
-			...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
-		};
-	}
-
-	private registerApprovalResolveOperation(): void {
-		const inputSchema = defineVehicleSchema<ApprovalResolveInput>({
-			jsonSchema: {
-				type: "object",
-				properties: {
-					requestId: { type: "string" },
-					decision: { type: "string", enum: ["granted", "denied"] },
-					decidedBy: { type: "string" },
-					comment: { type: "string", maxLength: 2_000 },
-				},
-				required: ["requestId", "decision"],
-				additionalProperties: false,
-			},
-			safeParse(value) {
-				if (typeof value !== "object" || value === null) {
-					return { success: false, issues: [{ path: [], message: "input must be an object" }] };
-				}
-				const row = value as Record<string, unknown>;
-				if (typeof row.requestId !== "string" || !row.requestId.trim()) {
-					return { success: false, issues: [{ path: ["requestId"], message: "requestId must be a non-empty string" }] };
-				}
-				if (row.decision !== "granted" && row.decision !== "denied") {
-					return { success: false, issues: [{ path: ["decision"], message: "decision must be granted or denied" }] };
-				}
-				if (row.decidedBy !== undefined && typeof row.decidedBy !== "string") {
-					return { success: false, issues: [{ path: ["decidedBy"], message: "decidedBy must be a string" }] };
-				}
-				if (row.comment !== undefined && (typeof row.comment !== "string" || row.comment.length > 2_000)) {
-					return { success: false, issues: [{ path: ["comment"], message: "comment must be a string of at most 2000 characters" }] };
-				}
-				return {
-					success: true,
-					value: {
-						requestId: row.requestId,
-						decision: row.decision,
-						...(row.decidedBy !== undefined ? { decidedBy: row.decidedBy } : {}),
-						...(row.comment !== undefined ? { comment: row.comment } : {}),
-					},
-				};
-			},
-		});
-		const outputSchema = defineVehicleSchema<ApprovalResolveOutput>({
-			jsonSchema: {
-				type: "object",
-				properties: { requestId: { type: "string" }, decision: { type: "string" }, capability: { type: "string" } },
-				required: ["requestId", "decision"],
-				additionalProperties: false,
-			},
-			safeParse(value) {
-				const row = value as { requestId?: unknown; decision?: unknown; capability?: unknown };
-				if (typeof row?.requestId !== "string" || typeof row.decision !== "string") {
-					return { success: false, issues: [{ path: [], message: "invalid approval resolve output" }] };
-				}
-				return {
-					success: true,
-					value: {
-						requestId: row.requestId,
-						decision: row.decision as "granted" | "denied",
-						...(typeof row.capability === "string" ? { capability: row.capability } : {}),
-					},
-				};
-			},
-		});
-
-		const ResolveOperation = defineVehicleOperation({
-			name: VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
-			version: 1,
-			description: "Grants or denies a pending Vehicle approval request, minting a real capability on grant.",
-			input: inputSchema,
-			output: outputSchema,
-			permissions: ["vehicle:approvals:resolve"],
-			effect: "local-write",
-			idempotency: { mode: "unsafe" },
-			limits: { defaultTimeoutMs: 5_000, maxTimeoutMs: 5_000, maxRequestBytes: 4_096, maxResponseBytes: 4_096 },
-		});
-
-		this.register(
-			"vehicle-registry",
-			bindVehicleOperation(ResolveOperation, () => async (context) => this.resolveApprovalRequest(context.input)),
-		);
-	}
-
-	private resolveApprovalRequest(input: ApprovalResolveInput): ApprovalResolveOutput {
-		this.prunePendingApprovals();
-		const request = this.pendingApprovals.get(input.requestId);
-		if (!request) {
-			throw new VehicleError("not-found", `No pending Vehicle approval request ${input.requestId}`, { category: "not_found" });
-		}
-		this.pendingApprovals.delete(input.requestId);
-
-		const capability = input.decision === "granted" ? this.approvalPolicy?.authority.mint(request) : undefined;
-		this.emit(vehicleApprovalResolvedEvent.descriptor.name, vehicleApprovalResolvedEvent.descriptor.version, {
-			requestId: input.requestId,
-			decision: input.decision,
-			decidedAt: Date.now(),
-			...(input.decidedBy ? { decidedBy: input.decidedBy } : {}),
-			...(input.comment ? { comment: input.comment } : {}),
-		});
-		return { requestId: input.requestId, decision: input.decision, ...(capability ? { capability } : {}) };
-	}
-
-	private prunePendingApprovals(): void {
-		const now = Date.now();
-		for (const [requestId, request] of this.pendingApprovals) {
-			if (request.expiresAt <= now) this.pendingApprovals.delete(requestId);
-		}
+	/** See VehicleApprovalPolicyManager.update. */
+	updateApprovalPolicy(patch: Parameters<VehicleApprovalPolicyManager["update"]>[0]): void {
+		if (!this.approvalManager) throw new Error("Vehicle approval policy is not configured -- call configureApprovals() first");
+		this.approvalManager.update(patch);
 	}
 
 	/**
@@ -525,25 +303,15 @@ export class VehicleRegistry {
 	 * approval" -- consulted by both enforceApprovalGate() (to decide whether to actually
 	 * gate) and manifest() (to report the live answer as VehicleManifestOperation's own
 	 * approvalRequired field, so a client re-fetching the manifest sees a policy change
-	 * with no separate sync mechanism needed). False whenever the registry's approval
-	 * policy was never configured, or was configured but is currently disabled
-	 * (VehicleApprovalPolicyOptions.enabled / updateApprovalPolicy). Otherwise: the
-	 * operation's own requiresApproval override when it set one, else the effect-derived
-	 * default against the policy's requireApprovalForEffects set.
+	 * with no separate sync mechanism needed). False whenever approvals were never
+	 * configured at all -- see VehicleApprovalPolicyManager.resolvesToApprovalRequired for
+	 * the rest of the logic once they are.
 	 */
 	private resolvesToApprovalRequired(descriptor: VehicleOperationDescriptor): boolean {
-		const policy = this.approvalPolicy;
-		if (!policy?.enabled) return false;
-		return descriptor.requiresApproval ?? policy.requireApprovalForEffects.has(descriptor.effect);
+		return this.approvalManager?.resolvesToApprovalRequired(descriptor) ?? false;
 	}
 
-	/**
-	 * No-op unless resolvesToApprovalRequired() says this operation is currently gated. A
-	 * presented capability is verified for real (operation+input+expiry+single-use) rather
-	 * than merely checked for non-emptiness; an absent one records a durable, retryable
-	 * approval.requested event before failing, so the caller always has a path forward (see
-	 * vehicle.approval.resolve) instead of a dead end.
-	 */
+	/** No-op when approvals were never configured -- see VehicleApprovalPolicyManager.enforceGate. */
 	private enforceApprovalGate(
 		key: string,
 		descriptor: VehicleOperationDescriptor,
@@ -552,45 +320,7 @@ export class VehicleRegistry {
 		operationId: string,
 		presentedCapability: string | undefined,
 	): void {
-		if (!this.resolvesToApprovalRequired(descriptor)) return;
-		const policy = this.approvalPolicy as ApprovalPolicy;
-		const { name, version, effect } = descriptor;
-		const inputHash = hashApprovalInput(input);
-
-		if (presentedCapability) {
-			if (policy.authority.verify(presentedCapability, name, version, inputHash)) return;
-			throw new VehicleError("approval-capability-invalid", `${key} rejected the presented approval capability`, {
-				category: "authorization",
-				operationId,
-				retryable: false,
-			});
-		}
-
-		this.prunePendingApprovals();
-		if (this.pendingApprovals.size >= MAX_PENDING_APPROVALS) {
-			throw new VehicleError("capacity-exceeded", "Too many pending Vehicle approval requests", { category: "capacity", operationId });
-		}
-		const requestId = randomUUID();
-		const requestedAt = Date.now();
-		const expiresAt = requestedAt + policy.timeoutMs;
-		const request: VehicleApprovalRequest = {
-			requestId,
-			operationName: name,
-			operationVersion: version,
-			effect,
-			principal,
-			requestedAt,
-			expiresAt,
-			inputHash,
-		};
-		this.pendingApprovals.set(requestId, request);
-		this.emit(vehicleApprovalRequestedEvent.descriptor.name, vehicleApprovalRequestedEvent.descriptor.version, request);
-		throw new VehicleError("approval-required", `${key} requires approval before it can run`, {
-			category: "authorization",
-			operationId,
-			retryable: true,
-			details: { requestId, expiresAt },
-		});
+		this.approvalManager?.enforceGate(key, descriptor, principal, input, operationId, presentedCapability);
 	}
 
 	register<Input, Output>(owner: string, binding: VehicleOperationBinding<Input, Output>): void {
@@ -622,80 +352,25 @@ export class VehicleRegistry {
 		return this.registrations.get(operationKey(name, version))?.owner;
 	}
 
-	/** Declares a named, schema'd event type a handler can later emit() -- the typed replacement for a raw PushChannel.publish() call with a hand-invented topic string. */
+	/** Declares a named, schema'd event type a handler can later emit() -- delegates to the
+	 * injected VehicleEventPubSub collaborator. */
 	registerEvent<Payload>(owner: string, event: VehicleEvent<Payload>): void {
-		if (!owner.trim()) throw new Error("Vehicle event owner must not be empty");
-		const { descriptor } = event;
-		const key = eventKey(descriptor.name, descriptor.version);
-		const existing = this.events.get(key);
-		if (existing) {
-			throw new VehicleError("duplicate-owner", `${key} is already owned by ${existing.owner}; ${owner} cannot also register it`, {
-				category: "conflict",
-			});
-		}
-		this.events.set(key, {
-			owner,
-			descriptor,
-			parsePayload: (value, eventId) => parseEventPayload(event.payload, value, descriptor, eventId),
-			listeners: new Set(),
-		});
+		this.eventPubSub.registerEvent(owner, event);
 	}
 
-	/**
-	 * Validates payload against the declared event's own schema and byte-size
-	 * limit (same bounded-resource discipline invoke() applies to a
-	 * request/response), then notifies every current local listener --
-	 * both a direct subscribeLocal() caller (LocalVehicleClient) and any
-	 * wildcard bridge (subscribeAll(), e.g. bridgeVehicleEventsToPushChannel
-	 * for remote delivery). A throwing listener is swallowed so one bad
-	 * subscriber can never break emit() for every other subscriber or the
-	 * handler that's emitting.
-	 */
+	/** Delegates to the injected VehicleEventPubSub collaborator -- see its own doc comment. */
 	emit(name: string, version: number, payload: unknown): void {
-		const key = eventKey(name, version);
-		const registration = this.events.get(key);
-		if (!registration) {
-			throw new VehicleError("not-found", `No Vehicle event is registered for ${key}`, { category: "not_found" });
-		}
-		const eventId = randomUUID();
-		const parsed = registration.parsePayload(payload, eventId);
-		enforcePayloadSize(parsed, registration.descriptor.maxPayloadBytes, "response", key, eventId);
-		for (const listener of registration.listeners) {
-			try {
-				listener(parsed);
-			} catch {
-				// Best-effort fan-out -- see the doc comment above.
-			}
-		}
-		for (const listener of this.wildcardListeners) {
-			try {
-				listener(name, version, parsed);
-			} catch {
-				// Best-effort fan-out -- see the doc comment above.
-			}
-		}
+		this.eventPubSub.emit(name, version, payload);
 	}
 
-	/** In-process subscription to one declared event, scoped to a caller that already knows its exact name/version -- what LocalVehicleClient.subscribe() is built on. Throws not-found the same way invoke() does for an unregistered operation, rather than silently listening for something that can never fire. */
+	/** Delegates to the injected VehicleEventPubSub collaborator -- see its own doc comment. */
 	subscribeLocal(name: string, version: number, listener: (payload: unknown) => void): () => void {
-		const key = eventKey(name, version);
-		const registration = this.events.get(key);
-		if (!registration) {
-			throw new VehicleError("not-found", `No Vehicle event is registered for ${key}`, { category: "not_found" });
-		}
-		if (registration.listeners.size >= MAX_LISTENERS_PER_EVENT) {
-			throw new VehicleError("capacity-exceeded", `${key} already has the maximum of ${MAX_LISTENERS_PER_EVENT} local listeners`, {
-				category: "capacity",
-			});
-		}
-		registration.listeners.add(listener);
-		return () => registration.listeners.delete(listener);
+		return this.eventPubSub.subscribeLocal(name, version, listener);
 	}
 
-	/** Every current and future emit(), regardless of event name -- the seam bridgeVehicleEventsToPushChannel uses so a bridge set up once forwards every event a provider declares, including ones registered after the bridge itself. */
+	/** Delegates to the injected VehicleEventPubSub collaborator -- see its own doc comment. */
 	subscribeAll(listener: (name: string, version: number, payload: unknown) => void): () => void {
-		this.wildcardListeners.add(listener);
-		return () => this.wildcardListeners.delete(listener);
+		return this.eventPubSub.subscribeAll(listener);
 	}
 
 	/**
@@ -727,7 +402,7 @@ export class VehicleRegistry {
 					approvalRequired: this.resolvesToApprovalRequired(registration.descriptor),
 				};
 			}),
-			events: [...this.events.values()].map((registration) => registration.descriptor),
+			events: this.eventPubSub.descriptors(),
 		};
 	}
 
