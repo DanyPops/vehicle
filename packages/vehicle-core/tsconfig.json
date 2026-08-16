@@ -9,6 +9,9 @@
 		"noUncheckedIndexedAccess": true,
 		"exactOptionalPropertyTypes": true,
 		"noPropertyAccessFromIndexSignature": true,
+		"noFallthroughCasesInSwitch": true,
+		"forceConsistentCasingInFileNames": true,
+		"noImplicitOverride": true,
 		"skipLibCheck": true,
 		"allowImportingTsExtensions": true,
 		"noEmit": true
