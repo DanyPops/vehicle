@@ -145,6 +145,40 @@ export function addedRequiredPropertyOwners(diff) {
 	return propertyOwners(lines, "+", true);
 }
 
+/** Every exported declaration name introduced by this diff -- an owner in this set was
+ * introduced in the SAME diff as any required property found on it, so no existing consumer
+ * could ever have depended on that property's absence. */
+export function addedDeclarationNames(diff) {
+	const lines = diff.split("\n").filter((line) => !line.startsWith("---") && !line.startsWith("+++"));
+	return declarationNames(lines, "+");
+}
+
+/**
+ * main()'s own public-surface filter, extracted so a test exercises the exact code path that
+ * runs in CI instead of a hand-duplicated copy of its logic (the gap that let a brand-new
+ * exported interface's own required field slip through as an unreviewed false positive when
+ * releasing vehicle-server's useExecutionMiddleware() addition: the interface didn't exist
+ * before this diff, so no consumer could possibly have depended on `id`'s absence, but nothing
+ * excluded a property whose only owner was itself newly introduced).
+ *
+ * A candidate whose every owner was introduced in this same diff is never breaking, regardless
+ * of whether dist/ has been built yet -- that judgment only needs the diff itself. A candidate
+ * with at least one pre-existing owner falls back to the existing dist-based public-surface
+ * check (conservative, i.e. still flagged, when dist/ isn't built).
+ */
+export function filterAddedRequiredProperties(candidates, diff, publicDts) {
+	const owners = addedRequiredPropertyOwners(diff);
+	const addedTypes = addedDeclarationNames(diff);
+	return candidates.addedRequiredProperties.filter((name) => {
+		const ownerTypes = owners.get(name);
+		if (!ownerTypes || ownerTypes.size === 0) return true;
+		const preExistingOwners = [...ownerTypes].filter((owner) => owner && !addedTypes.has(owner));
+		if (preExistingOwners.length === 0) return false;
+		if (!publicDts) return true;
+		return preExistingOwners.some((owner) => publicDts.includes(owner));
+	});
+}
+
 export function findBreakingTypeCandidates(diff) {
 	const lines = diff.split("\n").filter((line) => !line.startsWith("---") && !line.startsWith("+++"));
 	const removedDeclarations = declarationNames(lines, "-");
@@ -194,16 +228,7 @@ function main() {
 	const diff = git(["diff", "--unified=0", `${previousTag}..HEAD`, "--", `${packageDirectory}/src`]);
 	const candidates = findBreakingTypeCandidates(diff);
 	const publicDts = publicEntryDtsText(packageDirectory);
-	if (publicDts) {
-		const owners = addedRequiredPropertyOwners(diff);
-		candidates.addedRequiredProperties = candidates.addedRequiredProperties.filter((name) => {
-			const ownerTypes = owners.get(name);
-			// No recorded owner (shouldn't happen -- addedRequiredProperties came from the exact
-			// same scan) stays conservative and keeps the candidate flagged rather than dropping it.
-			if (!ownerTypes || ownerTypes.size === 0) return true;
-			return [...ownerTypes].some((owner) => owner && publicDts.includes(owner));
-		});
-	}
+	candidates.addedRequiredProperties = filterAddedRequiredProperties(candidates, diff, publicDts);
 	enforceReleaseDiscipline({ previousVersion, currentVersion, candidates, releaseMessage: git(["log", "-1", "--format=%B"]) });
 }
 

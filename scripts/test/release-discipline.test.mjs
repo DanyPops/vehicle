@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
 	addedRequiredPropertyOwners,
 	enforceReleaseDiscipline,
+	filterAddedRequiredProperties,
 	findBreakingTypeCandidates,
 	publicEntryDtsText,
 } from "../check-release-discipline.mjs";
@@ -182,14 +183,8 @@ diff --git a/src/daemon/listener.ts b/src/daemon/listener.ts
 		const candidates = findBreakingTypeCandidates(diff);
 		expect(candidates.addedRequiredProperties).toEqual(["port"]);
 
-		const owners = addedRequiredPropertyOwners(diff);
 		const publicDts = "export interface RunningDaemon { readonly port: number; readonly pid: number }";
-		const filtered = candidates.addedRequiredProperties.filter((name) => {
-			const ownerTypes = owners.get(name);
-			if (!ownerTypes || ownerTypes.size === 0) return true;
-			return [...ownerTypes].some((owner) => owner && publicDts.includes(owner));
-		});
-		expect(filtered).toEqual([]);
+		expect(filterAddedRequiredProperties(candidates, diff, publicDts)).toEqual([]);
 	});
 
 	it("a required property added to an interface that DOES reach the package's own published .d.ts is still flagged", () => {
@@ -199,14 +194,40 @@ diff --git a/src/daemon.ts b/src/daemon.ts
 +	readonly instanceId: string;
 `;
 		const candidates = findBreakingTypeCandidates(diff);
-		const owners = addedRequiredPropertyOwners(diff);
 		const publicDts = "export interface StartDaemonOptions { readonly port: number }";
-		const filtered = candidates.addedRequiredProperties.filter((name) => {
-			const ownerTypes = owners.get(name);
-			if (!ownerTypes || ownerTypes.size === 0) return true;
-			return [...ownerTypes].some((owner) => owner && publicDts.includes(owner));
-		});
-		expect(filtered).toEqual(["instanceId"]);
+		expect(filterAddedRequiredProperties(candidates, diff, publicDts)).toEqual(["instanceId"]);
+	});
+
+	it("a required property on a BRAND NEW exported interface is never flagged -- no existing consumer could depend on a type that didn't exist yet", () => {
+		// The real vehicle-server 0.24.4 false positive: VehicleExecutionMiddleware is introduced
+		// whole in this diff; its own required `id` field cannot break anyone.
+		const diff = `
+diff --git a/src/vehicle-registry.ts b/src/vehicle-registry.ts
++export interface VehicleExecutionMiddleware {
++	readonly id: string;
++}
+`;
+		const candidates = findBreakingTypeCandidates(diff);
+		expect(candidates.addedRequiredProperties).toEqual(["id"]);
+
+		const publicDts = "export interface VehicleExecutionMiddleware { readonly id: string }";
+		expect(filterAddedRequiredProperties(candidates, diff, publicDts)).toEqual([]);
+		// Even conservatively, with no dist/ built yet at all.
+		expect(filterAddedRequiredProperties(candidates, diff, "")).toEqual([]);
+	});
+
+	it("a required property with BOTH a brand-new and a pre-existing owner still evaluates the pre-existing one", () => {
+		const diff = `
+diff --git a/src/x.ts b/src/x.ts
++export interface BrandNew {
++	id: string;
++}
+ export interface StartDaemonOptions {
++	id: string;
+`;
+		const candidates = findBreakingTypeCandidates(diff);
+		const publicDts = "export interface StartDaemonOptions { readonly port: number }";
+		expect(filterAddedRequiredProperties(candidates, diff, publicDts)).toEqual(["id"]);
 	});
 
 	it("requires a major bump after 1.0", () => {
