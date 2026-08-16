@@ -51,7 +51,11 @@ export function defaultManifestPath(
 	home: string = homedir(),
 ): string {
 	if (platform === "darwin") return join(home, "Library", "Application Support", "armada", "armada.json");
+	// TS's own noPropertyAccessFromIndexSignature (tsconfig.json) requires bracket notation here --
+	// biome's useLiteralKeys disagrees, since NodeJS.ProcessEnv's known keys aren't literal properties.
+	// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
 	if (platform === "win32") return win32.join(env["APPDATA"] ?? win32.join(home, "AppData", "Roaming"), "Armada", "armada.json");
+	// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
 	return join(env["XDG_CONFIG_HOME"] ?? join(home, ".config"), "armada", "armada.json");
 }
 

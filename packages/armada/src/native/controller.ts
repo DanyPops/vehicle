@@ -144,9 +144,13 @@ function lifecycleArguments(
 
 export function defaultDescriptorRoot(kind: NativeManagerKind, env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
 	if (kind === "launchd") return join(home, "Library", "LaunchAgents");
+	// TS's own noPropertyAccessFromIndexSignature (tsconfig.json) requires bracket notation here --
+	// biome's useLiteralKeys disagrees, since NodeJS.ProcessEnv's known keys aren't literal properties.
 	if (kind === "windows-task-scheduler") {
+		// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
 		return win32.join(env["APPDATA"] ?? win32.join(home, "AppData", "Roaming"), "Armada", "descriptors");
 	}
+	// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
 	return join(env["XDG_CONFIG_HOME"] ?? join(home, ".config"), "systemd", "user");
 }
 
