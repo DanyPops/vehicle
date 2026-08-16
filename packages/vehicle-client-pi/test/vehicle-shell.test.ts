@@ -379,7 +379,10 @@ describe("formatOperationTypeLine", () => {
 	});
 });
 
-describe("VehicleShellTtlTracker", () => {
+// VehicleShellTtlTracker itself is deprecated (superseded by WeightedLruTracker -- see
+// vehicle-shell-weighted-lru.test.ts for the real shell runtime's own coverage) but still
+// exported and fully functional as a standalone utility; these tests keep proving that.
+describe("VehicleShellTtlTracker (deprecated standalone utility, no longer wired into the shell's own runtime)", () => {
 	it("tracks a seeded tool as active until its TTL decays to zero", () => {
 		const tracker = new VehicleShellTtlTracker();
 		tracker.seed("tasks_create", 2);

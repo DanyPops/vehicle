@@ -337,18 +337,27 @@ deliberately mirroring the real Unix man-page tooling family (`man`,
   it's unambiguous (`type -a` parity: more than one vehicle providing the same
   bare operation name refuses to guess, listing every real candidate instead).
 - **`tools_type`** (~ `type`) -- read-only resolution status for one or more
-  names, without activating anything or touching any TTL: `active` (callable
-  now, with its live tool name and remaining turns before it decays),
-  `dormant` (known, `tools_man` would activate it), `blocked` (known but
-  currently unavailable or blocked by safety policy), `unreachable` (a
-  namespaced name whose vehicle used to be known to this process but produces
-  nothing live right now), `unknown`, or `ambiguous`.
+  names, without activating or evicting anything: `active` (callable now, with
+  its live tool name, its own estimated context weight, and whether it's
+  currently the least-protected entry -- likely first evicted under context
+  pressure), `dormant` (known, `tools_man` would activate it), `blocked`
+  (known but currently unavailable or blocked by safety policy), `unreachable`
+  (a namespaced name whose vehicle used to be known to this process but
+  produces nothing live right now), `unknown`, or `ambiguous`.
 
 Everything not explicitly declared `coreOperations` boots *inactive* --
 reachable via `tools_list`/`tools_man` but invisible to the model's tool-calling
-surface until actually activated, each with its own decaying TTL
-(`coreTtlTurns`/`discoveredTtlTurns`) so a long-idle operation doesn't stay
-active forever. `tools_list` itself can optionally cache its own aggregated
+surface until actually activated. Active tools are managed by a weighted-LRU
+over a stretchable token budget (a bounded fraction of the model's own
+remaining context room, from `ctx.getContextUsage()`) rather than a fixed turn
+count: each tool's own estimated context cost (name + description + schema
+size) dampens how much priority credit it earns per call, so a heavy,
+rarely-used tool naturally cycles out under pressure before a light,
+frequently-used one -- and nothing is evicted at all unless the active set's
+total weight actually exceeds the current budget. The old flat
+`coreTtlTurns`/`discoveredTtlTurns` fields are deprecated (still honored,
+scaling the budget bounds proportionally) in favor of a `budget` option group.
+`tools_list` itself can optionally cache its own aggregated
 cross-vehicle discovery for `aggregateCacheTtlMs` milliseconds (default `0` --
 always a live fetch); `tools_man`/`tools_type` never read that cache regardless
 of the setting, since activation and status-checking must always see live

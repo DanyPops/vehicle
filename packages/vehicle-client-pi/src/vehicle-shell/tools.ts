@@ -212,7 +212,7 @@ export function createToolsTypeTool(
 	return {
 		name: typeToolName,
 		label: "Tool Type",
-		description: `Reports how each name currently resolves -- "active" (callable right now, with the real toolName and turns remaining before it decays), "dormant" (known, needs ${manToolName} to activate), "blocked" (known but currently unavailable or blocked by safety policy), "unreachable" (a namespaced name whose vehicle used to be known but produces nothing live right now), "ambiguous" (a bare name matching more than one vehicle -- use one of the listed full names), or "unknown" (no such operation anywhere currently discoverable). Read-only -- unlike ${manToolName}, never activates anything or extends any TTL, so calling this never changes what's callable.`,
+		description: `Reports how each name currently resolves -- "active" (callable right now, with the real toolName, its own estimated context weight in tokens, and whether it's currently the least-protected active tool -- likely first evicted under context pressure), "dormant" (known, needs ${manToolName} to activate), "blocked" (known but currently unavailable or blocked by safety policy), "unreachable" (a namespaced name whose vehicle used to be known but produces nothing live right now), "ambiguous" (a bare name matching more than one vehicle -- use one of the listed full names), or "unknown" (no such operation anywhere currently discoverable). Read-only -- unlike ${manToolName}, never activates or evicts anything, so calling this never changes what's callable.`,
 		parameters: Type.Object({
 			names: Type.Array(Type.String(), {
 				description: 'Exact or bare operation name(s), e.g. "papyrus:tasks.create" or "tasks.create".',

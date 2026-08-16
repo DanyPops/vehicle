@@ -15,12 +15,17 @@ import type { WeightedLruTracker } from "./weighted-lru.js";
 export const DEFAULT_LIST_TOOL_NAME = "tools_list";
 export const DEFAULT_MAN_TOOL_NAME = "tools_man";
 export const DEFAULT_TYPE_TOOL_NAME = "tools_type";
-/** Illustrative starting points, not load-bearing constants -- tune from real usage (see the
- * Vehicle Shell design discussion this implements). Tuned up from an initial 10/3: a discovered
- * tool decaying in 3 unused turns proved too aggressive in practice -- a normal multi-step
- * investigation (read something, reason about it, call something else, come back) routinely
- * spans more than 3 turns between two calls to the same tool, forcing a needless repeat
- * tools_man round-trip on a tool the agent had already activated moments earlier. */
+/**
+ * No longer literally interpreted as a turn count (see VehicleShellOptions.coreTtlTurns's own
+ * @deprecated doc comment) -- these two constants now serve only as the baseline
+ * `coreTtlTurns + discoveredTtlTurns` sum that bootstrap.ts's legacyTtlBudgetScaleFactor compares
+ * a deprecated-field consumer's own values against, so their sum staying at 28 is load-bearing for
+ * that mapping even though each value's own original "turns before decay" meaning is gone.
+ * Historical values, kept for the scale-factor baseline: tuned up from an initial 10/3 when this
+ * was still a real turn count -- a discovered tool decaying in 3 unused turns proved too
+ * aggressive in practice, forcing a needless repeat tools_man round-trip on a tool the agent had
+ * already activated moments earlier.
+ */
 export const DEFAULT_CORE_TTL_TURNS = 20;
 export const DEFAULT_DISCOVERED_TTL_TURNS = 8;
 
@@ -156,9 +161,10 @@ export interface VehicleShellHandle {
  * vehicle's own tools never clobbers any other vehicle's entries sharing this same handle. A core
  * operation that just became available and isn't currently tracked is (re-)seeded fresh, matching
  * what initial registration would have done for it -- every other tracked tool (core or discovered,
- * this vehicle's own or another's) is left exactly as the decay cycle already has it; "core" only
- * ever means "seeded generously," never "exempt from decay" (see desiredShellActiveNames, which
- * reads tracker membership alone, not coreOperationNames, for who's currently active).
+ * this vehicle's own or another's) is left exactly as the weighted-LRU tracker already has it;
+ * "core" only ever means "seeded eagerly, at registration time," never "exempt from eviction" (see
+ * desiredShellActiveNames, which reads tracker membership alone, not coreOperationNames, for who's
+ * currently active).
  */
 export function refreshVehicleShellManagedTools(handle: VehicleShellHandle, incoming: readonly VehicleShellManagedTool[]): void {
 	const incomingToolNames = new Set(incoming.map((tool) => tool.toolName));
@@ -181,9 +187,9 @@ function allManagedNames(handle: VehicleShellHandle): string[] {
 /**
  * The active set a shell handle wants right now: its three meta-tools (always active), every
  * vehicle's core operations that are currently available and unblocked, and whatever tools_man has
- * activated that hasn't yet decayed out -- re-filtered against current availability so a tool that
- * became unavailable/blocked since it was seeded doesn't stay active just because its TTL hasn't
- * hit zero.
+ * activated that hasn't yet been evicted under context pressure -- re-filtered against current
+ * availability so a tool that became unavailable/blocked since it was seeded doesn't stay active
+ * just because the weighted-LRU tracker itself hasn't evicted it.
  */
 export function desiredShellActiveNames(handle: VehicleShellHandle): string[] {
 	const byToolName = new Map(handle.managedTools.map((tool) => [tool.toolName, tool]));

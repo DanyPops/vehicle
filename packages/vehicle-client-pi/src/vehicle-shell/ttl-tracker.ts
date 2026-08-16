@@ -1,4 +1,10 @@
 /**
+ * @deprecated Superseded by weighted-lru.ts's WeightedLruTracker (weighted-LRU eviction bounded
+ * by a stretchable token budget, not a fixed turn count) -- see vehicle-shell.ts's own module doc
+ * comment for why. No longer wired into this package's own shell runtime (bootstrap.ts). Kept
+ * exported, fully functional, and tested as a standalone decaying-TTL cache for any external
+ * consumer that still wants exactly that simpler turn-counting semantics on its own.
+ *
  * A decaying-TTL cache over Pi's active-tool set, turn-scoped. Split out of vehicle-shell.ts's
  * own bundled concerns -- pure, Pi-agnostic state machine with no dependency on the rest of the
  * shell.

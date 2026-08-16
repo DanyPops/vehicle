@@ -71,8 +71,8 @@ export type OperationTypeResult =
 
 /**
  * The `type`-equivalent classification behind tools_type -- read-only, never activates anything
- * or touches the TTL tracker's own state (unlike tools_man's resolution, which seeds/refreshes a
- * tool's TTL as a side effect of documenting it).
+ * or touches the weighted-LRU tracker's own state (unlike tools_man's resolution, which seeds/
+ * refreshes a tool's own priority as a side effect of documenting it).
  *
  * - "active": already a real, currently-tracked Pi tool -- callable this turn, with its live
  *   toolName and its own estimated context weight in tokens (WeightedLruTracker.weightOf).

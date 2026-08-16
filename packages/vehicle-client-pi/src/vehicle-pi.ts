@@ -337,10 +337,10 @@ export interface RegisterVehicleToolsOptions {
 	/**
 	 * Opt-in Vehicle Shell activation: instead of activating every available, permitted operation
 	 * (this option's own default omission), registers two always-on meta-tools (tools_list,
-	 * tools_man by default) and keeps most operations inactive behind a decaying-TTL cache -- see
-	 * vehicle-shell.ts. Exists because a Vehicle with dozens of operations otherwise puts every
-	 * single one's full schema in context from turn one, regardless of whether the session ever
-	 * calls it.
+	 * tools_man by default) and keeps most operations inactive behind a weighted-LRU active set
+	 * bounded by a stretchable token budget -- see vehicle-shell.ts. Exists because a Vehicle with
+	 * dozens of operations otherwise puts every single one's full schema in context from turn one,
+	 * regardless of whether the session ever calls it.
 	 */
 	readonly shell?: VehicleShellOptions;
 	/** @deprecated Use `jobs.jobPollIntervalMs` instead -- see RegisterVehicleToolsJobOptions (vehicle-job-polling.ts). */
@@ -418,7 +418,7 @@ export interface RegisteredPiVehicle {
 	readonly tools: readonly RegisteredPiVehicleTool[];
 	/** True when `manifest` came from options.manifestCache's sidecar file rather than a live fetch -- the daemon was unreachable at registration/refresh time. A caller that cares (e.g. to show a reconnecting indicator) can check this; every existing caller ignoring it sees no behavior change. */
 	readonly stale: boolean;
-	/** Present only when options.shell was given -- pass this back into refreshVehicleToolAvailability so a later refresh keeps using the same TTL tracker instead of reactivating every available operation. */
+	/** Present only when options.shell was given -- pass this back into refreshVehicleToolAvailability so a later refresh keeps using the same weighted-LRU tracker instead of reactivating every available operation. */
 	readonly shell?: VehicleShellHandle;
 }
 
