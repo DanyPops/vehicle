@@ -25,7 +25,7 @@ import { VehicleShellTtlTracker } from "./ttl-tracker.js";
 
 reportModuleLoad(import.meta.url);
 
-const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle");
+const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle@1");
 
 /**
  * The single, process-wide, vehicle-agnostic Vehicle Shell handle -- created by whichever vehicle's

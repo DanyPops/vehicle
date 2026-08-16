@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleManifest } from "@danypops/vehicle-core";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /**
  * Proves the actual bug this guards against, not just the mechanism: several nested copies of
@@ -28,12 +30,19 @@ async function importFreshInstance(relativePath: string, tag: string): Promise<R
 const REGISTRY_KEY = Symbol.for("vehicle.shell.in-process-registry@1");
 const ACTIVITY_KEY = Symbol.for("vehicle.pi.activity@1");
 const HITL_KEY = Symbol.for("vehicle.pi.hitl-ask-pending@1");
+const SHELL_HANDLE_KEY = Symbol.for("vehicle.shell.handle@1");
 
 afterEach(() => {
 	delete (globalThis as Record<PropertyKey, unknown>)[REGISTRY_KEY];
 	delete (globalThis as Record<PropertyKey, unknown>)[ACTIVITY_KEY];
 	delete (globalThis as Record<PropertyKey, unknown>)[HITL_KEY];
+	delete (globalThis as Record<PropertyKey, unknown>)[SHELL_HANDLE_KEY];
 });
+
+function fakePi(): ExtensionAPI {
+	const harness = createExtensionHarness(() => {});
+	return harness.api as ExtensionAPI;
+}
 
 describe("globalThis+Symbol.for() state survives being loaded as two separate module instances", () => {
 	it("vehicle-shell-registry.ts: a vehicle registered through one module instance is visible through another", async () => {
@@ -71,6 +80,39 @@ describe("globalThis+Symbol.for() state survives being loaded as two separate mo
 			summary: "hi",
 		});
 		expect(received).toHaveLength(1);
+	});
+
+	it("vehicle-shell/bootstrap.ts: registerVehicleShell through one module instance shares the same handle as another -- a vehicle's own managed tools registered via one instance are visible on the handle the other instance returns", async () => {
+		const a = await importFreshInstance("../src/vehicle-shell/bootstrap.ts", "instance-a-shell-bootstrap");
+		const b = await importFreshInstance("../src/vehicle-shell/bootstrap.ts", "instance-b-shell-bootstrap");
+		expect(a).not.toBe(b);
+
+		type RegisterVehicleShell = (
+			pi: ExtensionAPI,
+			vehicleName: string,
+			managedTools: readonly { vehicleName: string; toolName: string; operationName: string; available: boolean; blocked: boolean }[],
+			options: { coreOperations?: readonly string[] } | undefined,
+		) => { managedTools: readonly { toolName: string }[] } | undefined;
+
+		const pi = fakePi();
+		const handleFromA = (a.registerVehicleShell as RegisterVehicleShell)(
+			pi,
+			"vehicle-a",
+			[{ vehicleName: "vehicle-a", toolName: "vehicle_a_op", operationName: "op", available: true, blocked: false }],
+			{},
+		);
+		const handleFromB = (b.registerVehicleShell as RegisterVehicleShell)(
+			pi,
+			"vehicle-b",
+			[{ vehicleName: "vehicle-b", toolName: "vehicle_b_op", operationName: "op", available: true, blocked: false }],
+			{},
+		);
+
+		// Same underlying globalThis[Symbol.for(...)] object, regardless of which module instance asked for it.
+		expect(handleFromA).toBe(handleFromB);
+		const toolNames = handleFromB?.managedTools.map((t) => t.toolName) ?? [];
+		expect(toolNames).toContain("vehicle_a_op");
+		expect(toolNames).toContain("vehicle_b_op");
 	});
 
 	it("hitl-ask-typing-courtesy.ts: markAskPromptPending through one module instance is visible to isLiveAskPending through another -- the exact cross-extension coordination this counter exists for", async () => {
