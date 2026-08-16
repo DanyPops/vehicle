@@ -22,3 +22,15 @@ tool-result type use, so no translation layer is needed at either boundary.
 `extractVehicleContent(output)` reads those blocks back out for a generic
 Vehicle client to prefer over raw JSON, returning undefined for absent or
 malformed content so the caller can fall back safely.
+
+## Layout
+
+`src/` is organized by capability, not by feature-flat filename prefix:
+`operations/`, `events/`, `manifest/`, `client/`, `schemas/`, `content/`,
+`approvals/`, `jobs/`, `schedules/`, `watches/`, and `errors/`/`idempotency/`
+each hold one cohesive concern; `persistence/` (atomic JSON writes) is kept
+separate as a technical utility, not a Vehicle protocol capability. Every
+public symbol is re-exported unchanged from the package root
+(`import { X } from "@danypops/vehicle-core"`); `./persistence` is also
+available as its own subpath export for a consumer that only needs the
+atomic-write primitive without the rest of the wire contract.
