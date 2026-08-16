@@ -1,6 +1,7 @@
 /** Pure pieces of Vehicle Jobs: a termination-reason resolver and a bounded wake-log accumulator. Orchestration lives in vehicle-server's VehicleJobStore. */
-import type { VehicleFailure } from "./vehicle-errors.js";
+
 import type { VehiclePrincipal } from "./vehicle-contract.js";
+import type { VehicleFailure } from "./vehicle-errors.js";
 
 export type VehicleJobStatus = "running" | "succeeded" | "failed" | "canceled";
 

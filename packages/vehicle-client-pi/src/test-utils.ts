@@ -16,5 +16,6 @@
  * Deliberately a raw-source subpath (not part of the main compiled entry point) -- these are for a
  * consumer's own test files to import, never for production code.
  */
-export { __resetInProcessVehicleRegistryForTests } from "./vehicle-shell-registry.js";
+
 export { __resetVehicleShellHandleForTests } from "./vehicle-shell.js";
+export { __resetInProcessVehicleRegistryForTests } from "./vehicle-shell-registry.js";

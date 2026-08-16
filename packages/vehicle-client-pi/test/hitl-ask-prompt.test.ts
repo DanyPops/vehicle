@@ -601,11 +601,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 			});
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			expect(setCalls).toHaveLength(1);
-			const host = setCalls[0]!(
-				{ terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-				fakeEditorTheme,
-				keybindings,
-			);
+			const host = setCalls[0]!({ terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI, fakeEditorTheme, keybindings);
 			host.handleInput(ENTER);
 			const answer = await promise;
 			expect(answer).toEqual({ content: "Ship Friday", selected: ["Ship Friday"] });
@@ -615,11 +611,7 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 			const { ctx, setCalls, previousFactory } = editorCtx();
 			const promise = requestPiAskPrompt(ctx, { question: "Ship or not?", options: [{ title: "Ship Friday" }] });
 			await new Promise((resolve) => setTimeout(resolve, 0));
-			const host = setCalls[0]!(
-				{ terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-				fakeEditorTheme,
-				keybindings,
-			);
+			const host = setCalls[0]!({ terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI, fakeEditorTheme, keybindings);
 			// setEditorComponent's own swap logic reads getText() off the outgoing editor to carry a
 			// draft forward -- must never report anything but the human's real preserved text, even
 			// after setText() is called on it (Pi's swap machinery calls setText with the prior text

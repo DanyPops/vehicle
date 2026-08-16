@@ -20,8 +20,8 @@ import type {
 	VehicleSubscription,
 } from "@danypops/vehicle-core";
 import { VehicleError } from "@danypops/vehicle-core";
-import type { VehicleJobStore } from "@danypops/vehicle-server/jobs";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
+import type { VehicleJobStore } from "@danypops/vehicle-server/jobs";
 
 export interface LocalVehicleClientOptions {
 	/** Opts this client into Vehicle Jobs (submitJob/pollJob/tailJob/steerJob/cancelJob) -- built on this

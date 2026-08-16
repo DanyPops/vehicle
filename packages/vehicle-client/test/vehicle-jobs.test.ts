@@ -18,8 +18,8 @@ import {
 import { VehicleRegistry } from "@danypops/vehicle-server";
 import { createVehicleHttpApp } from "@danypops/vehicle-server/http";
 import { VehicleJobStore } from "@danypops/vehicle-server/jobs";
-import { LocalVehicleClient } from "../src/vehicle-local-client.ts";
 import { RemoteVehicleClient } from "../src/vehicle-http-client.ts";
+import { LocalVehicleClient } from "../src/vehicle-local-client.ts";
 
 const objectSchema = <T extends Record<string, unknown>>(properties: Record<string, JsonValue>, parse: (value: unknown) => T | undefined) =>
 	defineVehicleSchema<T>({
