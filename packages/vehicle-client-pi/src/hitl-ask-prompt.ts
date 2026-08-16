@@ -41,6 +41,17 @@ import {
 	markAskPromptSettled,
 	waitForTypingCourtesy,
 } from "./hitl-ask-typing-courtesy.js";
+
+/** Re-exported for backward compatibility -- these lived directly in this file's own published subpath before the typing-courtesy split; papyrus imports several of them from here. */
+export {
+	ensureTypingCourtesyTracking,
+	isLiveAskPending,
+	isRecentlyTyping,
+	resetTypingCourtesyTrackingForTests,
+	setTypingCourtesyTimingForTests,
+	waitForTypingCourtesy,
+} from "./hitl-ask-typing-courtesy.js";
+
 import { hostDualPresentationComponent, OVERLAY_MAX_HEIGHT_RATIO, type PiHitlContext, type PiHitlPresentation } from "./hitl-prompt.js";
 import { createMultiSelectList, type MultiSelectListItem, type MultiSelectList as SharedMultiSelectList } from "./multi-select-list.js";
 
