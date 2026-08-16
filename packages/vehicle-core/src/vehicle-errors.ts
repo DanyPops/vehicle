@@ -55,10 +55,10 @@ export interface VehicleFailure {
 export interface VehicleErrorOptions {
 	readonly category: VehicleFailureCategory;
 	readonly retryable?: boolean;
-	readonly retryAfterMs?: number;
-	readonly recovery?: VehicleRecovery;
-	readonly details?: JsonValue;
-	readonly operationId?: string;
+	readonly retryAfterMs?: number | undefined;
+	readonly recovery?: VehicleRecovery | undefined;
+	readonly details?: JsonValue | undefined;
+	readonly operationId?: string | undefined;
 	readonly cause?: unknown;
 	/** Includes cause's message in toFailure().causeMessage. Default false -- an arbitrary cause could carry a credential or internal detail. */
 	readonly exposeCause?: boolean;
@@ -113,10 +113,10 @@ export function defineErrorMapping(
 export class VehicleError extends Error {
 	readonly category: VehicleFailureCategory;
 	readonly retryable: boolean;
-	readonly retryAfterMs?: number;
-	readonly recovery?: VehicleRecovery;
-	readonly details?: JsonValue;
-	readonly operationId?: string;
+	readonly retryAfterMs?: number | undefined;
+	readonly recovery?: VehicleRecovery | undefined;
+	readonly details?: JsonValue | undefined;
+	readonly operationId?: string | undefined;
 	private readonly exposeCause: boolean;
 
 	constructor(
