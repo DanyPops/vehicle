@@ -49,6 +49,26 @@ export interface VehicleExecutionPolicy {
 	execute(request: VehicleExecutionRequest, invoke: (effectiveInput: unknown) => Promise<unknown>): Promise<unknown>;
 }
 
+/**
+ * One independent, composable concern wrapping every invoke() call -- rate limiting, audit
+ * logging, workspace/tenant-scoped authorization, and similar cross-cutting policies can each
+ * register their own middleware without knowing about each other, the way Envoy's filter chain
+ * or Kubernetes' ordered admission webhooks compose independent concerns. Registration order is
+ * execution order: the first-registered middleware is outermost, seeing (and able to rewrite,
+ * via `next`) every later middleware's and the core handler's own input. `next` mirrors
+ * VehicleExecutionPolicy.execute's own `invoke` shape -- the same effectiveInput-rewriting
+ * contract, one level up. A middleware that throws (or whose returned promise rejects) denies
+ * the call outright; there is no partial-apply or silent-passthrough path.
+ */
+export interface VehicleExecutionMiddleware {
+	/** Unique per registry; used for duplicate-registration rejection and future ordering/audit diagnostics. */
+	readonly id: string;
+	intercept(request: VehicleExecutionRequest, next: (effectiveInput: unknown) => Promise<unknown>): Promise<unknown>;
+}
+
+/** Matches every other Vehicle extensibility point's own bound discipline (MAX_PENDING_APPROVALS, MAX_LISTENERS_PER_EVENT, ...). */
+const MAX_EXECUTION_MIDDLEWARES = 16;
+
 interface InvocationContext {
 	readonly operationId: string;
 	readonly correlationId?: string;
@@ -229,7 +249,9 @@ function resolveManifestIdentity(identity: VehicleRegistryIdentity): VehicleMani
 /**
  * The daemon-side execution engine at the root of `@danypops/vehicle-server`:
  * operation registration, permission/deadline/payload enforcement, an
- * injectable {@link VehicleExecutionPolicy} hook, and
+ * injectable {@link VehicleExecutionPolicy} hook (single-slot) or an ordered
+ * chain of {@link VehicleExecutionMiddleware} (see useExecutionMiddleware, additive and
+ * composable -- the two coexist, legacy policy innermost), and
  * `setAvailability(name, version, available, reason?)`, which toggles a
  * registered operation's usability at runtime (e.g. a credential got
  * configured or removed) -- there's no unregister; an operation's shape is
@@ -249,6 +271,7 @@ function resolveManifestIdentity(identity: VehicleRegistryIdentity): VehicleMani
 export class VehicleRegistry {
 	private readonly registrations = new Map<string, Registration>();
 	private readonly availability = new Map<string, AvailabilityState>();
+	private readonly executionMiddlewares: VehicleExecutionMiddleware[] = [];
 	private readonly identity: VehicleManifestIdentity;
 	private readonly eventPubSub = new VehicleEventPubSub();
 	private approvalManager?: VehicleApprovalPolicyManager;
@@ -272,6 +295,28 @@ export class VehicleRegistry {
 	setExecutionPolicy(policy: VehicleExecutionPolicy): void {
 		if (this.executionPolicy) throw new Error("Vehicle execution policy is already configured");
 		this.executionPolicy = policy;
+	}
+
+	/**
+	 * Additive alternative to setExecutionPolicy() -- coexists with it rather than replacing it,
+	 * so no existing consumer needs to migrate. The legacy single policy (if configured) runs as
+	 * the innermost wrapper, directly around the core handler call; every registered middleware
+	 * wraps outside it, in registration order (first registered = outermost). See
+	 * VehicleExecutionMiddleware's own doc comment for the composition contract.
+	 */
+	useExecutionMiddleware(middleware: VehicleExecutionMiddleware): void {
+		if (!middleware.id.trim()) throw new Error("Vehicle execution middleware id must not be empty");
+		if (this.executionMiddlewares.some((existing) => existing.id === middleware.id)) {
+			throw new Error(`Vehicle execution middleware "${middleware.id}" is already registered`);
+		}
+		if (this.executionMiddlewares.length >= MAX_EXECUTION_MIDDLEWARES) {
+			throw new VehicleError(
+				"capacity-exceeded",
+				`Cannot register more than ${MAX_EXECUTION_MIDDLEWARES} Vehicle execution middlewares`,
+				{ category: "conflict" },
+			);
+		}
+		this.executionMiddlewares.push(middleware);
 	}
 
 	/** Includes an unexpected handler/policy exception's message in toFailure().causeMessage. Only enable once this Vehicle's own handlers are reviewed for leak risk. */
@@ -503,9 +548,23 @@ export class VehicleRegistry {
 			expectedRevision: context.expectedRevision,
 			approvalCapability: context.approvalCapability,
 		};
+		// Compose innermost-out: the core handler call, then the legacy single policy (if any)
+		// wrapping it directly, then every registered middleware wrapping outside that in
+		// registration order -- see VehicleExecutionMiddleware's own doc comment. Each layer's
+		// own request reflects the latest effectiveInput a layer further out chose to forward,
+		// so a later middleware/the legacy policy sees any rewrite an earlier one already made.
+		const requestWithInput = (effectiveInput: unknown): VehicleExecutionRequest =>
+			effectiveInput === request.input ? request : { ...request, input: effectiveInput };
+		const core = (effectiveInput: unknown): Promise<unknown> =>
+			this.executionPolicy ? this.executionPolicy.execute(requestWithInput(effectiveInput), invoke) : invoke(effectiveInput);
+		let chain = core;
+		for (const middleware of [...this.executionMiddlewares].reverse()) {
+			const next = chain;
+			chain = (effectiveInput) => middleware.intercept(requestWithInput(effectiveInput), next);
+		}
 		const pending = (async (): Promise<unknown> => {
 			try {
-				return this.executionPolicy ? await this.executionPolicy.execute(request, invoke) : await invoke(parsedInput);
+				return await chain(parsedInput);
 			} catch (error) {
 				if (isVehicleError(error)) throw error;
 				throw new VehicleError(

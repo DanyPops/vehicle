@@ -8,7 +8,12 @@ import {
 	type JsonValue,
 	VehicleError,
 } from "@danypops/vehicle-core";
-import { bridgeVehicleEventsToPushChannel, type VehicleExecutionPolicy, VehicleRegistry } from "../src/vehicle-registry.ts";
+import {
+	bridgeVehicleEventsToPushChannel,
+	type VehicleExecutionMiddleware,
+	type VehicleExecutionPolicy,
+	VehicleRegistry,
+} from "../src/vehicle-registry.ts";
 
 function destructiveEchoRegistry(): VehicleRegistry {
 	const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
@@ -446,6 +451,113 @@ describe("VehicleRegistry", () => {
 		await expect(registry.invoke("test.echo", 1, { value: "hello" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
 			code: "policy-failed",
 			message: "test.echo@1 execution policy failed: policy internals",
+		});
+	});
+
+	function observingMiddleware(id: string, order: string[], rewriteTo?: string): VehicleExecutionMiddleware {
+		return {
+			id,
+			async intercept(request, next) {
+				order.push(`${id}:${(request.input as { value: string }).value}`);
+				return next(rewriteTo ? { value: rewriteTo } : request.input);
+			},
+		};
+	}
+
+	describe("useExecutionMiddleware", () => {
+		it("runs registered middlewares in registration order, outermost first", async () => {
+			const order: string[] = [];
+			const registry = registryWith();
+			registry.useExecutionMiddleware(observingMiddleware("first", order));
+			registry.useExecutionMiddleware(observingMiddleware("second", order));
+			const result = await registry.invoke("test.echo", 1, { value: "go" }, { permissions: ["test:echo"] });
+
+			expect(order).toEqual(["first:go", "second:go"]);
+			expect(result).toEqual({ echoed: "go" });
+		});
+
+		it("a middleware's rewritten input reaches a later middleware and the core handler", async () => {
+			const order: string[] = [];
+			const registry = registryWith();
+			registry.useExecutionMiddleware(observingMiddleware("first", order, "rewritten"));
+			registry.useExecutionMiddleware(observingMiddleware("second", order));
+			const result = await registry.invoke("test.echo", 1, { value: "go" }, { permissions: ["test:echo"] });
+
+			expect(order).toEqual(["first:go", "second:rewritten"]);
+			expect(result).toEqual({ echoed: "rewritten" });
+		});
+
+		it("a middleware that throws denies the call -- never a silent passthrough", async () => {
+			const registry = registryWith();
+			registry.useExecutionMiddleware({
+				id: "denier",
+				intercept() {
+					return Promise.reject(new Error("denied by policy"));
+				},
+			});
+			await expect(registry.invoke("test.echo", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
+				code: "policy-failed",
+				message: "test.echo@1 execution policy failed",
+			});
+		});
+
+		it("coexists with the legacy single-slot policy -- middlewares wrap outside it", async () => {
+			const order: string[] = [];
+			const legacyPolicy: VehicleExecutionPolicy = {
+				async execute(request, invoke) {
+					order.push(`legacy:${(request.input as { value: string }).value}`);
+					return invoke(request.input);
+				},
+			};
+			const registry = registryWith(echoBinding(), legacyPolicy);
+			registry.useExecutionMiddleware(observingMiddleware("outer", order, "from-middleware"));
+			const result = await registry.invoke("test.echo", 1, { value: "go" }, { permissions: ["test:echo"] });
+
+			expect(order).toEqual(["outer:go", "legacy:from-middleware"]);
+			expect(result).toEqual({ echoed: "from-middleware" });
+		});
+
+		it("rejects a duplicate middleware id", () => {
+			const registry = registryWith();
+			const middleware = observingMiddleware("dup", []);
+			registry.useExecutionMiddleware(middleware);
+			expect(() => registry.useExecutionMiddleware(middleware)).toThrow('Vehicle execution middleware "dup" is already registered');
+		});
+
+		it("is bounded -- refuses beyond the maximum registered middlewares", () => {
+			const registry = registryWith();
+			for (let i = 0; i < 16; i++) registry.useExecutionMiddleware(observingMiddleware(`mw-${i}`, []));
+			expect(() => registry.useExecutionMiddleware(observingMiddleware("mw-16", []))).toThrow(VehicleError);
+		});
+
+		it("the Approval Gate still behaves correctly alongside a registered middleware", async () => {
+			const order: string[] = [];
+			const registry = destructiveEchoRegistry();
+			registry.configureApprovals({ requireApprovalForEffects: ["destructive"] });
+			// Scoped to the gated operation itself -- vehicle.approval.resolve's own invoke() also
+			// passes through this same middleware (a real cross-cutting concern applies to every
+			// operation), which isn't what this test is about.
+			registry.useExecutionMiddleware({
+				id: "audit",
+				async intercept(request, next) {
+					if (request.operation.name === "test.destructive-echo") order.push(`audit:${(request.input as { value: string }).value}`);
+					return next(request.input);
+				},
+			});
+
+			const requestId = await requestApprovalGate(registry);
+			const resolution = (await registry.invoke("vehicle.approval.resolve", 1, { requestId, decision: "granted" }, {
+				permissions: ["vehicle:approvals:resolve"],
+			})) as { capability: string };
+			const result = await registry.invoke(
+				"test.destructive-echo",
+				1,
+				{ value: "go" },
+				{ permissions: ["test:echo"], approvalCapability: resolution.capability },
+			);
+
+			expect(result).toEqual({ echoed: "go" });
+			expect(order).toEqual(["audit:go"]);
 		});
 	});
 
