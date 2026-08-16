@@ -31,9 +31,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - run: bun install
-      - run: node scripts/check-release-discipline.mjs
       - run: bun run check
       - run: bun run build
+      # Runs after build -- it checks a package's own compiled `dist/**.d.ts` exports-map
+      # targets to tell a real published-API addition apart from an internal-only cross-file
+      # `export` that never reaches an npm consumer (see check-release-discipline.mjs's own
+      # publicEntryDtsText doc comment).
+      - run: node scripts/check-release-discipline.mjs
 
       # Tag prefixes are checked longest-first (vehicle-client-pi- before
       # vehicle-client-) so vehicle-client-pi-v* never falls through to the

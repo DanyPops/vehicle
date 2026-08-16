@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { enforceReleaseDiscipline, findBreakingTypeCandidates } from "../check-release-discipline.mjs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	addedRequiredPropertyOwners,
+	enforceReleaseDiscipline,
+	findBreakingTypeCandidates,
+	publicEntryDtsText,
+} from "../check-release-discipline.mjs";
 
 describe("release discipline", () => {
 	it("detects exported declaration removal and required-field additions or renames", () => {
@@ -109,6 +117,96 @@ index abc..def 100644
 				releaseMessage: "feat: rename field\n\nBREAKING CHANGE: descriptorPath is now handlePath",
 			}),
 		).not.toThrow();
+	});
+
+	it("publicEntryDtsText reads only the package's own declared exports-map .d.ts targets, never an unrelated compiled file", () => {
+		const dir = mkdtempSync(join(tmpdir(), "release-discipline-"));
+		try {
+			writeFileSync(
+				join(dir, "package.json"),
+				JSON.stringify({
+					exports: { ".": { types: "./dist/index.d.ts" }, "./daemon": { types: "./dist/daemon.d.ts" } },
+				}),
+			);
+			// Simulates dist/daemon.d.ts existing at the declared exports-map path.
+			mkdirSync(join(dir, "dist"), { recursive: true });
+			writeFileSync(join(dir, "dist/daemon.d.ts"), "export function startDaemon(): void");
+			writeFileSync(join(dir, "dist/index.d.ts"), "export interface Public { readonly name: string }");
+			// An internal sibling-only file tsc still compiles but that package.json's exports map
+			// never points a consumer at -- must NOT be picked up.
+			writeFileSync(join(dir, "dist/internal.d.ts"), "export interface ListeningServer { port: number }");
+
+			const text = publicEntryDtsText(dir);
+			expect(text).toContain("Public");
+			expect(text).toContain("startDaemon");
+			expect(text).not.toContain("ListeningServer");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("publicEntryDtsText returns an empty string when dist/ hasn't been built yet, so main()'s filter safely no-ops rather than under-reporting", () => {
+		const dir = mkdtempSync(join(tmpdir(), "release-discipline-"));
+		try {
+			writeFileSync(join(dir, "package.json"), JSON.stringify({ exports: { ".": { types: "./dist/index.d.ts" } } }));
+			expect(publicEntryDtsText(dir)).toBe("");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("addedRequiredPropertyOwners records which exported interface a required property was actually added under", () => {
+		const owners = addedRequiredPropertyOwners(`
+diff --git a/src/daemon/listener.ts b/src/daemon/listener.ts
++export interface ListeningServer {
++	port: number;
++}
+diff --git a/src/daemon.ts b/src/daemon.ts
+ export interface StartDaemonOptions {
++	readonly instanceId: string;
+`);
+		expect(owners.get("port")).toEqual(new Set(["ListeningServer"]));
+		expect(owners.get("instanceId")).toEqual(new Set(["StartDaemonOptions"]));
+	});
+
+	it("a required property added to an interface that never reaches the package's own published .d.ts is not flagged as breaking, even though the bare property NAME collides with an unrelated, genuinely-public property elsewhere", () => {
+		// Mirrors the real vehicle-server false positive: RunningDaemon.port is a real,
+		// pre-existing, published-surface property; ListeningServer.port is a brand new,
+		// internal-only, sibling-file-import-only property that happens to share the name.
+		const diff = `
+diff --git a/src/daemon/listener.ts b/src/daemon/listener.ts
++export interface ListeningServer {
++	port: number;
++}
+`;
+		const candidates = findBreakingTypeCandidates(diff);
+		expect(candidates.addedRequiredProperties).toEqual(["port"]);
+
+		const owners = addedRequiredPropertyOwners(diff);
+		const publicDts = "export interface RunningDaemon { readonly port: number; readonly pid: number }";
+		const filtered = candidates.addedRequiredProperties.filter((name) => {
+			const ownerTypes = owners.get(name);
+			if (!ownerTypes || ownerTypes.size === 0) return true;
+			return [...ownerTypes].some((owner) => owner && publicDts.includes(owner));
+		});
+		expect(filtered).toEqual([]);
+	});
+
+	it("a required property added to an interface that DOES reach the package's own published .d.ts is still flagged", () => {
+		const diff = `
+diff --git a/src/daemon.ts b/src/daemon.ts
+ export interface StartDaemonOptions {
++	readonly instanceId: string;
+`;
+		const candidates = findBreakingTypeCandidates(diff);
+		const owners = addedRequiredPropertyOwners(diff);
+		const publicDts = "export interface StartDaemonOptions { readonly port: number }";
+		const filtered = candidates.addedRequiredProperties.filter((name) => {
+			const ownerTypes = owners.get(name);
+			if (!ownerTypes || ownerTypes.size === 0) return true;
+			return [...ownerTypes].some((owner) => owner && publicDts.includes(owner));
+		});
+		expect(filtered).toEqual(["instanceId"]);
 	});
 
 	it("requires a major bump after 1.0", () => {
