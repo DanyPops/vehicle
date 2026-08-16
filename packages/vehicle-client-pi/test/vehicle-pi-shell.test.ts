@@ -6,7 +6,7 @@ import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { refreshVehicleToolAvailability, registerVehicleTools } from "../src/vehicle-pi.ts";
-import { __resetVehicleShellHandleForTests } from "../src/vehicle-shell.ts";
+import { __resetVehicleShellHandleForTests, estimateToolWeightTokens } from "../src/vehicle-shell.ts";
 import { __resetInProcessVehicleRegistryForTests, registerInProcessVehicle } from "../src/vehicle-shell-registry.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
@@ -455,43 +455,49 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools).not.toContain("nonexistent_op");
 	});
 
-	it("a discovered operation decays and is deactivated after its TTL elapses unused", async () => {
+	// Impossibly tiny budget -- any real tool's own weight exceeds it, so eviction fires the moment
+	// an entry loses its "called/seeded this turn" protection window (see weighted-lru.ts).
+	const zeroBudget = { minToolBudgetTokens: 1, maxToolBudgetTokens: 1, fallbackBudgetTokens: 1 };
+
+	it("a discovered operation is evicted under context pressure once its just-activated protection window ends", async () => {
 		const { pi, tools, harness } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: { discoveredTtlTurns: 2 } });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: { budget: zeroBudget } });
 		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
 		expect(harness.activeTools).toContain("tasks_depend");
 
 		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
-		expect(harness.activeTools).toContain("tasks_depend"); // 2 -> 1, still alive
+		expect(harness.activeTools).toContain("tasks_depend"); // protected -- just activated this very turn
 
 		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] });
-		expect(harness.activeTools).not.toContain("tasks_depend"); // 1 -> 0, evicted
+		expect(harness.activeTools).not.toContain("tasks_depend"); // unprotected now, budget forces eviction
 	});
 
-	it("calling a discovered operation resets its TTL instead of letting it decay while in use", async () => {
+	it("calling a discovered operation re-protects it from eviction, instead of losing the protection while in use", async () => {
 		const { pi, tools, harness } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: { discoveredTtlTurns: 2 } });
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), { shell: { budget: zeroBudget } });
 		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
 
-		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // 2 -> 1
+		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // protected by seed -- survives
 		await harness.emit("tool_execution_end", { toolCallId: "x", toolName: "tasks_depend", result: {}, isError: false });
-		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // called -> refreshed to 2
-
-		await harness.emit("turn_end", { turnIndex: 2, message: {}, toolResults: [] }); // 2 -> 1
+		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // protected again by the call -- survives
 		expect(harness.activeTools).toContain("tasks_depend");
-		await harness.emit("turn_end", { turnIndex: 3, message: {}, toolResults: [] }); // 1 -> 0
+
+		await harness.emit("turn_end", { turnIndex: 2, message: {}, toolResults: [] }); // not called since -- evicted now
 		expect(harness.activeTools).not.toContain("tasks_depend");
 	});
 
 	// Not permanently pinned.
-	it("a core operation also decays and can be evicted if truly unused for long enough", async () => {
+	it("a core operation is also subject to eviction under context pressure once unused", async () => {
 		const { pi, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-			shell: { coreOperations: ["tasks.create"], coreTtlTurns: 1 },
+			shell: { coreOperations: ["tasks.create"], budget: zeroBudget },
 		});
 		expect(harness.activeTools).toContain("tasks_create");
 
 		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
+		expect(harness.activeTools).toContain("tasks_create"); // protected -- just seeded at registration
+
+		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] });
 		expect(harness.activeTools).not.toContain("tasks_create");
 		expect(harness.activeTools).toContain("tools_list");
 		expect(harness.activeTools).toContain("tools_man");
@@ -519,17 +525,17 @@ describe("registerVehicleTools with shell activation", () => {
 	});
 
 	// Doesn't reset every available tool active.
-	it("refreshVehicleToolAvailability leaves an already-decaying discovered tool's TTL alone", async () => {
+	it("refreshVehicleToolAvailability leaves an already-unprotected discovered tool's standing alone", async () => {
 		const { pi, tools, harness } = fakePi();
 		const client = new FakeClient(manifest([operation("tasks.depend")]));
-		const registered = await registerVehicleTools(pi, client, { shell: { discoveredTtlTurns: 2 } });
+		const registered = await registerVehicleTools(pi, client, { shell: { budget: zeroBudget } });
 		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
 
-		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // 2 -> 1
-		await refreshVehicleToolAvailability(pi, client, registered, { shell: { discoveredTtlTurns: 2 } });
-		expect(harness.activeTools).toContain("tasks_depend"); // refresh must not re-grant full TTL
+		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // protected by seed -- survives
+		await refreshVehicleToolAvailability(pi, client, registered, { shell: { budget: zeroBudget } });
+		expect(harness.activeTools).toContain("tasks_depend"); // refresh must not re-grant protection (already tracked)
 
-		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // 1 -> 0
+		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // unprotected -- evicted now
 		expect(harness.activeTools).not.toContain("tasks_depend");
 	});
 
@@ -645,7 +651,8 @@ describe("the shared meta-tools discover every vehicle in the process, regardles
 	// activateOperation closure, exactly like a truly new operation a live manifest re-fetch reveals.
 	it("tools_man dynamically routes to and registers a real, callable Pi tool for a vehicle that never pre-registered its own operations, using THAT vehicle's own activation policy", async () => {
 		const { pi, tools, harness } = fakePi();
-		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: {} });
+		const zeroBudget = { minToolBudgetTokens: 1, maxToolBudgetTokens: 1, fallbackBudgetTokens: 1 };
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), { shell: { budget: zeroBudget } });
 
 		const invocations: Array<{ name: string; version: number; input: unknown }> = [];
 		const packedManifest = manifest(
@@ -684,10 +691,11 @@ describe("the shared meta-tools discover every vehicle in the process, regardles
 		await callTool(tools, "packed_package_install", { name: "curl" });
 		expect(invocations).toEqual([{ name: "package.install", version: 1, input: { name: "curl" } }]);
 
-		// Same decay cycle as any other discovered operation (default discoveredTtlTurns=8).
-		for (let turn = 0; turn < 8; turn++) {
-			await harness.emit("turn_end", { turnIndex: turn, message: {}, toolResults: [] });
-		}
+		// Subject to the same eviction-under-pressure as any other discovered operation: protected
+		// through the turn_end right after its last real use, evicted the first one after that.
+		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // protected -- called moments ago
+		expect(harness.activeTools).toContain("packed_package_install");
+		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] });
 		expect(harness.activeTools).not.toContain("packed_package_install");
 	});
 
@@ -832,16 +840,16 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 	});
 
 	describe("tools_type -- a real type-equivalent resolution-status meta-tool", () => {
-		it("reports a core operation as active, with its real toolName and remaining TTL", async () => {
+		it("reports a core operation as active, with its real toolName and its own estimated weight", async () => {
 			const { pi, tools } = fakePi();
-			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")], "papyrus")), {
-				shell: { coreOperations: ["tasks.create"], coreTtlTurns: 20 },
+			const descriptor = operation("tasks.create");
+			await registerVehicleTools(pi, new FakeClient(manifest([descriptor], "papyrus")), {
+				shell: { coreOperations: ["tasks.create"] },
 			});
 
 			const result = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.create"] })) as { content: Array<{ text: string }> };
-			expect(result.content[0]?.text).toBe(
-				"papyrus:tasks.create: active -- callable now as tasks_create (20 turn(s) remaining before it decays).",
-			);
+			const weight = estimateToolWeightTokens({ name: "tasks_create", description: descriptor.description, parameters: descriptor.inputSchema });
+			expect(result.content[0]?.text).toBe(`papyrus:tasks.create: active -- callable now as tasks_create (~${weight} token(s) of context).`);
 		});
 
 		it("reports a non-core operation as dormant until tools_man activates it, then active afterward", async () => {
@@ -860,7 +868,7 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 		it("never activates anything or extends any TTL itself, unlike tools_man -- purely read-only", async () => {
 			const { pi, tools, harness } = fakePi();
 			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")], "papyrus")), {
-				shell: { discoveredTtlTurns: 2 },
+				shell: { budget: { minToolBudgetTokens: 1, maxToolBudgetTokens: 1, fallbackBudgetTokens: 1 } },
 			});
 			await callTool(tools, "tools_man", { names: ["papyrus:tasks.depend"] });
 			expect(harness.activeTools).toContain("tasks_depend");

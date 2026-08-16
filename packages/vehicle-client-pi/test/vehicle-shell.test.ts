@@ -10,6 +10,7 @@ import {
 	resolveOperationName,
 	type VehicleShellManagedTool,
 	VehicleShellTtlTracker,
+	WeightedLruTracker,
 } from "../src/vehicle-shell.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
@@ -242,27 +243,27 @@ describe("classifyOperationName", () => {
 		};
 	}
 
-	it("active: already tracked -- reports its real toolName and remaining TTL", () => {
-		const tracker = new VehicleShellTtlTracker();
+	it("active: already tracked -- reports its real toolName and its own weight", () => {
+		const tracker = new WeightedLruTracker();
 		tracker.seed("tasks_depend", 5);
 		const result = classifyOperationName("papyrus:tasks.depend", [namespaced("papyrus", "tasks.depend")], [managedTool()], tracker);
-		expect(result).toEqual({ status: "active", toolName: "tasks_depend", remainingTtlTurns: 5 });
+		expect(result).toEqual({ status: "active", toolName: "tasks_depend", weightTokens: 5 });
 	});
 
 	it("dormant: known and pre-registered, but not currently tracked", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName("papyrus:tasks.depend", [namespaced("papyrus", "tasks.depend")], [managedTool()], tracker);
 		expect(result).toEqual({ status: "dormant" });
 	});
 
 	it("dormant: known live but never pre-registered at all (a genuinely cross-process-only vehicle)", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName("papyrus:tasks.depend", [namespaced("papyrus", "tasks.depend")], [], tracker);
 		expect(result).toEqual({ status: "dormant" });
 	});
 
 	it("blocked: pre-registered but currently unavailable", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName(
 			"papyrus:tasks.depend",
 			[namespaced("papyrus", "tasks.depend")],
@@ -273,7 +274,7 @@ describe("classifyOperationName", () => {
 	});
 
 	it("blocked: pre-registered but blocked by the current safety policy", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName(
 			"papyrus:tasks.depend",
 			[namespaced("papyrus", "tasks.depend")],
@@ -284,7 +285,7 @@ describe("classifyOperationName", () => {
 	});
 
 	it("unreachable: a namespaced name whose vehicle was previously known but produces nothing live now", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		// papyrus produced tasks.depend at some point (still in managedTools), but the live operations
 		// list (as namespacedOperationsOf would return right now) has nothing from papyrus at all.
 		const result = classifyOperationName("papyrus:tasks.depend", [namespaced("pipes", "ci.status")], [managedTool()], tracker);
@@ -292,19 +293,19 @@ describe("classifyOperationName", () => {
 	});
 
 	it("unknown: a namespaced name whose vehicle was never known at all", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName("nonexistent:tasks.depend", [namespaced("pipes", "ci.status")], [], tracker);
 		expect(result).toEqual({ status: "unknown" });
 	});
 
 	it("unknown: a bare name matching nothing live, even if some other vehicle was previously known", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName("nonexistent", [namespaced("pipes", "ci.status")], [managedTool()], tracker);
 		expect(result).toEqual({ status: "unknown" });
 	});
 
 	it("ambiguous: a bare name matching more than one vehicle's own operation", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		const result = classifyOperationName(
 			"docs.create",
 			[namespaced("papyrus", "docs.create"), namespaced("web-spider", "docs.create")],
@@ -315,7 +316,7 @@ describe("classifyOperationName", () => {
 	});
 
 	it("is read-only -- never mutates the tracker's own state", () => {
-		const tracker = new VehicleShellTtlTracker();
+		const tracker = new WeightedLruTracker();
 		classifyOperationName("papyrus:tasks.depend", [namespaced("papyrus", "tasks.depend")], [managedTool()], tracker);
 		expect(tracker.trackedNames()).toEqual([]);
 	});
@@ -326,11 +327,11 @@ describe("formatOperationTypeLine", () => {
 		expect(
 			formatOperationTypeLine(
 				"papyrus:tasks.depend",
-				{ status: "active", toolName: "tasks_depend", remainingTtlTurns: 3 },
+				{ status: "active", toolName: "tasks_depend", weightTokens: 3 },
 				"tools_man",
 				"tools_list",
 			),
-		).toBe("papyrus:tasks.depend: active -- callable now as tasks_depend (3 turn(s) remaining before it decays).");
+		).toBe("papyrus:tasks.depend: active -- callable now as tasks_depend (~3 token(s) of context).");
 		expect(formatOperationTypeLine("papyrus:tasks.depend", { status: "dormant" }, "tools_man", "tools_list")).toBe(
 			"papyrus:tasks.depend: dormant -- known, not yet activated. Call tools_man on it to make it callable.",
 		);
@@ -355,11 +356,11 @@ describe("formatOperationTypeLine", () => {
 		);
 	});
 
-	it("omits the TTL parenthetical when remainingTtlTurns is unknown", () => {
+	it("omits the weight parenthetical when weightTokens is unknown", () => {
 		expect(
 			formatOperationTypeLine(
 				"papyrus:tasks.depend",
-				{ status: "active", toolName: "tasks_depend", remainingTtlTurns: undefined },
+				{ status: "active", toolName: "tasks_depend", weightTokens: undefined },
 				"tools_man",
 				"tools_list",
 			),

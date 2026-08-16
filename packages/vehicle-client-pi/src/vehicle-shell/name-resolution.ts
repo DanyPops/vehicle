@@ -6,7 +6,7 @@
 
 import type { VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { VehicleShellManagedTool } from "./state.js";
-import type { VehicleShellTtlTracker } from "./ttl-tracker.js";
+import type { WeightedLruTracker } from "./weighted-lru.js";
 
 /** Splits a namespaced "<vehicle>:<operation>" name; undefined when name carries no vehicle prefix at all. */
 export function splitNamespacedName(name: string): { vehicleName: string; operationName: string } | undefined {
@@ -55,7 +55,7 @@ export function resolveOperationName(name: string, operations: readonly VehicleM
 }
 
 export type OperationTypeResult =
-	| { readonly status: "active"; readonly toolName: string; readonly remainingTtlTurns: number | undefined }
+	| { readonly status: "active"; readonly toolName: string; readonly weightTokens: number | undefined }
 	| { readonly status: "dormant" }
 	| { readonly status: "blocked"; readonly reason: string }
 	| { readonly status: "unreachable"; readonly vehicleName: string }
@@ -68,9 +68,9 @@ export type OperationTypeResult =
  * tool's TTL as a side effect of documenting it).
  *
  * - "active": already a real, currently-tracked Pi tool -- callable this turn, with its live
- *   toolName and however many turns remain before it decays (VehicleShellTtlTracker.remainingTurns).
+ *   toolName and its own estimated context weight in tokens (WeightedLruTracker.weightOf).
  * - "dormant": a known operation (live in `operations`) that tools_man hasn't activated (or has
- *   decayed back out of activity) -- calling tools_man on it would work right now.
+ *   since been evicted under context pressure) -- calling tools_man on it would work right now.
  * - "blocked": known and pre-registered, but currently unavailable or blocked by safety policy --
  *   mirrors tools_man's own managed.available/managed.blocked distinction exactly, folded into one
  *   status with a distinguishing `reason` rather than reimplementing two parallel checks.
@@ -92,7 +92,7 @@ export function classifyOperationName(
 	name: string,
 	operations: readonly VehicleManifestOperation[],
 	managedTools: readonly VehicleShellManagedTool[],
-	tracker: VehicleShellTtlTracker,
+	tracker: WeightedLruTracker,
 ): OperationTypeResult {
 	const resolved = resolveOperationName(name, operations);
 	if (resolved.kind === "ambiguous") return { status: "ambiguous", candidates: resolved.candidates };
@@ -102,7 +102,7 @@ export function classifyOperationName(
 		if (!managed.available) return { status: "blocked", reason: "currently unavailable" };
 		if (managed.blocked) return { status: "blocked", reason: "blocked by the current safety policy" };
 		if (tracker.isTracked(managed.toolName)) {
-			return { status: "active", toolName: managed.toolName, remainingTtlTurns: tracker.remainingTurns(managed.toolName) };
+			return { status: "active", toolName: managed.toolName, weightTokens: tracker.weightOf(managed.toolName) };
 		}
 		return { status: "dormant" };
 	}
@@ -119,8 +119,8 @@ export function classifyOperationName(
 export function formatOperationTypeLine(name: string, result: OperationTypeResult, manToolName: string, listToolName: string): string {
 	switch (result.status) {
 		case "active": {
-			const ttl = result.remainingTtlTurns !== undefined ? ` (${result.remainingTtlTurns} turn(s) remaining before it decays)` : "";
-			return `${name}: active -- callable now as ${result.toolName}${ttl}.`;
+			const weight = result.weightTokens !== undefined ? ` (~${result.weightTokens} token(s) of context)` : "";
+			return `${name}: active -- callable now as ${result.toolName}${weight}.`;
 		}
 		case "dormant":
 			return `${name}: dormant -- known, not yet activated. Call ${manToolName} on it to make it callable.`;

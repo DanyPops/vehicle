@@ -9,7 +9,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { syncManagedActiveTools } from "../pi-tool-availability.js";
 import type { DiscoveredVehicle } from "../vehicle-shell-broker.js";
 import { type InProcessDiscoveredVehicle, listInProcessVehicles } from "../vehicle-shell-registry.js";
-import type { VehicleShellTtlTracker } from "./ttl-tracker.js";
+import type { ContextBudgetOptions } from "./context-budget.js";
+import type { WeightedLruTracker } from "./weighted-lru.js";
 
 export const DEFAULT_LIST_TOOL_NAME = "tools_list";
 export const DEFAULT_MAN_TOOL_NAME = "tools_man";
@@ -35,7 +36,18 @@ export interface VehicleShellManagedTool {
 	readonly operationName: string;
 	readonly available: boolean;
 	readonly blocked: boolean;
+	/** This tool's own estimated context cost, in tokens (tool-weight.ts's estimateToolWeightTokens,
+	 * computed once from its real ToolDefinition at registration time) -- optional so a hand-built
+	 * test fixture never has to supply one; refreshVehicleShellManagedTools falls back to
+	 * FALLBACK_TOOL_WEIGHT_TOKENS when absent. Every real caller (shellManagedTools in
+	 * tool-creation.ts) always supplies the genuine computed value. */
+	readonly weightTokens?: number;
 }
+
+/** Used only when a VehicleShellManagedTool arrives with no real weightTokens (a hand-built test
+ * fixture, never a real registration) -- small and safe rather than accidentally dominating the
+ * budget for something whose true cost was never actually measured. */
+export const FALLBACK_TOOL_WEIGHT_TOKENS = 50;
 
 export interface VehicleShellOptions {
 	/** Operation names (VehicleOperationDescriptor.name, e.g. "tasks.create") that boot active with
@@ -80,23 +92,49 @@ export interface VehicleShellOptions {
 	 * activation/documentation/status-check paths must always see live state.
 	 */
 	readonly aggregateCacheTtlMs?: number;
+	/**
+	 * Overrides for the stretchable tool-context budget computed each turn_end from
+	 * ctx.getContextUsage() -- see context-budget.ts's own computeToolContextBudget for exactly how
+	 * these combine. Every field optional and independently overridable; an omitted field keeps its
+	 * own DEFAULT_* constant from context-budget.ts. Illustrative starting points, not load-bearing
+	 * constants -- tune from real usage, exactly like coreTtlTurns/discoveredTtlTurns before them.
+	 */
+	readonly budget?: {
+		readonly minToolBudgetTokens?: number;
+		readonly maxToolBudgetTokens?: number;
+		readonly fractionOfRemaining?: number;
+		/** Used only before the first real turn_end ever runs, or whenever getContextUsage() has
+		 * never returned a real reading at all (no prior turn_end to fall back on either). */
+		readonly fallbackBudgetTokens?: number;
+	};
 }
 
 export interface VehicleShellHandle {
-	readonly tracker: VehicleShellTtlTracker;
+	readonly tracker: WeightedLruTracker;
 	readonly listToolName: string;
 	readonly manToolName: string;
 	readonly typeToolName: string;
 	/** Live, mutable view of every vehicle's own managed tools in this process -- refreshVehicleShellManagedTools
-	 * keeps this current across a refreshVehicleToolAvailability call, since the per-turn decay
+	 * keeps this current across a refreshVehicleToolAvailability call, since the per-turn eviction
 	 * handler and the man-page tool both close over this same handle rather than a stale snapshot. */
 	managedTools: readonly VehicleShellManagedTool[];
 	readonly coreOperationNames: ReadonlySet<string>;
-	/** Starting TTL a core operation is (re-)seeded with -- kept on the handle so a later refresh
-	 * can seed a core operation that just became available the same way initial registration did. */
+	/** @deprecated no longer literally gates anything under the weighted-LRU model (seed() now
+	 * takes a tool's own weight, not a turn count) -- kept only so an existing consumer's options
+	 * object still typechecks during the deprecation window; see VehicleShellOptions.coreTtlTurns
+	 * and state.ts's own history for the fixed-TTL mechanism this replaced. */
 	readonly coreTtlTurns: number;
 	/** tools_list's own aggregate cache TTL, in milliseconds -- see VehicleShellOptions.aggregateCacheTtlMs. */
 	readonly aggregateCacheTtlMs: number;
+	/** The tool-context budget (in tokens) computed at the end of the most recent turn -- reused as
+	 * computeToolContextBudget's own fallback the next time ctx.getContextUsage() returns undefined
+	 * (e.g. right after compaction), so a temporarily-unknown reading degrades to "whatever was true
+	 * a moment ago" rather than a fixed guess. Starts at budgetOptions.fallbackBudgetTokens (or its
+	 * own DEFAULT_FALLBACK_BUDGET_TOKENS) before the first real turn_end ever runs. */
+	lastKnownBudgetTokens: number;
+	/** Resolved (defaults-applied) budget bounds this handle's own turn_end handler passes to
+	 * computeToolContextBudget -- see VehicleShellOptions.budget for the per-field override surface. */
+	readonly budgetOptions: ContextBudgetOptions;
 	/** Mutable cache slot tools_list reads/writes through cachedAggregatedOperations -- undefined
 	 * until first populated, or once expired and about to be refreshed. */
 	aggregateCache?: { readonly expiresAt: number; readonly operations: readonly VehicleManifestOperation[] };
@@ -118,7 +156,7 @@ export function refreshVehicleShellManagedTools(handle: VehicleShellHandle, inco
 	handle.managedTools = [...handle.managedTools.filter((tool) => !incomingToolNames.has(tool.toolName)), ...incoming];
 	for (const tool of incoming) {
 		if (handle.coreOperationNames.has(tool.operationName) && tool.available && !tool.blocked && !handle.tracker.isTracked(tool.toolName)) {
-			handle.tracker.seed(tool.toolName, handle.coreTtlTurns);
+			handle.tracker.seed(tool.toolName, tool.weightTokens ?? FALLBACK_TOOL_WEIGHT_TOKENS);
 		}
 	}
 }

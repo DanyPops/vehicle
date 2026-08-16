@@ -196,5 +196,6 @@ export function shellManagedTools(vehicleName: string, tools: readonly Registere
 		operationName: tool.operationName,
 		available: tool.available,
 		blocked: tool.safetyState === "blocked",
+		weightTokens: tool.weightTokens,
 	}));
 }

@@ -453,6 +453,7 @@ describe("registerVehicleTools", () => {
 				permissionsSatisfied: true,
 				effect: "read",
 				safetyState: "allow",
+				weightTokens: expect.any(Number),
 			},
 		]);
 		expect(tools).toHaveLength(1);
@@ -1266,6 +1267,7 @@ describe("registerVehicleTools", () => {
 				permissionsSatisfied: true,
 				effect: "read",
 				safetyState: "allow",
+				weightTokens: expect.any(Number),
 			},
 			{
 				toolName: "jira_search",
@@ -1275,6 +1277,7 @@ describe("registerVehicleTools", () => {
 				permissionsSatisfied: true,
 				effect: "read",
 				safetyState: "allow",
+				weightTokens: expect.any(Number),
 			},
 		]);
 	});
@@ -1311,6 +1314,7 @@ describe("registerVehicleTools", () => {
 				permissionsSatisfied: true,
 				effect: "read",
 				safetyState: "allow",
+				weightTokens: expect.any(Number),
 			},
 			{
 				toolName: "issues_write",
@@ -1320,6 +1324,7 @@ describe("registerVehicleTools", () => {
 				permissionsSatisfied: false,
 				effect: "read",
 				safetyState: "blocked",
+				weightTokens: expect.any(Number),
 			},
 		]);
 	});
@@ -1740,6 +1745,7 @@ describe("refreshVehicleToolAvailability", () => {
 				permissionsSatisfied: true,
 				effect: "read",
 				safetyState: "allow",
+				weightTokens: expect.any(Number),
 			},
 		]);
 	});

@@ -8,10 +8,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { reportModuleLoad, reportShellRegistered } from "../client-diagnostics.js";
 import { tryExtensionRuntimeAction } from "../pi-tool-availability.js";
 import {
+	computeToolContextBudget,
+	DEFAULT_BUDGET_FRACTION_OF_REMAINING,
+	DEFAULT_FALLBACK_BUDGET_TOKENS,
+	DEFAULT_MAX_TOOL_BUDGET_TOKENS,
+	DEFAULT_MIN_TOOL_BUDGET_TOKENS,
+} from "./context-budget.js";
+import {
 	applyShellActivation,
 	DEFAULT_AGGREGATE_CACHE_TTL_MS,
 	DEFAULT_CORE_TTL_TURNS,
-	DEFAULT_DISCOVERED_TTL_TURNS,
 	DEFAULT_LIST_TOOL_NAME,
 	DEFAULT_MAN_TOOL_NAME,
 	DEFAULT_TYPE_TOOL_NAME,
@@ -21,7 +27,7 @@ import {
 	type VehicleShellOptions,
 } from "./state.js";
 import { createToolsListTool, createToolsManTool, createToolsTypeTool } from "./tools.js";
-import { VehicleShellTtlTracker } from "./ttl-tracker.js";
+import { WeightedLruTracker } from "./weighted-lru.js";
 
 reportModuleLoad(import.meta.url);
 
@@ -50,8 +56,13 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	const listToolName = options.listToolName ?? DEFAULT_LIST_TOOL_NAME;
 	const manToolName = options.manToolName ?? DEFAULT_MAN_TOOL_NAME;
 	const typeToolName = options.typeToolName ?? DEFAULT_TYPE_TOOL_NAME;
+	const budgetOptions = {
+		minToolBudgetTokens: options.budget?.minToolBudgetTokens ?? DEFAULT_MIN_TOOL_BUDGET_TOKENS,
+		maxToolBudgetTokens: options.budget?.maxToolBudgetTokens ?? DEFAULT_MAX_TOOL_BUDGET_TOKENS,
+		fractionOfRemaining: options.budget?.fractionOfRemaining ?? DEFAULT_BUDGET_FRACTION_OF_REMAINING,
+	};
 	const handle: VehicleShellHandle = {
-		tracker: new VehicleShellTtlTracker(),
+		tracker: new WeightedLruTracker(),
 		listToolName,
 		manToolName,
 		typeToolName,
@@ -59,6 +70,8 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 		coreOperationNames: new Set(),
 		coreTtlTurns: options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS,
 		aggregateCacheTtlMs: options.aggregateCacheTtlMs ?? DEFAULT_AGGREGATE_CACHE_TTL_MS,
+		lastKnownBudgetTokens: options.budget?.fallbackBudgetTokens ?? DEFAULT_FALLBACK_BUDGET_TOKENS,
+		budgetOptions,
 	};
 	holder[SHELL_HANDLE_KEY] = handle;
 
@@ -72,7 +85,7 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	reportShellRegistered("vehicle", listToolName, manToolName, !claimedElsewhere);
 	if (!claimedElsewhere) {
 		pi.registerTool(createToolsListTool(listToolName, manToolName, handle));
-		pi.registerTool(createToolsManTool(pi, listToolName, manToolName, handle, options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS));
+		pi.registerTool(createToolsManTool(pi, listToolName, manToolName, handle));
 		pi.registerTool(createToolsTypeTool(listToolName, manToolName, typeToolName, handle));
 	}
 
@@ -80,8 +93,12 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 		const toolName = (event as { toolName?: unknown }).toolName;
 		if (typeof toolName === "string") handle.tracker.recordCall(toolName);
 	});
-	pi.on("turn_end", () => {
-		handle.tracker.tick();
+	// The real Phase 3 wiring: ctx.getContextUsage() is a genuine, already-exported Pi SDK API,
+	// reachable from this same handler signature all along -- it was simply never read before this.
+	pi.on("turn_end", (_event, ctx) => {
+		const budget = computeToolContextBudget(ctx.getContextUsage(), handle.budgetOptions, handle.lastKnownBudgetTokens);
+		handle.lastKnownBudgetTokens = budget;
+		handle.tracker.evictToBudget(budget);
 		applyShellActivation(pi, handle);
 	});
 

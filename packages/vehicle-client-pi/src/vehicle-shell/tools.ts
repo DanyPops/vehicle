@@ -30,6 +30,7 @@ import {
 	namespacedOperationsOf,
 	type VehicleShellHandle,
 } from "./state.js";
+import { estimateToolWeightTokens } from "./tool-weight.js";
 
 export function createToolsListTool(listToolName: string, manToolName: string, handle: VehicleShellHandle): ToolDefinition {
 	return {
@@ -124,13 +125,7 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 	};
 }
 
-export function createToolsManTool(
-	pi: ExtensionAPI,
-	listToolName: string,
-	manToolName: string,
-	handle: VehicleShellHandle,
-	discoveredTtlTurns: number,
-): ToolDefinition {
+export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manToolName: string, handle: VehicleShellHandle): ToolDefinition {
 	return {
 		name: manToolName,
 		label: "Tool Manual",
@@ -173,7 +168,13 @@ export function createToolsManTool(
 					if (managed) {
 						if (!managed.available) return `${fullName}: currently unavailable (${manToolName} cannot activate it right now).`;
 						if (managed.blocked) return `${fullName}: blocked by the current safety policy -- not activatable.`;
-						handle.tracker.seed(managed.toolName, discoveredTtlTurns);
+						// Always the real, computed weight -- namespaced carries this operation's own live
+						// description/inputSchema, so there's never a need for a fallback here the way
+						// refreshVehicleShellManagedTools sometimes must (a hand-built test fixture).
+						handle.tracker.seed(
+							managed.toolName,
+							estimateToolWeightTokens({ name: managed.toolName, description: namespaced.description, parameters: namespaced.inputSchema }),
+						);
 						return `${formatOperationManPage(namespaced, managed.toolName, seeAlso)}\n\n(now callable as ${managed.toolName})`;
 					}
 
@@ -190,8 +191,9 @@ export function createToolsManTool(
 					} catch (error) {
 						return `${fullName}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
 					}
-					handle.managedTools = [...handle.managedTools, { vehicleName, toolName, operationName, available: true, blocked: false }];
-					handle.tracker.seed(toolName, discoveredTtlTurns);
+					const weightTokens = estimateToolWeightTokens({ name: toolName, description: namespaced.description, parameters: namespaced.inputSchema });
+					handle.managedTools = [...handle.managedTools, { vehicleName, toolName, operationName, available: true, blocked: false, weightTokens }];
+					handle.tracker.seed(toolName, weightTokens);
 					return `${formatOperationManPage(namespaced, toolName, seeAlso)}\n\n(now callable as ${toolName})`;
 				}),
 			);

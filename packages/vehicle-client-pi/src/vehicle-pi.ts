@@ -32,6 +32,7 @@ import {
 import type { RegisterVehicleToolsWhenReadyOptions } from "./vehicle-pi/ready-retry.js";
 import { registerVehicleToolsWhenReady as registerVehicleToolsWhenReadyImpl } from "./vehicle-pi/ready-retry.js";
 import { reportRenderCoverageGaps } from "./vehicle-pi/render-coverage.js";
+import { estimateToolWeightTokens } from "./vehicle-shell/tool-weight.js";
 import {
 	assertNamesAvailable,
 	buildOperationActivator,
@@ -405,6 +406,11 @@ export interface RegisteredPiVehicleTool {
 	readonly effect: VehicleEffect;
 	/** Resolved allow/ask/blocked -- see classifyVehicleOperationSafety(). A tool is only ever active when `available` is true and this isn't "blocked". */
 	readonly safetyState: VehicleSafetyState;
+	/** This operation's own estimated context cost, in tokens -- vehicle-shell/tool-weight.ts's
+	 * estimateToolWeightTokens, computed once from its real descriptor at registration/refresh time.
+	 * Forwarded into VehicleShellManagedTool for the Vehicle Shell's weighted-LRU eviction (state.ts) --
+	 * unused outside shell mode. */
+	readonly weightTokens: number;
 }
 
 export interface RegisteredPiVehicle {
@@ -761,6 +767,7 @@ export async function registerVehicleTools(
 		permissionsSatisfied: permissionsSatisfied(descriptor.permissions, options.permissions),
 		effect: descriptor.effect,
 		safetyState: resolveSafetyState(manifest.name, descriptor, options),
+		weightTokens: estimateToolWeightTokens({ name: toolName, description: descriptor.description, parameters: descriptor.inputSchema }),
 	}));
 	const shell = registerVehicleShell(pi, manifest.name, shellManagedTools(manifest.name, tools), options.shell);
 	// Registered tools whose operation is currently unavailable (e.g. a
@@ -837,6 +844,7 @@ export async function refreshVehicleToolAvailability(
 			permissionsSatisfied: permissionsSatisfied(descriptor.permissions, options.permissions),
 			effect: descriptor.effect,
 			safetyState: resolveSafetyState(manifest.name, descriptor, options),
+			weightTokens: estimateToolWeightTokens({ name: toolName, description: descriptor.description, parameters: descriptor.inputSchema }),
 		});
 	}
 

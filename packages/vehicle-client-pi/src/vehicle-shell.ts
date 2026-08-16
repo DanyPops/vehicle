@@ -32,4 +32,6 @@ export {
 	type VehicleShellManagedTool,
 	type VehicleShellOptions,
 } from "./vehicle-shell/state.js";
+export { estimateToolWeightTokens, type ToolWeightInput } from "./vehicle-shell/tool-weight.js";
 export { VehicleShellTtlTracker } from "./vehicle-shell/ttl-tracker.js";
+export { type WeightedLruSnapshotEntry, WeightedLruTracker } from "./vehicle-shell/weighted-lru.js";
