@@ -94,7 +94,13 @@ duplication-avoidance is this repo's whole reason to exist.
   a package's public API surface without a version bump reflecting it -- read its own doc
   comments before assuming a flagged diff is a false positive; extend its detection logic when a
   legitimate architectural change is genuinely blocked by an overly narrow rule, rather than
-  bypassing the check.
+  bypassing the check. It only does anything when `GITHUB_REF_NAME` is set to a matching tag --
+  a bare `node scripts/check-release-discipline.mjs` locally is a silent no-op, not a real check.
+  Simulate CI first: `GITHUB_REF_NAME=<package>-v<version> node scripts/check-release-discipline.mjs`.
+  A brand-new exported interface's own required field is never breaking (nobody could depend on
+  a type that didn't exist yet) -- and if testing this script's own logic would require
+  duplicating its filtering inline instead of calling a shared exported function, extract one;
+  a hand-duplicated copy of the real logic can drift and pass while the real code path fails.
 - After pushing tags: watch CI to completion (`pipes:ci.wait`/`ci_subscribe` with the exact
   registered backend name), then verify the version landed on npm (`npm view <pkg> version`) --
   a green CI run and a live npm publish are two separate facts, confirm both.
