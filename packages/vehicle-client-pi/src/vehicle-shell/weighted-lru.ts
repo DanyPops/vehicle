@@ -13,8 +13,13 @@
  * per use than a lighter one, so two tools called equally often still end up ranked apart, with
  * the heavier one sitting closer to eviction. The absolute value is arbitrary (only relative
  * ordering between entries ever matters) -- chosen large enough that priority deltas between a
- * 50-token and a 5,000-token tool stay comfortably distinguishable in floating point. */
-const CALL_CREDIT = 1_000_000;
+ * 50-token and a 5,000-token tool stay comfortably distinguishable in floating point. Overridable
+ * per-tracker (see the constructor) for a caller that wants every entry to compete more or less
+ * aggressively for ranking in absolute terms -- note this has NO effect on relative eviction
+ * order between two entries in the SAME tracker (`credit` cancels out of the bump ratio between
+ * any two entries), only on priority's own absolute magnitude; bootstrap.ts's own legacy-TTL
+ * backward-compat mapping uses the budget bounds instead, precisely because of this. */
+export const DEFAULT_CALL_CREDIT = 1_000_000;
 
 interface WeightedLruEntry {
 	weightTokens: number;
@@ -41,8 +46,12 @@ export class WeightedLruTracker {
 	private readonly entries = new Map<string, WeightedLruEntry>();
 	private readonly calledThisTurn = new Set<string>();
 
+	/** @param callCredit Overrides DEFAULT_CALL_CREDIT -- see that constant's own doc comment for why
+	 * a caller (bootstrap.ts, mapping a deprecated TTL setting) might scale this. */
+	constructor(private readonly callCredit: number = DEFAULT_CALL_CREDIT) {}
+
 	private bump(weightTokens: number): number {
-		return CALL_CREDIT / Math.max(1, weightTokens);
+		return this.callCredit / Math.max(1, weightTokens);
 	}
 
 	/** Starts (or re-activates) tracking a tool at its own weight -- also used to refresh an
@@ -124,4 +133,20 @@ export class WeightedLruTracker {
 			.sort((left, right) => left[1].priority - right[1].priority)
 			.map(([toolName, entry]) => ({ toolName, weightTokens: entry.weightTokens, priority: entry.priority }));
 	}
+}
+
+/**
+ * True when `toolName` is (tied for) the single lowest-priority entry currently tracked -- the
+ * very first candidate evictToBudget would remove if any eviction at all becomes necessary. Not
+ * a prediction of "will actually be evicted soon" (that also depends on the current budget, which
+ * this function deliberately doesn't need) -- just "stands least protected right now, relative to
+ * every other tracked entry." Used by tools_type (name-resolution.ts) to report standing under
+ * the weighted-LRU model, replacing the old remainingTtlTurns countdown.
+ */
+export function isMostEvictable(tracker: WeightedLruTracker, toolName: string): boolean {
+	const snapshot = tracker.snapshot();
+	if (snapshot.length === 0) return false;
+	const lowestPriority = snapshot[0]!.priority;
+	const entry = snapshot.find((candidate) => candidate.toolName === toolName);
+	return entry !== undefined && entry.priority === lowestPriority;
 }

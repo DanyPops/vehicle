@@ -18,6 +18,7 @@ import {
 	applyShellActivation,
 	DEFAULT_AGGREGATE_CACHE_TTL_MS,
 	DEFAULT_CORE_TTL_TURNS,
+	DEFAULT_DISCOVERED_TTL_TURNS,
 	DEFAULT_LIST_TOOL_NAME,
 	DEFAULT_MAN_TOOL_NAME,
 	DEFAULT_TYPE_TOOL_NAME,
@@ -28,6 +29,22 @@ import {
 } from "./state.js";
 import { createToolsListTool, createToolsManTool, createToolsTypeTool } from "./tools.js";
 import { WeightedLruTracker } from "./weighted-lru.js";
+
+/**
+ * Maps the two deprecated flat TTL fields onto a scale factor for the budget bounds -- see
+ * coreTtlTurns's own doc comment (state.ts) for why the budget, not WeightedLruTracker's own
+ * call-credit constant (that only affects priority's absolute magnitude, never relative eviction
+ * order within one tracker -- no observable effect a consumer could actually feel). A bigger
+ * configured TTL meant "I want more things to stay resident" before; a proportionally bigger
+ * budget is the direct, honestly-observable equivalent under real pressure. A consumer at the
+ * exact defaults (the overwhelming majority today, confirmed via a workspace-wide grep) gets
+ * scale factor 1, i.e. every DEFAULT_* budget constant unchanged.
+ */
+function legacyTtlBudgetScaleFactor(options: VehicleShellOptions): number {
+	const legacy = (options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS) + (options.discoveredTtlTurns ?? DEFAULT_DISCOVERED_TTL_TURNS);
+	const defaults = DEFAULT_CORE_TTL_TURNS + DEFAULT_DISCOVERED_TTL_TURNS;
+	return legacy / defaults;
+}
 
 reportModuleLoad(import.meta.url);
 
@@ -56,10 +73,11 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	const listToolName = options.listToolName ?? DEFAULT_LIST_TOOL_NAME;
 	const manToolName = options.manToolName ?? DEFAULT_MAN_TOOL_NAME;
 	const typeToolName = options.typeToolName ?? DEFAULT_TYPE_TOOL_NAME;
+	const legacyScale = legacyTtlBudgetScaleFactor(options);
 	const budgetOptions = {
-		minToolBudgetTokens: options.budget?.minToolBudgetTokens ?? DEFAULT_MIN_TOOL_BUDGET_TOKENS,
-		maxToolBudgetTokens: options.budget?.maxToolBudgetTokens ?? DEFAULT_MAX_TOOL_BUDGET_TOKENS,
-		fractionOfRemaining: options.budget?.fractionOfRemaining ?? DEFAULT_BUDGET_FRACTION_OF_REMAINING,
+		minToolBudgetTokens: options.budget?.minToolBudgetTokens ?? DEFAULT_MIN_TOOL_BUDGET_TOKENS * legacyScale,
+		maxToolBudgetTokens: options.budget?.maxToolBudgetTokens ?? DEFAULT_MAX_TOOL_BUDGET_TOKENS * legacyScale,
+		fractionOfRemaining: options.budget?.fractionOfRemaining ?? DEFAULT_BUDGET_FRACTION_OF_REMAINING * legacyScale,
 	};
 	const handle: VehicleShellHandle = {
 		tracker: new WeightedLruTracker(),
@@ -68,9 +86,8 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 		typeToolName,
 		managedTools: [],
 		coreOperationNames: new Set(),
-		coreTtlTurns: options.coreTtlTurns ?? DEFAULT_CORE_TTL_TURNS,
 		aggregateCacheTtlMs: options.aggregateCacheTtlMs ?? DEFAULT_AGGREGATE_CACHE_TTL_MS,
-		lastKnownBudgetTokens: options.budget?.fallbackBudgetTokens ?? DEFAULT_FALLBACK_BUDGET_TOKENS,
+		lastKnownBudgetTokens: options.budget?.fallbackBudgetTokens ?? DEFAULT_FALLBACK_BUDGET_TOKENS * legacyScale,
 		budgetOptions,
 	};
 	holder[SHELL_HANDLE_KEY] = handle;

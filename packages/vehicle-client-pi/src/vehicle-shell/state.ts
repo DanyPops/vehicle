@@ -50,14 +50,28 @@ export interface VehicleShellManagedTool {
 export const FALLBACK_TOOL_WEIGHT_TOKENS = 50;
 
 export interface VehicleShellOptions {
-	/** Operation names (VehicleOperationDescriptor.name, e.g. "tasks.create") that boot active with
-	 * coreTtlTurns, needing no tools_man call. Everything else boots inactive, reachable only via
-	 * tools_man. Domain-agnostic on purpose -- this package never names a specific consumer's
-	 * operations; the consumer supplies its own list. */
+	/** Operation names (VehicleOperationDescriptor.name, e.g. "tasks.create") that boot active,
+	 * needing no tools_man call. Everything else boots inactive, reachable only via tools_man.
+	 * Domain-agnostic on purpose -- this package never names a specific consumer's operations; the
+	 * consumer supplies its own list. */
 	readonly coreOperations?: readonly string[];
-	/** Starting TTL, in turns, for a core operation. Default 10 -- illustrative, tune from usage. */
+	/**
+	 * @deprecated Superseded by the weighted-LRU + stretchable budget model (see `budget` below) --
+	 * eviction is no longer a fixed turn count, it's real context pressure. Still honored, not a
+	 * silent no-op: this value (combined with discoveredTtlTurns the same way), relative to
+	 * DEFAULT_CORE_TTL_TURNS+DEFAULT_DISCOVERED_TTL_TURNS, scales every budget bound
+	 * (min/max/fractionOfRemaining/fallback) proportionally, unless `budget` is also given
+	 * explicitly (which always wins outright) -- a more generous legacy TTL meant "I want more
+	 * things to stay resident" before, and a proportionally bigger budget is the direct,
+	 * honestly-observable equivalent under real pressure now. Prefer `budget` directly for new
+	 * code; this mapping exists only so an existing consumer's options object keeps working (and
+	 * keeps *some* real effect) unmodified. No consumer as of this migration actually customizes it
+	 * (confirmed via a workspace-wide grep) -- the mapping only ever changes behavior for one that
+	 * starts doing so, or already had, going forward.
+	 */
 	readonly coreTtlTurns?: number;
-	/** Starting TTL, in turns, for an operation activated via tools_man. Default 3 -- illustrative. */
+	/** @deprecated See coreTtlTurns's own doc comment -- combines with it into the same budget-scaling
+	 * factor. */
 	readonly discoveredTtlTurns?: number;
 	/**
 	 * Pi tool name for the list meta-tool. Default "tools_list". The meta-tools are a single,
@@ -119,11 +133,6 @@ export interface VehicleShellHandle {
 	 * handler and the man-page tool both close over this same handle rather than a stale snapshot. */
 	managedTools: readonly VehicleShellManagedTool[];
 	readonly coreOperationNames: ReadonlySet<string>;
-	/** @deprecated no longer literally gates anything under the weighted-LRU model (seed() now
-	 * takes a tool's own weight, not a turn count) -- kept only so an existing consumer's options
-	 * object still typechecks during the deprecation window; see VehicleShellOptions.coreTtlTurns
-	 * and state.ts's own history for the fixed-TTL mechanism this replaced. */
-	readonly coreTtlTurns: number;
 	/** tools_list's own aggregate cache TTL, in milliseconds -- see VehicleShellOptions.aggregateCacheTtlMs. */
 	readonly aggregateCacheTtlMs: number;
 	/** The tool-context budget (in tokens) computed at the end of the most recent turn -- reused as

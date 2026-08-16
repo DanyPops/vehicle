@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { WeightedLruTracker } from "../src/vehicle-shell/weighted-lru.ts";
+import { DEFAULT_CALL_CREDIT, isMostEvictable, WeightedLruTracker } from "../src/vehicle-shell/weighted-lru.ts";
 
 describe("WeightedLruTracker", () => {
 	describe("seed / recordCall / tracking", () => {
@@ -130,6 +130,24 @@ describe("WeightedLruTracker", () => {
 		});
 	});
 
+	describe("constructor callCredit override", () => {
+		it("a higher callCredit produces a proportionally higher priority bump", () => {
+			const generous = new WeightedLruTracker(DEFAULT_CALL_CREDIT * 2);
+			const normal = new WeightedLruTracker(DEFAULT_CALL_CREDIT);
+			generous.seed("a", 100);
+			normal.seed("a", 100);
+			expect(generous.snapshot()[0]!.priority).toBe(normal.snapshot()[0]!.priority * 2);
+		});
+
+		it("defaults to DEFAULT_CALL_CREDIT when omitted", () => {
+			const explicit = new WeightedLruTracker(DEFAULT_CALL_CREDIT);
+			const implicit = new WeightedLruTracker();
+			explicit.seed("a", 100);
+			implicit.seed("a", 100);
+			expect(implicit.snapshot()[0]!.priority).toBe(explicit.snapshot()[0]!.priority);
+		});
+	});
+
 	describe("snapshot", () => {
 		it("orders entries ascending by priority (most-evictable first)", () => {
 			const tracker = new WeightedLruTracker();
@@ -146,6 +164,36 @@ describe("WeightedLruTracker", () => {
 			tracker.snapshot();
 			tracker.snapshot();
 			expect(tracker.trackedNames()).toEqual(["a"]);
+		});
+	});
+
+	describe("isMostEvictable", () => {
+		it("false for an untracked name", () => {
+			const tracker = new WeightedLruTracker();
+			expect(isMostEvictable(tracker, "nonexistent")).toBe(false);
+		});
+
+		it("true when it's the single tracked entry", () => {
+			const tracker = new WeightedLruTracker();
+			tracker.seed("a", 100);
+			expect(isMostEvictable(tracker, "a")).toBe(true);
+		});
+
+		it("true only for the lowest-priority entry among several, false for the rest", () => {
+			const tracker = new WeightedLruTracker();
+			tracker.seed("first", 100);
+			tracker.seed("second", 100);
+			tracker.recordCall("second"); // an extra bump -> strictly higher priority than "first" now
+			expect(isMostEvictable(tracker, "first")).toBe(true);
+			expect(isMostEvictable(tracker, "second")).toBe(false);
+		});
+
+		it("reports every tied-lowest entry as true, not just one", () => {
+			const tracker = new WeightedLruTracker();
+			tracker.seed("a", 100);
+			tracker.seed("b", 100); // same weight, same single bump -- tied priority
+			expect(isMostEvictable(tracker, "a")).toBe(true);
+			expect(isMostEvictable(tracker, "b")).toBe(true);
 		});
 	});
 });

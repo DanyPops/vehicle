@@ -247,7 +247,8 @@ describe("classifyOperationName", () => {
 		const tracker = new WeightedLruTracker();
 		tracker.seed("tasks_depend", 5);
 		const result = classifyOperationName("papyrus:tasks.depend", [namespaced("papyrus", "tasks.depend")], [managedTool()], tracker);
-		expect(result).toEqual({ status: "active", toolName: "tasks_depend", weightTokens: 5 });
+		// A single tracked entry is trivially its own lowest-priority one -- nearEviction: true here.
+		expect(result).toEqual({ status: "active", toolName: "tasks_depend", weightTokens: 5, nearEviction: true });
 	});
 
 	it("dormant: known and pre-registered, but not currently tracked", () => {
@@ -327,11 +328,21 @@ describe("formatOperationTypeLine", () => {
 		expect(
 			formatOperationTypeLine(
 				"papyrus:tasks.depend",
-				{ status: "active", toolName: "tasks_depend", weightTokens: 3 },
+				{ status: "active", toolName: "tasks_depend", weightTokens: 3, nearEviction: false },
 				"tools_man",
 				"tools_list",
 			),
 		).toBe("papyrus:tasks.depend: active -- callable now as tasks_depend (~3 token(s) of context).");
+		expect(
+			formatOperationTypeLine(
+				"papyrus:tasks.depend",
+				{ status: "active", toolName: "tasks_depend", weightTokens: 3, nearEviction: true },
+				"tools_man",
+				"tools_list",
+			),
+		).toBe(
+			"papyrus:tasks.depend: active -- callable now as tasks_depend (~3 token(s) of context) -- least protected right now, likely first evicted under context pressure.",
+		);
 		expect(formatOperationTypeLine("papyrus:tasks.depend", { status: "dormant" }, "tools_man", "tools_list")).toBe(
 			"papyrus:tasks.depend: dormant -- known, not yet activated. Call tools_man on it to make it callable.",
 		);
@@ -360,7 +371,7 @@ describe("formatOperationTypeLine", () => {
 		expect(
 			formatOperationTypeLine(
 				"papyrus:tasks.depend",
-				{ status: "active", toolName: "tasks_depend", weightTokens: undefined },
+				{ status: "active", toolName: "tasks_depend", weightTokens: undefined, nearEviction: false },
 				"tools_man",
 				"tools_list",
 			),

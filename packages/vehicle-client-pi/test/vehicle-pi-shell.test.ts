@@ -548,6 +548,24 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools).not.toContain("tools_list");
 		expect(harness.activeTools).not.toContain("tools_man");
 	});
+
+	// The deprecated coreTtlTurns/discoveredTtlTurns fields are still real, not a silent no-op --
+	// they scale the budget bounds proportionally (see bootstrap.ts's legacyTtlBudgetScaleFactor).
+	// Setting both to 0 collapses every budget bound to 0, exactly like a real, explicit zero budget.
+	it("the deprecated coreTtlTurns/discoveredTtlTurns fields still have a real effect -- scaling the budget, not a silent no-op", async () => {
+		const { pi, tools, harness } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend")])), {
+			shell: { coreTtlTurns: 0, discoveredTtlTurns: 0 },
+		});
+		await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.depend"] });
+		expect(harness.activeTools).toContain("tasks_depend");
+
+		await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // protected -- just activated
+		expect(harness.activeTools).toContain("tasks_depend");
+
+		await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // unprotected -- 0 budget forces eviction
+		expect(harness.activeTools).not.toContain("tasks_depend");
+	});
 });
 
 describe("registerVehicleTools honors VEHICLE_SHELL_DISABLED", () => {
@@ -849,7 +867,10 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 
 			const result = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.create"] })) as { content: Array<{ text: string }> };
 			const weight = estimateToolWeightTokens({ name: "tasks_create", description: descriptor.description, parameters: descriptor.inputSchema });
-			expect(result.content[0]?.text).toBe(`papyrus:tasks.create: active -- callable now as tasks_create (~${weight} token(s) of context).`);
+			// The only tracked entry is trivially its own lowest-priority one -- reported as near eviction.
+			expect(result.content[0]?.text).toBe(
+				`papyrus:tasks.create: active -- callable now as tasks_create (~${weight} token(s) of context) -- least protected right now, likely first evicted under context pressure.`,
+			);
 		});
 
 		it("reports a non-core operation as dormant until tools_man activates it, then active afterward", async () => {

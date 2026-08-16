@@ -6,7 +6,7 @@
 
 import type { VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { VehicleShellManagedTool } from "./state.js";
-import type { WeightedLruTracker } from "./weighted-lru.js";
+import { isMostEvictable, type WeightedLruTracker } from "./weighted-lru.js";
 
 /** Splits a namespaced "<vehicle>:<operation>" name; undefined when name carries no vehicle prefix at all. */
 export function splitNamespacedName(name: string): { vehicleName: string; operationName: string } | undefined {
@@ -55,7 +55,14 @@ export function resolveOperationName(name: string, operations: readonly VehicleM
 }
 
 export type OperationTypeResult =
-	| { readonly status: "active"; readonly toolName: string; readonly weightTokens: number | undefined }
+	| {
+			readonly status: "active";
+			readonly toolName: string;
+			readonly weightTokens: number | undefined;
+			/** True when this is (tied for) the single most evictable tool currently tracked -- see
+			 * weighted-lru.ts's isMostEvictable for exactly what this does and doesn't promise. */
+			readonly nearEviction: boolean;
+	  }
 	| { readonly status: "dormant" }
 	| { readonly status: "blocked"; readonly reason: string }
 	| { readonly status: "unreachable"; readonly vehicleName: string }
@@ -102,7 +109,12 @@ export function classifyOperationName(
 		if (!managed.available) return { status: "blocked", reason: "currently unavailable" };
 		if (managed.blocked) return { status: "blocked", reason: "blocked by the current safety policy" };
 		if (tracker.isTracked(managed.toolName)) {
-			return { status: "active", toolName: managed.toolName, weightTokens: tracker.weightOf(managed.toolName) };
+			return {
+				status: "active",
+				toolName: managed.toolName,
+				weightTokens: tracker.weightOf(managed.toolName),
+				nearEviction: isMostEvictable(tracker, managed.toolName),
+			};
 		}
 		return { status: "dormant" };
 	}
@@ -120,7 +132,8 @@ export function formatOperationTypeLine(name: string, result: OperationTypeResul
 	switch (result.status) {
 		case "active": {
 			const weight = result.weightTokens !== undefined ? ` (~${result.weightTokens} token(s) of context)` : "";
-			return `${name}: active -- callable now as ${result.toolName}${weight}.`;
+			const standing = result.nearEviction ? " -- least protected right now, likely first evicted under context pressure" : "";
+			return `${name}: active -- callable now as ${result.toolName}${weight}${standing}.`;
 		}
 		case "dormant":
 			return `${name}: dormant -- known, not yet activated. Call ${manToolName} on it to make it callable.`;
