@@ -7,7 +7,6 @@ import type {
 	VehicleFailure,
 	VehicleInvocationOptions,
 	VehicleManifest,
-	VehicleManifestOperation,
 	VehicleOperationDescriptor,
 	VehiclePrincipal,
 } from "@danypops/vehicle-core";
@@ -30,25 +29,28 @@ import {
 	type RegisterVehicleToolsHandshakeOptions,
 	resolveManifestForRegistration,
 } from "./vehicle-manifest-handshake.js";
+import type { RegisterVehicleToolsWhenReadyOptions } from "./vehicle-pi/ready-retry.js";
+import { registerVehicleToolsWhenReady as registerVehicleToolsWhenReadyImpl } from "./vehicle-pi/ready-retry.js";
+import { reportRenderCoverageGaps } from "./vehicle-pi/render-coverage.js";
+import {
+	assertNamesAvailable,
+	buildOperationActivator,
+	createTool,
+	projectedNames,
+	shellManagedTools,
+} from "./vehicle-pi/tool-creation.js";
 import {
 	boundVehicleModelContent,
 	defaultToolName,
-	displayLabel,
 	formatJson,
 	modelContentFor,
 	operationKey,
 	permissionsSatisfied,
 	publishOperationActivity,
-	sleep,
 	vehicleIdentity,
 } from "./vehicle-pi-primitives.js";
-import { renderVehicleCall, renderVehicleResult, type VehiclePresenter } from "./vehicle-render.js";
-import {
-	assertJsonSafePresentation,
-	DEFAULT_PRESENTATION_MAX_BYTES,
-	projectGenericVehiclePresentation,
-	projectGenericVehicleProgress,
-} from "./vehicle-render-model.js";
+import type { VehiclePresenter } from "./vehicle-render.js";
+import { assertJsonSafePresentation } from "./vehicle-render-model.js";
 import type { RegisterVehicleToolsSafetyOptions, VehicleSafetyPolicyStore, VehicleSafetyState } from "./vehicle-safety.js";
 import {
 	approvalRequestId,
@@ -74,6 +76,11 @@ export type {
 	RegisterVehicleToolsApprovalOptions,
 } from "./vehicle-local-approval.js";
 export type { RegisterVehicleToolsHandshakeOptions } from "./vehicle-manifest-handshake.js";
+export type {
+	RegisterVehicleToolsWhenReadyOptions,
+	VehicleReadyEvent,
+	VehicleReadyRetryOptions,
+} from "./vehicle-pi/ready-retry.js";
 export {
 	boundVehicleModelContent,
 	DEFAULT_MODEL_CONTENT_MAX_BYTES,
@@ -421,57 +428,6 @@ export class PiVehiclePresentationProjectionError extends Error {
 	}
 }
 
-/**
- * Never projects VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME as a Pi tool, even
- * when it's present in the manifest (any registry with configureApprovals()
- * enabled registers it) and the caller's own options.permissions happens to
- * cover its required permission. It is invoked exactly one way in this
- * package -- client.invoke() from inside the approval-required retry dance
- * below, using options.permissions the extension author fixed at
- * registration time -- never as a tool call a model can choose to make.
- * Exposing it as a model-callable tool would let a model grant its own
- * pending approval requests, defeating the human-in-the-loop point of the
- * gate entirely.
- */
-function projectedNames(
-	manifest: VehicleManifest,
-	nameProjector: NonNullable<RegisterVehicleToolsOptions["toolName"]>,
-): Array<{ descriptor: VehicleManifestOperation; toolName: string }> {
-	const versionCounts = new Map<string, number>();
-	for (const descriptor of manifest.operations) {
-		versionCounts.set(descriptor.name, (versionCounts.get(descriptor.name) ?? 0) + 1);
-	}
-	return manifest.operations
-		.filter((descriptor) => descriptor.name !== VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME)
-		.map((descriptor) => ({
-			descriptor,
-			toolName: nameProjector(descriptor, (versionCounts.get(descriptor.name) ?? 0) > 1),
-		}));
-}
-
-function assertNamesAvailable(
-	projected: readonly { descriptor: VehicleManifestOperation; toolName: string }[],
-	existingToolNames: readonly string[],
-): void {
-	const owners = new Map<string, string>();
-	for (const { descriptor, toolName } of projected) {
-		if (!/^[a-zA-Z0-9_-]+$/.test(toolName)) {
-			throw new Error(`Projected Pi tool name '${toolName}' for ${operationKey(descriptor)} is invalid`);
-		}
-		const owner = owners.get(toolName);
-		if (owner) {
-			throw new Error(`Pi tool name collision: ${owner} and ${operationKey(descriptor)} both project to '${toolName}'`);
-		}
-		owners.set(toolName, operationKey(descriptor));
-	}
-	const existing = new Set(existingToolNames);
-	for (const { descriptor, toolName } of projected) {
-		if (existing.has(toolName)) {
-			throw new Error(`Pi tool '${toolName}' is already registered; refusing to override it with ${operationKey(descriptor)}`);
-		}
-	}
-}
-
 export interface VehicleOperationInvocationParams {
 	readonly client: VehicleClient;
 	readonly manifest: VehicleManifest;
@@ -738,97 +694,6 @@ export async function invokeVehicleOperation(params: VehicleOperationInvocationP
 	return projectPresentation(ctx, presentationOutput, content);
 }
 
-const GENERIC_PRESENTATION_PROJECTOR: PiVehiclePresentationProjector = Object.freeze({
-	maxBytes: DEFAULT_PRESENTATION_MAX_BYTES,
-	project: (output: unknown) => projectGenericVehiclePresentation(output, DEFAULT_PRESENTATION_MAX_BYTES) as unknown as JsonValue,
-	projectProgress: (progress: unknown) => projectGenericVehicleProgress(progress, DEFAULT_PRESENTATION_MAX_BYTES) as unknown as JsonValue,
-});
-
-function createTool(
-	client: VehicleClient,
-	manifest: VehicleManifest,
-	descriptor: VehicleOperationDescriptor,
-	toolName: string,
-	options: RegisterVehicleToolsOptions,
-): ToolDefinition<TSchema, PiVehicleToolDetails> {
-	const overrides = options.renderers?.(descriptor);
-	const presentation = options.presentations?.(descriptor);
-	// A custom legacy renderResult with no paired projector keeps {vehicle, output}; every generic row uses the bounded v1 DTO.
-	const presentationProjector = presentation?.projector ?? (overrides?.renderResult ? undefined : GENERIC_PRESENTATION_PROJECTOR);
-	return {
-		name: toolName,
-		label: displayLabel(descriptor),
-		description: descriptor.description,
-		// Without this, Pi omits the tool from the "Available tools" section of
-		// its default system prompt entirely -- confirmed live: a projected tool
-		// was registered and technically callable, but the model had no way to
-		// know it existed and reported it as unavailable when asked directly.
-		promptSnippet: descriptor.description,
-		parameters: descriptor.inputSchema as TSchema,
-		executionMode: options.executionMode?.(descriptor),
-		renderCall: overrides?.renderCall ?? ((args, theme, context) => renderVehicleCall(descriptor, args, theme, context)),
-		renderResult:
-			presentation?.renderResult ??
-			overrides?.renderResult ??
-			((result, resultOptions, theme, context) =>
-				renderVehicleResult(descriptor, result, resultOptions, theme, context, options.progressBarGlyphs, options.renderPresenters)),
-		async execute(toolCallId, input, signal, onUpdate, context) {
-			const result = await invokeVehicleOperation({
-				client,
-				manifest,
-				descriptor,
-				toolName,
-				toolCallId,
-				input,
-				context,
-				signal,
-				onUpdate,
-				options,
-				presentationProjector,
-			});
-			return { content: [...result.content], details: result.details };
-		},
-	};
-}
-
-/**
- * Builds this vehicle's own operation-activation closure -- the one thing every vehicle supplies
- * into the shared in-process registry (vehicle-shell-registry.ts's registerInProcessVehicle) so
- * the process-wide, vehicle-agnostic tools_man (vehicle-shell.ts) can dynamically activate any of
- * this vehicle's own non-core operations using THIS vehicle's own permissions/principal/renderers/
- * safety policy -- never borrowed from whichever vehicle happens to house the shared meta-tools'
- * own creation call, the way a single accidental "owner" used to force on every other vehicle's
- * discovered operations.
- *
- * Also doubles as the mechanism for a genuinely new operation a fresh manifest re-fetch reveals
- * this vehicle's own initial registration never knew about (a daemon that hot-adds an operation
- * while this session is already running) -- the exact same createTool() every operation known at
- * registration time already gets, just called on demand instead of upfront.
- *
- * Tool name is namespaced by vehicle name up front (e.g. "packed_package_install") specifically so
- * two different vehicles can never collide with each other on a shared operation name; within one
- * vehicle's own operations, defaultToolName's own uniqueness already holds. Still guards against
- * every other kind of collision (this vehicle's own name colliding with an already-registered
- * tool, or the rare case of two distinct operations sanitizing to the same name) via the same
- * assertNamesAvailable check static registration already uses, surfacing a clear error tools_man
- * turns into a friendly non-crashing message rather than silently overwriting an existing tool.
- */
-function buildOperationActivator(
-	pi: ExtensionAPI,
-	vehicleName: string,
-	client: VehicleClient,
-	manifest: VehicleManifest,
-	options: RegisterVehicleToolsOptions,
-): (descriptor: VehicleManifestOperation) => string {
-	return (descriptor) => {
-		const toolName = `${defaultToolName({ ...descriptor, name: vehicleName }, false)}_${defaultToolName(descriptor, false)}`;
-		const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
-		assertNamesAvailable([{ descriptor, toolName }], runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
-		pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
-		return toolName;
-	};
-}
-
 /**
  * Projects a `VehicleClient`'s manifest into native Pi tools,
  * preserving exact operation versions, schemas, cancellation, Pi
@@ -864,26 +729,6 @@ function buildOperationActivator(
  * ```
  */
 
-/** Default onGap: one console.warn line naming the vehicle and every gap operation, so an
- * un-audited operation is at minimum visible in whatever logs this process already writes
- * to, without requiring a consumer to supply its own logger just to see anything at all. */
-function defaultRenderCoverageGapLogger(vehicleName: string, gaps: readonly string[]): void {
-	console.warn(`[${vehicleName}] operation(s) with no curated renderer (falls back to the generic Vehicle fallback): ${gaps.join(", ")}`);
-}
-
-/** Never throws -- a coverage audit is a diagnostic, not a gate; a bug in the audit itself
- * must never prevent real registration from completing. */
-function reportRenderCoverageGaps(manifest: VehicleManifest, renderCoverage: RegisterVehicleToolsOptions["renderCoverage"]): void {
-	if (!renderCoverage) return;
-	try {
-		const covered = new Set(renderCoverage.operations);
-		const gaps = manifest.operations.map((operation) => operation.name).filter((name) => !covered.has(name));
-		if (gaps.length > 0) (renderCoverage.onGap ?? defaultRenderCoverageGapLogger)(manifest.name, gaps);
-	} catch {
-		// A broken audit must never break real tool registration.
-	}
-}
-
 export async function registerVehicleTools(
 	pi: ExtensionAPI,
 	client: VehicleClient,
@@ -891,14 +736,20 @@ export async function registerVehicleTools(
 ): Promise<RegisteredPiVehicle> {
 	const options = normalizeRegisterVehicleToolsOptions(rawOptions);
 	const { manifest, stale } = await resolveManifestForRegistration(client, options.manifestCache, options.handshake);
-	registerInProcessVehicle(manifest.name, manifest, client, buildOperationActivator(pi, manifest.name, client, manifest, options));
+	const toolDeps = { invoke: invokeVehicleOperation };
+	registerInProcessVehicle(
+		manifest.name,
+		manifest,
+		client,
+		buildOperationActivator(toolDeps, pi, manifest.name, client, manifest, options),
+	);
 	const projected = projectedNames(manifest, options.toolName ?? defaultToolName);
 	const runtime = tryExtensionRuntimeAction(() => pi.getAllTools());
 	assertNamesAvailable(projected, runtime.status === "ready" ? runtime.value.map((tool) => tool.name) : []);
 	reportRenderCoverageGaps(manifest, options.renderCoverage);
 
 	for (const { descriptor, toolName } of projected) {
-		pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
+		pi.registerTool(createTool(toolDeps, client, manifest, descriptor, toolName, options));
 	}
 	if (options.closeClientOnSessionShutdown) {
 		pi.on("session_shutdown", async () => {
@@ -943,17 +794,6 @@ export async function registerVehicleTools(
 	return { manifest, tools, stale, ...(shell ? { shell } : {}) };
 }
 
-/** RegisteredPiVehicleTool's own available/blocked facts, narrowed to what vehicle-shell.ts needs -- keeps that file from importing this one's own (much larger) type. vehicleName disambiguates operationName across vehicles now that one shared handle covers every vehicle in the process, not just this one. */
-function shellManagedTools(vehicleName: string, tools: readonly RegisteredPiVehicleTool[]) {
-	return tools.map((tool) => ({
-		vehicleName,
-		toolName: tool.toolName,
-		operationName: tool.operationName,
-		available: tool.available,
-		blocked: tool.safetyState === "blocked",
-	}));
-}
-
 /**
  * Re-fetches the manifest and re-syncs which of this Vehicle's Pi tools are
  * currently active, without ever re-registering a tool this call has
@@ -991,7 +831,7 @@ export async function refreshVehicleToolAvailability(
 	const tools: RegisteredPiVehicleTool[] = [];
 	for (const { descriptor, toolName } of projected) {
 		if (!known.has(operationKey(descriptor))) {
-			pi.registerTool(createTool(client, manifest, descriptor, toolName, options));
+			pi.registerTool(createTool({ invoke: invokeVehicleOperation }, client, manifest, descriptor, toolName, options));
 		}
 		tools.push({
 			toolName,
@@ -1019,151 +859,13 @@ export async function refreshVehicleToolAvailability(
 	return { manifest, tools, stale: false, ...(registered.shell ? { shell: registered.shell } : {}) };
 }
 
-/**
- * One attempt's outcome, reported through `log` instead of the silent
- * return/bare-catch every consumer independently reimplemented (pi-tickets'
- * registerTicketsVehicle, pi-papyrus's registerNotesVehicle): `resolveClient`
- * returning undefined (no daemon target resolvable yet), `resolveClient`
- * throwing, or `registerVehicleTools` itself throwing all previously
- * vanished with zero diagnostic trail. `attempt`/`attempts` are 1-based and
- * inclusive, e.g. "2 of 5".
- */
-export type VehicleReadyEvent =
-	| { readonly kind: "client-unavailable"; readonly attempt: number; readonly attempts: number; readonly ctx: ExtensionContext }
-	| {
-			readonly kind: "client-resolution-failed";
-			readonly attempt: number;
-			readonly attempts: number;
-			readonly error: unknown;
-			readonly ctx: ExtensionContext;
-	  }
-	| {
-			readonly kind: "registration-failed";
-			readonly attempt: number;
-			readonly attempts: number;
-			readonly error: unknown;
-			readonly ctx: ExtensionContext;
-	  }
-	| { readonly kind: "registered"; readonly attempt: number; readonly ctx: ExtensionContext }
-	| { readonly kind: "exhausted"; readonly attempts: number; readonly ctx: ExtensionContext };
-
-export interface VehicleReadyRetryOptions {
-	/** Total attempts across the whole resolve+register sequence, including the first. Defaults to 6. */
-	readonly attempts?: number;
-	/** Delay before the second attempt. Defaults to 250ms. */
-	readonly initialDelayMs?: number;
-	/** No retry delay is ever allowed to exceed this. Defaults to 5000ms. */
-	readonly maxDelayMs?: number;
-	/** Multiplier applied to the delay after each failed attempt. Defaults to 2. */
-	readonly growFactor?: number;
-}
-
-export interface RegisterVehicleToolsWhenReadyOptions extends RegisterVehicleToolsOptions {
-	/** Every resolution/registration outcome, success or failure -- see VehicleReadyEvent. Omitting this restores today's silent behavior; a caller wanting the fix should always supply one (e.g. ctx.ui.notify or a structured logger). */
-	readonly log?: (event: VehicleReadyEvent) => void;
-	readonly retry?: VehicleReadyRetryOptions;
-}
-
-const DEFAULT_READY_RETRY_ATTEMPTS = 6;
-const DEFAULT_READY_INITIAL_DELAY_MS = 250;
-const DEFAULT_READY_MAX_DELAY_MS = 5_000;
-const DEFAULT_READY_GROW_FACTOR = 2;
-
-/** Same jittered exponential-backoff shape as handshakeRetryDelayMs, sized for the coarser-grained problem this solves: a daemon that hasn't started at all yet (seconds), not a manifest call mid-flight (milliseconds). */
-function readyRetryDelayMs(attemptJustFailed: number, retry: VehicleReadyRetryOptions | undefined): number {
-	const initialDelayMs = retry?.initialDelayMs ?? DEFAULT_READY_INITIAL_DELAY_MS;
-	const maxDelayMs = retry?.maxDelayMs ?? DEFAULT_READY_MAX_DELAY_MS;
-	const growFactor = retry?.growFactor ?? DEFAULT_READY_GROW_FACTOR;
-	const raw = Math.min(initialDelayMs * growFactor ** (attemptJustFailed - 1), maxDelayMs);
-	return raw * (0.8 + Math.random() * 0.4);
-}
-
-/**
- * Wraps `registerVehicleTools` with the one step it never owned: resolving
- * the daemon target and building a client in the first place. That step is
- * inherently consumer-specific (each daemon has its own handle file/target
- * resolution), which is why it was never centralized here before -- but the
- * failure handling around it (silent return on no target, bare catch on any
- * error, no later retry) was reimplemented identically by every consumer
- * and always dropped the failure on the floor. This centralizes that
- * handling once: every step logs through `log` instead of vanishing, and a
- * daemon that is merely slow to start gets bounded retries (see
- * VehicleReadyRetryOptions) instead of a permanent zero-tools outcome for
- * the rest of the session.
- *
- * Registers one `session_start` handler that kicks off the resolve+register
- * sequence in the background (never blocks session_start itself on a
- * multi-attempt backoff) and returns a promise that settles once the
- * sequence either succeeds or exhausts its attempts -- awaiting it is
- * optional, useful mainly for tests and for a caller that wants to know the
- * final outcome (e.g. to show one status line) without polling.
- *
- * Every other `RegisterVehicleToolsOptions` field (including the opt-in
- * `shell` activation mode) passes straight through to the eventual
- * `registerVehicleTools` call unchanged.
- */
+/** Thin re-export wrapper -- see vehicle-pi/ready-retry.ts's own doc comment. Injects this
+ * module's own registerVehicleTools as the one real (non-type) coupling ready-retry.ts needs
+ * back here, avoiding an import cycle. */
 export function registerVehicleToolsWhenReady(
 	pi: ExtensionAPI,
 	resolveClient: () => Promise<VehicleClient | undefined>,
 	options: RegisterVehicleToolsWhenReadyOptions = {},
 ): Promise<RegisteredPiVehicle | undefined> {
-	const attempts = Math.max(1, options.retry?.attempts ?? DEFAULT_READY_RETRY_ATTEMPTS);
-	let settle!: (value: RegisteredPiVehicle | undefined) => void;
-	const done = new Promise<RegisteredPiVehicle | undefined>((resolve) => {
-		settle = resolve;
-	});
-
-	// `attempt` reuses one ctx captured at session_start across every retry, including across the
-	// sleep between attempts -- a session replaced or reloaded during that window leaves `ctx`
-	// stale (see extensions.md's "Session replacement lifecycle and footguns"), and a caller's own
-	// `log` reading e.g. event.ctx.ui then throws. `attempt` itself runs fire-and-forget (see the
-	// `void attempt(1, ctx)` call below), so any exception escaping `log` would otherwise surface
-	// as an unhandled rejection that kills the whole host process, not just this one registration
-	// attempt. safeLog swallows that failure so a broken/now-stale log callback can never do that,
-	// and so every terminal branch still reaches its own settle() call.
-	function safeLog(event: VehicleReadyEvent): void {
-		try {
-			options.log?.(event);
-		} catch (error) {
-			console.error(`registerVehicleToolsWhenReady: log callback threw for a "${event.kind}" event -- ${error}`);
-		}
-	}
-
-	async function attempt(attemptNumber: number, ctx: ExtensionContext): Promise<void> {
-		let client: VehicleClient | undefined;
-		let resolutionFailed = false;
-		try {
-			client = await resolveClient();
-		} catch (error) {
-			safeLog({ kind: "client-resolution-failed", attempt: attemptNumber, attempts, error, ctx });
-			resolutionFailed = true;
-		}
-
-		if (client) {
-			try {
-				const registered = await registerVehicleTools(pi, client, options);
-				safeLog({ kind: "registered", attempt: attemptNumber, ctx });
-				settle(registered);
-				return;
-			} catch (error) {
-				safeLog({ kind: "registration-failed", attempt: attemptNumber, attempts, error, ctx });
-			}
-		} else if (!resolutionFailed) {
-			safeLog({ kind: "client-unavailable", attempt: attemptNumber, attempts, ctx });
-		}
-
-		if (attemptNumber >= attempts) {
-			safeLog({ kind: "exhausted", attempts, ctx });
-			settle(undefined);
-			return;
-		}
-		await sleep(readyRetryDelayMs(attemptNumber, options.retry));
-		await attempt(attemptNumber + 1, ctx);
-	}
-
-	pi.on("session_start", (_event, ctx) => {
-		void attempt(1, ctx);
-	});
-
-	return done;
+	return registerVehicleToolsWhenReadyImpl({ registerVehicleTools }, pi, resolveClient, options);
 }
