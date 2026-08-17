@@ -29,6 +29,8 @@ export const LOOPBACK_HOST = "127.0.0.1";
 export interface DaemonPaths {
 	/** Linux: XDG_DATA_HOME/<name>/<databaseFilename>. macOS: ~/Library/Application Support/<name>/<databaseFilename>. Windows: %LOCALAPPDATA%\<name>\Data\<databaseFilename>. */
 	database: string;
+	/** Same directory convention as `database`, distinct filename -- a Vehicle's own tool/operation usage metrics store (see vehicle-metrics-store.ts), kept separate from `database` so a consumer that already manages its own domain schema in `database` never has to share a connection or a migration sequence with metrics. */
+	metrics: string;
 	/** Linux: XDG_STATE_HOME/<name>/<tokenFilename>. macOS/Windows: alongside `database` -- neither platform has a distinct "state" convention separate from app data. */
 	token: string;
 	/** Linux: XDG_RUNTIME_DIR/<name>/<handleFilename>. macOS/Windows: under the OS temp directory -- see the module doc comment for why this is a weaker guarantee than XDG_RUNTIME_DIR there. */
@@ -77,7 +79,11 @@ export interface DaemonPathNames {
 	handleFilename: string;
 	/** Input filename for the Linux systemd unit specifically (e.g. "acme.service") -- other platforms' service-install work supplies their own naming. */
 	systemdUnitName: string;
+	/** Defaults to "metrics.sqlite" -- optional so every existing DaemonPathNames construction across the ecosystem keeps compiling unchanged; a consumer only needs to set this to avoid the default name. */
+	metricsFilename?: string;
 }
+
+const DEFAULT_METRICS_FILENAME = "metrics.sqlite";
 
 export function resolveDaemonPaths(names: DaemonPathNames, options: PathEnvironment = {}): DaemonPaths {
 	const platform = options.platform ?? process.platform;
@@ -96,6 +102,7 @@ function resolveLinuxDaemonPaths(names: DaemonPathNames, options: PathEnvironmen
 	const configHome = env.XDG_CONFIG_HOME ?? join(home, ".config");
 	return {
 		database: join(dataHome, names.stateDirectoryName, names.databaseFilename),
+		metrics: join(dataHome, names.stateDirectoryName, names.metricsFilename ?? DEFAULT_METRICS_FILENAME),
 		token: join(stateHome, names.stateDirectoryName, names.tokenFilename),
 		handle: join(runtimeHome, names.stateDirectoryName, names.handleFilename),
 		serviceDescriptor: join(configHome, "systemd", "user", names.systemdUnitName),
@@ -107,6 +114,7 @@ function resolveMacDaemonPaths(names: DaemonPathNames, home: string): DaemonPath
 	const appSupport = join(library, "Application Support", names.stateDirectoryName);
 	return {
 		database: join(appSupport, names.databaseFilename),
+		metrics: join(appSupport, names.metricsFilename ?? DEFAULT_METRICS_FILENAME),
 		token: join(appSupport, names.tokenFilename),
 		handle: join(tmpdir(), names.stateDirectoryName, names.handleFilename),
 		serviceDescriptor: join(appSupport, names.systemdUnitName),
@@ -122,6 +130,7 @@ function resolveWindowsDaemonPaths(names: DaemonPathNames, env: Record<string, s
 	const dataDir = win32.join(localAppData, names.stateDirectoryName, "Data");
 	return {
 		database: win32.join(dataDir, names.databaseFilename),
+		metrics: win32.join(dataDir, names.metricsFilename ?? DEFAULT_METRICS_FILENAME),
 		token: win32.join(dataDir, names.tokenFilename),
 		handle: win32.join(localAppData, "Temp", names.stateDirectoryName, names.handleFilename),
 		serviceDescriptor: win32.join(appData, names.stateDirectoryName, "Config", names.systemdUnitName),

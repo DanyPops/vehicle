@@ -35,6 +35,7 @@ describe("resolveDaemonPaths", () => {
 			env: { XDG_DATA_HOME: "/data", XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run/u", XDG_CONFIG_HOME: "/config" },
 		});
 		expect(paths.database).toBe("/data/acme-daemon/db.sqlite");
+		expect(paths.metrics).toBe("/data/acme-daemon/metrics.sqlite");
 		expect(paths.token).toBe("/state/acme-daemon/token");
 		expect(paths.handle).toBe("/run/u/acme-daemon/handle.json");
 		expect(paths.serviceDescriptor).toBe("/config/systemd/user/acme.service");
@@ -43,6 +44,7 @@ describe("resolveDaemonPaths", () => {
 	it("Linux: falls back to conventional dotfile locations when XDG vars are unset", () => {
 		const paths = resolveDaemonPaths(NAMES, { platform: "linux", env: {}, home: "/home/x", uid: 1000 });
 		expect(paths.database).toBe("/home/x/.local/share/acme-daemon/db.sqlite");
+		expect(paths.metrics).toBe("/home/x/.local/share/acme-daemon/metrics.sqlite");
 		expect(paths.token).toBe("/home/x/.local/state/acme-daemon/token");
 		expect(paths.handle).toBe("/run/user/1000/acme-daemon/handle.json");
 		expect(paths.serviceDescriptor).toBe("/home/x/.config/systemd/user/acme.service");
@@ -51,6 +53,7 @@ describe("resolveDaemonPaths", () => {
 	it("macOS: uses ~/Library/Application Support for data/token, temp dir for the handle", () => {
 		const paths = resolveDaemonPaths(NAMES, { platform: "darwin", home: "/Users/x" });
 		expect(paths.database).toBe("/Users/x/Library/Application Support/acme-daemon/db.sqlite");
+		expect(paths.metrics).toBe("/Users/x/Library/Application Support/acme-daemon/metrics.sqlite");
 		expect(paths.token).toBe("/Users/x/Library/Application Support/acme-daemon/token");
 		expect(paths.handle.endsWith("acme-daemon/handle.json")).toBe(true);
 		expect(paths.serviceDescriptor).toBe("/Users/x/Library/Application Support/acme-daemon/acme.service");
@@ -63,6 +66,7 @@ describe("resolveDaemonPaths", () => {
 			env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local", APPDATA: "C:\\Users\\x\\AppData\\Roaming" },
 		});
 		expect(paths.database).toBe("C:\\Users\\x\\AppData\\Local\\acme-daemon\\Data\\db.sqlite");
+		expect(paths.metrics).toBe("C:\\Users\\x\\AppData\\Local\\acme-daemon\\Data\\metrics.sqlite");
 		expect(paths.token).toBe("C:\\Users\\x\\AppData\\Local\\acme-daemon\\Data\\token");
 		expect(paths.handle).toBe("C:\\Users\\x\\AppData\\Local\\Temp\\acme-daemon\\handle.json");
 		expect(paths.serviceDescriptor).toBe("C:\\Users\\x\\AppData\\Roaming\\acme-daemon\\Config\\acme.service");
@@ -72,6 +76,15 @@ describe("resolveDaemonPaths", () => {
 		const paths = resolveDaemonPaths(NAMES, { platform: "win32", home: "C:\\Users\\x", env: {} });
 		expect(paths.database).toBe("C:\\Users\\x\\AppData\\Local\\acme-daemon\\Data\\db.sqlite");
 		expect(paths.serviceDescriptor).toBe("C:\\Users\\x\\AppData\\Roaming\\acme-daemon\\Config\\acme.service");
+	});
+
+	it("metricsFilename override replaces the default \"metrics.sqlite\" name, on every platform", () => {
+		const namesWithOverride = { ...NAMES, metricsFilename: "usage.sqlite" };
+		expect(resolveDaemonPaths(namesWithOverride, { platform: "linux", env: {}, home: "/home/x", uid: 1000 }).metrics).toBe("/home/x/.local/share/acme-daemon/usage.sqlite");
+		expect(resolveDaemonPaths(namesWithOverride, { platform: "darwin", home: "/Users/x" }).metrics).toBe("/Users/x/Library/Application Support/acme-daemon/usage.sqlite");
+		expect(
+			resolveDaemonPaths(namesWithOverride, { platform: "win32", home: "C:\\Users\\x", env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" } }).metrics,
+		).toBe("C:\\Users\\x\\AppData\\Local\\acme-daemon\\Data\\usage.sqlite");
 	});
 });
 

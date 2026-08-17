@@ -76,6 +76,9 @@
 			"types": "./dist/vehicle-idempotency-persistence.d.ts",
 			"default": "./dist/vehicle-idempotency-persistence.js"
 		},
+		"./metrics": "./src/vehicle-metrics-store.ts",
+		"./metrics-middleware": "./src/vehicle-metrics-middleware.ts",
+		"./metrics-operations": "./src/vehicle-metrics-operations.ts",
 		"./atomic-json": "./src/atomic-json-node.ts"
 	},
 	"scripts": {
