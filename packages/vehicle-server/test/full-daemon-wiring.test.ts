@@ -1,8 +1,8 @@
 /**
- * Walking-skeleton test: wires every module together (paths, storage,
- * logging, http, daemon, rpc-client) into one trivial-but-real daemon,
- * end to end, exactly the way a real @danypops daemon would. Proves the
- * architecture before any of the four real daemons migrate onto it.
+ * Wires every module together (paths, storage, logging, http, daemon,
+ * rpc-client) into one trivial-but-real daemon, end to end, exactly the way
+ * a real @danypops daemon would. Proves the architecture itself, not one
+ * specific downstream daemon's own behavior.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -41,7 +41,7 @@ afterEach(async () => {
 	tmpRoot = undefined;
 });
 
-describe("walking skeleton — a real daemon built from every module", () => {
+describe("full daemon wiring — a real daemon built from every module", () => {
 	it("boots, authenticates, migrates, serves ops, logs maintenance, and shuts down cleanly", async () => {
 		tmpRoot = mkdtempSync(join(tmpdir(), "daemon-kit-skeleton-"));
 		const paths = buildTestPaths(tmpRoot);
