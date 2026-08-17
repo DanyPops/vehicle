@@ -9,6 +9,7 @@ import { type Diagnostic, diagnostic } from "./fleet/diagnostic.js";
 import { inspectHostProcesses, readVehicleHandles } from "./fleet/host-inspection.js";
 import { decodeArmadaManifest, MAX_MANIFEST_BYTES, type ManifestDecodeOutcome } from "./fleet/manifest.js";
 import { removeManifestVehicle, upsertManifestVehicle } from "./fleet/manifest-store.js";
+import { queryVehicleMetrics, resolveVehicleMetricsPath, type VehicleMetricsGroupDimension, type VehicleMetricsSummaryRow } from "./fleet/metrics.js";
 import { planFleet } from "./fleet/planner.js";
 import { createHandleReadinessProbe, readVehicleHandleFile } from "./fleet/readiness.js";
 import { reconcileFleet, restartVehicle } from "./fleet/reconciler.js";
@@ -33,7 +34,13 @@ export interface CliDependencies {
 	readonly platform?: NodeJS.Platform;
 	readonly env?: NodeJS.ProcessEnv;
 	readonly home?: string;
+	/** Overridable for tests -- defaults to resolveVehicleMetricsPath (fleet/metrics.ts). */
+	readonly resolveMetricsPath?: (vehicleName: string) => string;
+	/** Overridable for tests -- defaults to queryVehicleMetrics (fleet/metrics.ts), reading the real SQLite file. */
+	readonly queryMetrics?: (dbPath: string, query: Parameters<typeof queryVehicleMetrics>[1]) => readonly VehicleMetricsSummaryRow[];
 }
+
+const METRICS_GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = ["toolName", "vehicleName", "source", "callerSessionId", "outcome", "day", "hour"];
 
 interface PlanArguments {
 	readonly manifestPath: string;
@@ -41,6 +48,11 @@ interface PlanArguments {
 	readonly vehicle?: string;
 	readonly approval?: string;
 	readonly vehicleFile?: string;
+	readonly since?: number;
+	readonly until?: number;
+	readonly tool?: string;
+	readonly source?: "server" | "client";
+	readonly groupBy?: readonly VehicleMetricsGroupDimension[];
 }
 
 type ArgumentOutcome = { readonly ok: true; readonly arguments: PlanArguments } | { readonly ok: false; readonly diagnostic: Diagnostic };
@@ -65,6 +77,11 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 	let vehicle: string | undefined;
 	let approval: string | undefined;
 	let vehicleFile: string | undefined;
+	let since: number | undefined;
+	let until: number | undefined;
+	let tool: string | undefined;
+	let source: "server" | "client" | undefined;
+	let groupBy: readonly VehicleMetricsGroupDimension[] | undefined;
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index];
 		if (argument === "--json") {
@@ -92,8 +109,49 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			index++;
 			continue;
 		}
+		if (command === "metrics" && (argument === "--since" || argument === "--until")) {
+			const value = args[index + 1];
+			const parsed = value === undefined ? Number.NaN : Number.isNaN(Number(value)) ? Date.parse(value) : Number(value);
+			if (!value || Number.isNaN(parsed)) {
+				return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", argument, "expected an epoch-ms number or an ISO-8601 date") };
+			}
+			if (argument === "--since") since = parsed;
+			else until = parsed;
+			index++;
+			continue;
+		}
+		if (command === "metrics" && argument === "--tool") {
+			const value = args[index + 1];
+			if (!value) return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_MISSING", "error", "--tool", "a tool/operation name is required") };
+			tool = value;
+			index++;
+			continue;
+		}
+		if (command === "metrics" && argument === "--source") {
+			const value = args[index + 1];
+			if (value !== "server" && value !== "client") {
+				return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", "--source", 'expected "server" or "client"') };
+			}
+			source = value;
+			index++;
+			continue;
+		}
+		if (command === "metrics" && argument === "--group-by") {
+			const value = args[index + 1];
+			const requested = (value ?? "").split(",").filter((entry) => entry.length > 0);
+			const invalid = requested.find((entry) => !(METRICS_GROUP_DIMENSIONS as readonly string[]).includes(entry));
+			if (!value || requested.length === 0 || invalid !== undefined) {
+				return {
+					ok: false,
+					diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", "--group-by", `expected a comma-separated list of: ${METRICS_GROUP_DIMENSIONS.join(", ")}`),
+				};
+			}
+			groupBy = requested as VehicleMetricsGroupDimension[];
+			index++;
+			continue;
+		}
 		if (
-			(command === "cleanup" || command === "remove" || command === "restart") &&
+			(command === "cleanup" || command === "remove" || command === "restart" || command === "metrics") &&
 			vehicle === undefined &&
 			argument !== undefined &&
 			!argument.startsWith("--")
@@ -111,6 +169,11 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			...(vehicle === undefined ? {} : { vehicle }),
 			...(approval === undefined ? {} : { approval }),
 			...(vehicleFile === undefined ? {} : { vehicleFile }),
+			...(since === undefined ? {} : { since }),
+			...(until === undefined ? {} : { until }),
+			...(tool === undefined ? {} : { tool }),
+			...(source === undefined ? {} : { source }),
+			...(groupBy === undefined ? {} : { groupBy }),
 		},
 	};
 }
@@ -151,7 +214,8 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 		command !== "cleanup" &&
 		command !== "upsert" &&
 		command !== "remove" &&
-		command !== "restart"
+		command !== "restart" &&
+		command !== "metrics"
 	) {
 		writeDiagnostics(
 			[
@@ -159,7 +223,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 					"CLI_COMMAND_UNKNOWN",
 					"error",
 					command ?? "",
-					"usage: armada <plan|reconcile|status|doctor|cleanup|upsert|remove|restart> [--manifest <path>] [--json]",
+					"usage: armada <plan|reconcile|status|doctor|cleanup|upsert|remove|restart|metrics> [--manifest <path>] [--json]",
 				),
 			],
 			false,
@@ -214,6 +278,43 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 			return 1;
 		}
 		dependencies.io.stdout(`${JSON.stringify({ ok: true, manifestHash: updated.manifest.contentHash })}\n`);
+		return 0;
+	}
+	if (command === "metrics") {
+		if (!parsed.arguments.vehicle) {
+			writeDiagnostics(
+				[diagnostic("METRICS_VEHICLE_UNKNOWN", "error", "/vehicle", "metrics requires a Vehicle name")],
+				parsed.arguments.json,
+				dependencies.io,
+			);
+			return 2;
+		}
+		const resolvePath = dependencies.resolveMetricsPath ?? ((name: string) => resolveVehicleMetricsPath(name, dependencies.platform, dependencies.env, dependencies.home));
+		const query = dependencies.queryMetrics ?? queryVehicleMetrics;
+		const dbPath = resolvePath(parsed.arguments.vehicle);
+		const rows = query(dbPath, {
+			...(parsed.arguments.since === undefined ? {} : { since: parsed.arguments.since }),
+			...(parsed.arguments.until === undefined ? {} : { until: parsed.arguments.until }),
+			...(parsed.arguments.tool === undefined ? {} : { toolName: parsed.arguments.tool }),
+			...(parsed.arguments.source === undefined ? {} : { source: parsed.arguments.source }),
+			...(parsed.arguments.groupBy === undefined ? {} : { groupBy: parsed.arguments.groupBy }),
+		});
+		if (parsed.arguments.json) {
+			dependencies.io.stdout(`${JSON.stringify({ ok: true, vehicle: parsed.arguments.vehicle, rows })}\n`);
+			return 0;
+		}
+		if (rows.length === 0) {
+			dependencies.io.stdout(`${parsed.arguments.vehicle}: no metrics recorded (yet).\n`);
+			return 0;
+		}
+		for (const row of rows) {
+			const keyText = Object.entries(row.key)
+				.map(([dimension, value]) => `${dimension}=${value}`)
+				.join(" ");
+			const avgText = row.avgDurationMs === null ? "" : `, avg ${Math.round(row.avgDurationMs)}ms`;
+			const prefix = keyText.length > 0 ? `${keyText}: ` : "";
+			dependencies.io.stdout(`${prefix}${row.count} call(s) (${row.successCount} success, ${row.failureCount} failure)${avgText}\n`);
+		}
 		return 0;
 	}
 	const decoded = await readManifest(parsed.arguments.manifestPath);

@@ -101,6 +101,25 @@ armada restart example --json
 
 Use `--manifest <path>` with any command to select a different manifest.
 
+Report a Vehicle's own tool/operation usage metrics (see @danypops/vehicle-server's
+own metrics support) directly from its SQLite file -- no daemon round-trip,
+no manifest lookup needed, works for any Vehicle name whether or not Armada
+manages it:
+
+```bash
+armada metrics example --json
+armada metrics example --since 2024-01-01T00:00:00Z --until 2024-02-01T00:00:00Z
+armada metrics example --tool tasks.create --source server
+armada metrics example --group-by toolName,outcome
+```
+
+`--since`/`--until` accept either epoch milliseconds or an ISO-8601 date
+(`--since` inclusive, `--until` exclusive). `--group-by` accepts a
+comma-separated list of `toolName`, `vehicleName`, `source`,
+`callerSessionId`, `outcome`, `day`, `hour`. Reports "no metrics recorded
+(yet)" rather than an error for a Vehicle that hasn't opted into metrics or
+has none recorded yet.
+
 ## Testing integrations
 
 `@danypops/armada/testing` provides an isolated real-registrar harness backed by a stateful mock native controller and mock Vehicle applications. Readiness can complete automatically, wait for `markReady()`, or return a timeout without touching the host service manager. `status()` projects mock application state through Armada's real fleet-status builder.
