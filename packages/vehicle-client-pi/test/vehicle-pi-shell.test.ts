@@ -68,6 +68,31 @@ async function callTool(tools: ToolDefinition[], name: string, params: unknown) 
 	return tool.execute("call-1", params as never, undefined as never, undefined as never, { hasUI: false } as never);
 }
 
+/** Same as callTool, but with a real sessionManager/cwd -- for asserting metrics.recordClientEvent's own callerSessionId/callerProjectRoot fields thread through correctly. */
+async function callToolWithContext(tools: ToolDefinition[], name: string, params: unknown, sessionId: string, cwd: string) {
+	const tool = tools.find((t) => t.name === name);
+	if (!tool) throw new Error(`tool ${name} not registered`);
+	return tool.execute("call-1", params as never, undefined as never, undefined as never, {
+		hasUI: false,
+		cwd,
+		sessionManager: { getSessionId: () => sessionId },
+	} as never);
+}
+
+/** tools_list's own usage report runs concurrently with (never blocking) its real response -- see usage-reporting.ts's reportShellToolUsageToAllDiscovered. A test asserting it happened needs to let that background work actually land first. */
+async function flushBackgroundReporting(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+/** Records every invoke() call this client receives, alongside FakeClient's own default {ok: true} response -- for asserting the Vehicle Shell's own client-event reporting (usage-reporting.ts) without a real daemon. */
+class SpyClient extends FakeClient {
+	readonly invocations: { name: string; version: number; input: unknown }[] = [];
+	override async invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> {
+		this.invocations.push({ name, version, input });
+		return super.invoke(name, version, input, options);
+	}
+}
+
 // The shared meta-tools are a process-wide singleton (globalThis[Symbol.for(...)]) by design --
 // see vehicle-shell.ts's own ensureVehicleShellHandle doc comment -- so every test needs a fresh
 // one; otherwise the second test onward would see the first test's own tools_list still "already
@@ -1098,5 +1123,97 @@ describe("Vehicle Shell's own meta-tools across a simulated /reload", () => {
 		// cleanly, failing the test.
 		await h.emit("turn_end", {});
 		expect(h.activeTools).toContain("docs_list");
+	});
+});
+
+describe("Vehicle Shell meta-tools report their own usage to the relevant vehicle(s), server-side (no client-side storage)", () => {
+	it("tools_list reports to every discovered vehicle, with the real callerSessionId/callerProjectRoot and outcome: success", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		await callToolWithContext(tools, "tools_list", {}, "session-42", "/home/x/project");
+		await flushBackgroundReporting();
+
+		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.input).toEqual({
+			toolName: "tools_list",
+			outcome: "success",
+			durationMs: expect.any(Number),
+			callerSessionId: "session-42",
+			callerProjectRoot: "/home/x/project",
+		});
+	});
+
+	it("tools_list still returns its own real result even when the target vehicle's metrics.recordClientEvent call rejects", async () => {
+		class ThrowingMetricsClient extends FakeClient {
+			override async invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> {
+				if (name === "metrics.recordClientEvent") throw new Error("daemon unreachable");
+				return super.invoke(name, version, input, options);
+			}
+		}
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new ThrowingMetricsClient(manifest([operation("tasks.create")])), { shell: {} });
+
+		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		expect(result.content[0]?.text).toContain("tasks.create");
+	});
+
+	it("tools_man reports once per distinct vehicle actually touched, not once per requested name", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create"), operation("tasks.depend")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		await callToolWithContext(tools, "tools_man", { names: ["test-vehicle:tasks.create", "test-vehicle:tasks.depend"] }, "session-1", "/x");
+
+		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
+		expect(reports).toHaveLength(1); // both names resolve to the same one vehicle
+		expect(reports[0]?.input).toMatchObject({ toolName: "tools_man", outcome: "success" });
+	});
+
+	it("tools_man reports nothing when every requested name is unknown -- no vehicle was actually touched", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		await callTool(tools, "tools_man", { names: ["nonexistent.operation"] });
+
+		expect(client.invocations.filter((call) => call.name === "metrics.recordClientEvent")).toHaveLength(0);
+	});
+
+	it("tools_type reports once per distinct vehicle actually touched, read-only (never activates anything)", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		await callToolWithContext(tools, "tools_type", { names: ["test-vehicle:tasks.create"] }, "session-9", "/x");
+
+		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.input).toMatchObject({ toolName: "tools_type", outcome: "success" });
+	});
+
+	it("tools_type reports nothing for a completely unknown name", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		await callTool(tools, "tools_type", { names: ["nonexistent.operation"] });
+
+		expect(client.invocations.filter((call) => call.name === "metrics.recordClientEvent")).toHaveLength(0);
+	});
+
+	it("works with no sessionManager/cwd at all in context (a minimal test double, or a real host that hasn't supplied one) -- reports with undefined session fields rather than throwing", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		const result = (await callTool(tools, "tools_list", {})) as { content: Array<{ text: string }> };
+		await flushBackgroundReporting();
+		expect(result.content[0]?.text).toContain("tasks.create");
+		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list", callerSessionId: undefined, callerProjectRoot: undefined });
 	});
 });

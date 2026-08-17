@@ -43,4 +43,12 @@ export {
 } from "./vehicle-shell/state.js";
 export { estimateToolWeightTokens, type ToolWeightInput } from "./vehicle-shell/tool-weight.js";
 export { VehicleShellTtlTracker } from "./vehicle-shell/ttl-tracker.js";
+export {
+	reportableVehiclesByName,
+	reportShellToolUsage,
+	reportShellToolUsageToAllDiscovered,
+	safeReportShellToolUsage,
+	type ReportableVehicle,
+	type ShellMetaToolName,
+} from "./vehicle-shell/usage-reporting.js";
 export { type WeightedLruSnapshotEntry, WeightedLruTracker } from "./vehicle-shell/weighted-lru.js";

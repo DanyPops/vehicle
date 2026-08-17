@@ -77,6 +77,22 @@ subscriber) and, when `VEHICLE_CLIENT_DIAG=1`, appended as a JSONL line to
 for interactive debugging of one live session -- never the original error's
 own message/stack, only its constructor name.
 
+The Vehicle Shell's own meta-tools (`tools_list`/`tools_man`/`tools_type`,
+`./vehicle-shell`) report their own calls into whichever vehicle daemon(s)
+are relevant, via the real `metrics.recordClientEvent` operation every
+vehicle wired up with `@danypops/vehicle-server`'s own metrics support
+exposes -- these three tools are pure in-process aggregation over cached
+manifests and never themselves reach a daemon's `invoke()` path otherwise,
+so this is the one place client-observed shell usage becomes visible
+server-side. `tools_man`/`tools_type` report once per distinct vehicle a
+call actually resolved a name against; `tools_list` (no single target
+vehicle -- a global browse) broadcasts to every currently-discovered
+vehicle. Fire-and-forget and best-effort throughout (see
+`./vehicle-shell`'s own `usage-reporting.ts`): a reporting failure, or an
+older daemon with no `metrics.recordClientEvent` operation at all, never
+affects a real tool call's own result. Deliberately no client-side storage
+of any kind.
+
 The same package carries the rest of this house's Pi-extension-facing
 surface: `./pi-load-harness` (jiti-load-safety verification for any
 Pi-loaded module), `./multi-select-list` (Malevich's bounded multi-select

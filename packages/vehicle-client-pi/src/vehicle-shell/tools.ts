@@ -9,7 +9,7 @@ import {
 	type VehicleManifestOperation,
 	type VehicleOperationDescriptor,
 } from "@danypops/vehicle-core";
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { reportToolsListExecute, reportToolsManExecute } from "../client-diagnostics.js";
 import {
@@ -31,6 +31,7 @@ import {
 	type VehicleShellHandle,
 } from "./state.js";
 import { estimateToolWeightTokens } from "./tool-weight.js";
+import { reportableVehiclesByName, reportShellToolUsageToAllDiscovered, safeReportShellToolUsage } from "./usage-reporting.js";
 
 export function createToolsListTool(listToolName: string, manToolName: string, handle: VehicleShellHandle): ToolDefinition {
 	return {
@@ -69,58 +70,70 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 				}),
 			),
 		}),
-		async execute(_toolCallId, params) {
-			const {
-				query = "",
-				mode = "substring",
-				effect,
-				scope = "all",
-				verbosity = "low",
-			} = params as {
-				query?: string;
-				mode?: "substring" | "regex";
-				effect?: VehicleEffect;
-				scope?: ShellQueryScope;
-				verbosity?: "low" | "high";
-			};
-			reportToolsListExecute("vehicle", query);
-			const operations = await cachedAggregatedOperations(handle, handle.aggregateCacheTtlMs);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
+			const startedAt = Date.now();
+			const callerSessionId = ctx.sessionManager?.getSessionId();
+			const callerProjectRoot = ctx.cwd;
+			const report = (outcome: "success" | "failure") =>
+				reportShellToolUsageToAllDiscovered(discoverAllVehicles, "tools_list", outcome, Date.now() - startedAt, callerSessionId, callerProjectRoot);
+			try {
+				const {
+					query = "",
+					mode = "substring",
+					effect,
+					scope = "all",
+					verbosity = "low",
+				} = params as {
+					query?: string;
+					mode?: "substring" | "regex";
+					effect?: VehicleEffect;
+					scope?: ShellQueryScope;
+					verbosity?: "low" | "high";
+				};
+				reportToolsListExecute("vehicle", query);
+				const operations = await cachedAggregatedOperations(handle, handle.aggregateCacheTtlMs);
 
-			let score: (descriptor: VehicleOperationDescriptor) => number | undefined;
-			if (mode === "regex") {
-				let regex: RegExp;
-				try {
-					regex = compileShellQueryRegex(query);
-				} catch (error) {
-					// Never an uncaught exception into the tool-calling harness -- an invalid regex is a
-					// normal, expected user input, not a bug.
-					return {
-						content: [{ type: "text", text: `Invalid regex "${query}": ${error instanceof Error ? error.message : String(error)}` }],
-						details: {},
-					};
+				let score: (descriptor: VehicleOperationDescriptor) => number | undefined;
+				if (mode === "regex") {
+					let regex: RegExp;
+					try {
+						regex = compileShellQueryRegex(query);
+					} catch (error) {
+						// Never an uncaught exception into the tool-calling harness -- an invalid regex is a
+						// normal, expected user input, not a bug.
+						report("success");
+						return {
+							content: [{ type: "text", text: `Invalid regex "${query}": ${error instanceof Error ? error.message : String(error)}` }],
+							details: {},
+						};
+					}
+					score = (descriptor) => regexQueryScore(descriptor, regex, scope);
+				} else {
+					score = (descriptor) => shellQueryScore(descriptor, query, scope);
 				}
-				score = (descriptor) => regexQueryScore(descriptor, regex, scope);
-			} else {
-				score = (descriptor) => shellQueryScore(descriptor, query, scope);
-			}
 
-			const matches = operations
-				.flatMap((descriptor, index) => {
-					if (effect !== undefined && descriptor.effect !== effect) return [];
-					const thisScore = score(descriptor);
-					return thisScore === undefined ? [] : [{ descriptor, index, score: thisScore }];
-				})
-				.sort((left, right) => left.score - right.score || left.index - right.index)
-				.map((entry) => entry.descriptor);
-			const formatMatch = verbosity === "high" ? formatOperationOneLinerVerbose : formatOperationOneLiner;
-			const text =
-				matches.length === 0
-					? `No operations matched "${query}"${effect ? ` with effect "${effect}"` : ""}.`
-					: matches.map((descriptor) => formatMatch(descriptor)).join("\n");
-			return {
-				content: [{ type: "text", text }],
-				details: { operations: matches.map((descriptor) => ({ name: descriptor.name, description: descriptor.description })) },
-			};
+				const matches = operations
+					.flatMap((descriptor, index) => {
+						if (effect !== undefined && descriptor.effect !== effect) return [];
+						const thisScore = score(descriptor);
+						return thisScore === undefined ? [] : [{ descriptor, index, score: thisScore }];
+					})
+					.sort((left, right) => left.score - right.score || left.index - right.index)
+					.map((entry) => entry.descriptor);
+				const formatMatch = verbosity === "high" ? formatOperationOneLinerVerbose : formatOperationOneLiner;
+				const text =
+					matches.length === 0
+						? `No operations matched "${query}"${effect ? ` with effect "${effect}"` : ""}.`
+						: matches.map((descriptor) => formatMatch(descriptor)).join("\n");
+				report("success");
+				return {
+					content: [{ type: "text", text }],
+					details: { operations: matches.map((descriptor) => ({ name: descriptor.name, description: descriptor.description })) },
+				};
+			} catch (error) {
+				report("failure");
+				throw error;
+			}
 		},
 	};
 }
@@ -136,7 +149,10 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 				minItems: 1,
 			}),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
+			const startedAt = Date.now();
+			const callerSessionId = ctx.sessionManager?.getSessionId();
+			const callerProjectRoot = ctx.cwd;
 			const names = (params as { names: string[] }).names;
 			reportToolsManExecute("vehicle", names);
 			const byKey = new Map(handle.managedTools.map((tool) => [`${tool.vehicleName}:${tool.operationName}`, tool]));
@@ -151,6 +167,7 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 			// enough per turn) that it must always see live state, never something up to a TTL window stale.
 			const allOperations = await namespacedOperationsOf(vehicles);
 
+			const touchedVehicleNames = new Set<string>();
 			const pages = await Promise.all(
 				names.map(async (name) => {
 					const resolved = resolveOperationName(name, allOperations);
@@ -158,6 +175,7 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 					if (resolved.kind === "ambiguous") {
 						return `${name}: ambiguous -- provided by ${resolved.candidates.length} vehicles (${resolved.candidates.join(", ")}). Use one of these exact names instead.`;
 					}
+					touchedVehicleNames.add(resolved.vehicleName);
 					const { vehicleName, operationName, descriptor: namespaced } = resolved;
 					const fullName = `${vehicleName}:${operationName}`;
 					const vehicle = byVehicleName.get(vehicleName);
@@ -198,6 +216,14 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 				}),
 			);
 			applyShellActivation(pi, handle);
+			safeReportShellToolUsage(
+				reportableVehiclesByName(vehicles, touchedVehicleNames),
+				"tools_man",
+				"success",
+				Date.now() - startedAt,
+				callerSessionId,
+				callerProjectRoot,
+			);
 			return { content: [{ type: "text", text: pages.join("\n\n---\n\n") }], details: {} };
 		},
 	};
@@ -219,7 +245,10 @@ export function createToolsTypeTool(
 				minItems: 1,
 			}),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
+			const startedAt = Date.now();
+			const callerSessionId = ctx.sessionManager?.getSessionId();
+			const callerProjectRoot = ctx.cwd;
 			const names = (params as { names: string[] }).names;
 			// Same as tools_man: deliberately always fresh, never tools_list's own cache -- a status check
 			// that itself lags reality would defeat its whole diagnostic purpose.
@@ -230,6 +259,22 @@ export function createToolsTypeTool(
 				result: classifyOperationName(name, allOperations, handle.managedTools, handle.tracker),
 			}));
 			const text = results.map(({ name, result }) => formatOperationTypeLine(name, result, manToolName, listToolName)).join("\n");
+			// Read-only, so "which vehicle(s) did this touch" is re-derived independently of
+			// classifyOperationName's own richer result shape (most branches don't carry vehicleName).
+			const touchedVehicleNames = new Set(
+				names.flatMap((name) => {
+					const resolved = resolveOperationName(name, allOperations);
+					return resolved.kind === "unique" ? [resolved.vehicleName] : [];
+				}),
+			);
+			safeReportShellToolUsage(
+				reportableVehiclesByName(vehicles, touchedVehicleNames),
+				"tools_type",
+				"success",
+				Date.now() - startedAt,
+				callerSessionId,
+				callerProjectRoot,
+			);
 			return {
 				content: [{ type: "text", text }],
 				details: { results: results.map(({ name, result }) => ({ name, ...result })) },
