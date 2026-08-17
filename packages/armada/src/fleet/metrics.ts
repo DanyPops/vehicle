@@ -22,7 +22,7 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 
 const require = createRequire(import.meta.url);
 // `typeof (globalThis as {...}).Bun` rather than a bare `typeof Bun` -- this file is part of the
@@ -60,15 +60,21 @@ export function resolveVehicleMetricsPath(
 	env: NodeJS.ProcessEnv = process.env,
 	home: string = homedir(),
 ): string {
-	if (platform === "darwin") return join(home, "Library", "Application Support", vehicleName, DEFAULT_METRICS_FILENAME);
+	// posix.join/win32.join (never the bare, host-dependent join) throughout -- this function must
+	// produce the SAME real path for a given (platform, env, home) regardless of which host OS
+	// actually runs it, or a Linux/macOS assertion silently becomes a Windows path (backslashes)
+	// the moment this runs on Windows CI, and vice versa. Same reasoning as paths.ts's own win32
+	// branch, applied symmetrically to darwin/linux here since armada's own test suite (unlike
+	// vehicle-server's) genuinely runs cross-platform in CI (see .github/workflows/ci.yml).
+	if (platform === "darwin") return posix.join(home, "Library", "Application Support", vehicleName, DEFAULT_METRICS_FILENAME);
 	if (platform === "win32") {
 		// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
 		const localAppData = env["LOCALAPPDATA"] ?? win32.join(home, "AppData", "Local");
 		return win32.join(localAppData, vehicleName, "Data", DEFAULT_METRICS_FILENAME);
 	}
 	// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
-	const dataHome = env["XDG_DATA_HOME"] ?? join(home, ".local", "share");
-	return join(dataHome, vehicleName, DEFAULT_METRICS_FILENAME);
+	const dataHome = env["XDG_DATA_HOME"] ?? posix.join(home, ".local", "share");
+	return posix.join(dataHome, vehicleName, DEFAULT_METRICS_FILENAME);
 }
 
 export type VehicleMetricsGroupDimension = "toolName" | "vehicleName" | "source" | "callerSessionId" | "outcome" | "day" | "hour";

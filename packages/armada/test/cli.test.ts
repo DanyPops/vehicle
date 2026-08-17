@@ -312,12 +312,25 @@ describe("armada metrics", () => {
 		expect(text).not.toContain("tools_list, avg");
 	});
 
-	it("end to end against a real SQLite file, no injected dependencies -- the real resolveVehicleMetricsPath/queryVehicleMetrics wiring", async () => {
+	it("end to end against a real SQLite file, no injected path/query dependencies -- the real resolveVehicleMetricsPath/queryVehicleMetrics wiring", async () => {
+		// Deliberately does NOT override `platform` -- this does real filesystem I/O via the host's
+		// own native node:fs/node:path (always host-OS-native regardless of any platform override),
+		// so it computes the expected DB path via the real resolveVehicleMetricsPath (imported
+		// directly, real process.platform, but an EXPLICITLY EMPTY env -- not the real unfiltered
+		// process.env, which on a real dev machine can genuinely set XDG_DATA_HOME/LOCALAPPDATA and
+		// silently redirect this test into real user data instead of its own isolated temp dir,
+		// confirmed live: a stray ~/.local/share/acme-vehicle/metrics.sqlite this test itself wrote
+		// on a previous run then collided with a later run's own CREATE TABLE) -- this test must
+		// pass identically and hermetically on every CI runner (ubuntu/macos/windows) and on any
+		// real dev machine, regardless of that machine's own XDG/AppData environment.
 		const { Database } = await import("bun:sqlite");
-		const directory = await mkdtemp(join(tmpdir(), "armada-metrics-e2e-"));
-		const home = directory;
-		const dbPath = join(home, ".local", "share", "acme-vehicle", "metrics.sqlite");
-		await mkdir(join(home, ".local", "share", "acme-vehicle"), { recursive: true });
+		const { resolveVehicleMetricsPath } = await import("../src/fleet/metrics.js");
+		const { mkdir: mkdirNode } = await import("node:fs/promises");
+		const { dirname } = await import("node:path");
+		const home = await mkdtemp(join(tmpdir(), "armada-metrics-e2e-"));
+		const env = {};
+		const dbPath = resolveVehicleMetricsPath("acme-vehicle", process.platform, env, home);
+		await mkdirNode(dirname(dbPath), { recursive: true });
 		const db = new Database(dbPath, { create: true });
 		db.exec(
 			"CREATE TABLE vehicle_tool_invocations (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, vehicle_name TEXT NOT NULL, tool_name TEXT NOT NULL, operation_version INTEGER, outcome TEXT NOT NULL, error_code TEXT, duration_ms INTEGER, caller_session_id TEXT, caller_project_root TEXT, principal_id TEXT)",
@@ -328,13 +341,7 @@ describe("armada metrics", () => {
 		db.close();
 
 		const captured = output();
-		const code = await runCli(["metrics", "acme-vehicle", "--json"], {
-			manager,
-			io: captured.io,
-			platform: "linux",
-			env: {},
-			home,
-		});
+		const code = await runCli(["metrics", "acme-vehicle", "--json"], { manager, io: captured.io, home, env });
 		expect(code).toBe(0);
 		expect(JSON.parse(captured.stdout.join(""))).toMatchObject({ ok: true, vehicle: "acme-vehicle", rows: [{ count: 1, successCount: 1 }] });
 	});
