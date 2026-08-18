@@ -442,6 +442,76 @@ export interface ToolShellDualChannelSubject {
 	replay(details: unknown, fallbackContent: string, options: ToolShellRenderOptions): readonly string[];
 	renderCall(args: unknown, width: 40 | 80 | 120): readonly string[];
 	invalidProjection(): Promise<unknown>;
+	/**
+	 * Optional -- the discriminator values (a `format`/`kind`/`action`/... field) this provider's
+	 * own presentation-details schema declares, each paired with a representative raw application
+	 * payload for that value. Supplying this (together with renderDeclaredValue) enables the
+	 * declared-value coverage check below, which generically catches the pi-web-spider bug class
+	 * (see doc 4e9e08c1, Finding 1/4): most declared values falling through to an undifferentiated
+	 * JSON.stringify dump of their own payload instead of a real projected view. Omit entirely for
+	 * a subject with no such discriminator -- the check then no-ops.
+	 */
+	readonly declaredValueCases?: readonly ToolShellDeclaredValueCase[];
+	/** Required alongside declaredValueCases: renders the expanded view for one declared value's
+	 * own raw payload, through exactly the same projection+render pipeline the real handler uses. */
+	renderDeclaredValue?(value: string, rawPayload: unknown, options: ToolShellRenderOptions): readonly string[];
+}
+
+export interface ToolShellDeclaredValueCase {
+	/** e.g. a WebFormat value ('search'/'lean'/...), a PackageToolDetails['kind'], a tickets action name. */
+	readonly value: string;
+	/** The real, untransformed application output this declared value would carry. */
+	readonly rawPayload: unknown;
+}
+
+export interface DeclaredValueCoverageResult {
+	/** Declared values whose rendered output is NOT indistinguishable from a raw JSON.stringify dump of their own payload. */
+	readonly nonRawValues: readonly string[];
+	/** Declared values whose rendered output IS indistinguishable from a raw JSON.stringify dump of their own payload. */
+	readonly rawValues: readonly string[];
+}
+
+function normalizeForComparison(text: string): string {
+	return text.replace(/\s+/g, "");
+}
+
+/**
+ * True when `renderedLines` is textually indistinguishable (ignoring ANSI styling and whitespace)
+ * from `JSON.stringify(rawPayload, null, 2)` -- the exact shape pi-web-spider's `primaryLines()`
+ * fell back to for every non-"markdown" format. Whitespace-insensitive so a renderer that reflows
+ * the same JSON text to a narrower width still counts as "raw", matching the real bug (a Text
+ * component wrapping the identical JSON.stringify output).
+ */
+function looksLikeRawJsonDump(renderedLines: readonly string[], rawPayload: unknown): boolean {
+	let rawJson: string;
+	try {
+		rawJson = JSON.stringify(rawPayload, null, 2) ?? "";
+	} catch {
+		return false;
+	}
+	if (rawJson.length === 0) return false;
+	const renderedText = renderedLines.join("\n").replace(ANSI_CSI_PATTERN, "");
+	return normalizeForComparison(renderedText) === normalizeForComparison(rawJson);
+}
+
+/**
+ * Pure, independently unit-testable core of the declared-value coverage check -- separated from
+ * the bun:test `it()` wiring below so a fixture reproducing a known-bad shape (e.g.
+ * pi-web-spider's own pre-fix behavior) can be asserted against directly, proving the classifier
+ * itself actually detects that bug class rather than trusting the wrapping `it()` alone.
+ */
+export function evaluateDeclaredValueCoverage(
+	cases: readonly ToolShellDeclaredValueCase[],
+	renderDeclaredValue: (value: string, rawPayload: unknown, options: ToolShellRenderOptions) => readonly string[],
+	options: ToolShellRenderOptions = { width: 80, expanded: true },
+): DeclaredValueCoverageResult {
+	const nonRawValues: string[] = [];
+	const rawValues: string[] = [];
+	for (const { value, rawPayload } of cases) {
+		const lines = renderDeclaredValue(value, rawPayload, options);
+		(looksLikeRawJsonDump(lines, rawPayload) ? rawValues : nonRawValues).push(value);
+	}
+	return { nonRawValues, rawValues };
 }
 
 export interface ToolShellDualChannelFixture {
@@ -525,6 +595,30 @@ export function runToolShellDualChannelConformance(fixture: ToolShellDualChannel
 					expect(call).not.toContain("RAW_SECRET");
 				}
 				await expect(subject.invalidProjection()).rejects.toBeTruthy();
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("renders most of its own declared discriminator values as more than a raw JSON dump of their own payload", async () => {
+			const { subject, cleanup } = await fixture.create();
+			try {
+				const cases = subject.declaredValueCases;
+				if (!cases || cases.length === 0) return; // opt-in: no discriminator declared, nothing to check
+				if (!subject.renderDeclaredValue) {
+					throw new Error("declaredValueCases supplied without a matching renderDeclaredValue implementation");
+				}
+				const renderDeclaredValue = subject.renderDeclaredValue.bind(subject);
+				const options: ToolShellRenderOptions = { width: 80, expanded: true };
+				for (const { value, rawPayload } of cases) {
+					assertPhysicalLines(renderDeclaredValue(value, rawPayload, options), options.width);
+				}
+				const { nonRawValues, rawValues } = evaluateDeclaredValueCoverage(cases, renderDeclaredValue, options);
+				expect(
+					nonRawValues.length,
+					`declared values [${cases.map((c) => c.value).join(", ")}] mostly render as an undifferentiated JSON.stringify dump of ` +
+						`their own payload -- only [${nonRawValues.join(", ") || "none"}] escape it, [${rawValues.join(", ")}] don't`,
+				).toBeGreaterThanOrEqual(Math.min(2, cases.length));
 			} finally {
 				await cleanup();
 			}

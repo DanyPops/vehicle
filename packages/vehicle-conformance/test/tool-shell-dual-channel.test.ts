@@ -26,6 +26,20 @@ const fixture: ToolShellDualChannelFixture = {
 				return [`Synthetic Read ${name}`.slice(0, width)];
 			},
 			invalidProjection: () => Promise.reject(new Error("projection rejected: cyclic details")),
+			// Two declared "format" values, each rendering something real rather than a raw JSON dump --
+			// proves the declared-value coverage check passes for a well-behaved subject.
+			declaredValueCases: [
+				{ value: "markdown", rawPayload: { markdown: "# Heading\nBody text." } },
+				{ value: "table", rawPayload: { rows: [{ id: "1" }, { id: "2" }] } },
+			],
+			renderDeclaredValue: (value: string, rawPayload: unknown, options: { width: 40 | 80 | 120 }) => {
+				if (value === "markdown") {
+					const markdown = (rawPayload as { markdown: string }).markdown;
+					return [`Markdown: ${markdown.split("\n")[0]}`.slice(0, options.width)];
+				}
+				const rows = (rawPayload as { rows: unknown[] }).rows;
+				return [`${rows.length} row(s)`.slice(0, options.width)];
+			},
 		};
 		return { subject, cleanup: () => Promise.resolve() };
 	},

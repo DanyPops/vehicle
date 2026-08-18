@@ -31,7 +31,7 @@
     },
     "packages/armada": {
       "name": "@danypops/armada",
-      "version": "0.4.10",
+      "version": "0.5.0",
       "bin": {
         "armada": "dist/cli.js",
       },
@@ -45,7 +45,7 @@
     },
     "packages/vehicle-client": {
       "name": "@danypops/vehicle-client",
-      "version": "0.10.1",
+      "version": "0.10.3",
       "dependencies": {
         "@danypops/vehicle-core": "workspace:*",
         "@danypops/vehicle-server": "workspace:*",
@@ -58,7 +58,7 @@
     },
     "packages/vehicle-client-pi": {
       "name": "@danypops/vehicle-client-pi",
-      "version": "0.42.1",
+      "version": "0.43.1",
       "dependencies": {
         "@danypops/pi-extension-harness": "^0.7.0",
         "@danypops/vehicle-client": "workspace:*",
@@ -73,6 +73,7 @@
         "@danypops/pi-process-harness": "^0.1.3",
         "@danypops/pi-tui-harness": "^0.0.2",
         "@danypops/pipes": "^0.18.1",
+        "@danypops/vehicle-conformance": "workspace:*",
         "@types/node": "^22.0.0",
         "typescript": "^5.9.3",
       },
@@ -109,7 +110,7 @@
     },
     "packages/vehicle-server": {
       "name": "@danypops/vehicle-server",
-      "version": "0.24.5",
+      "version": "0.25.2",
       "dependencies": {
         "@danypops/armada": "workspace:*",
         "@danypops/vehicle-core": "workspace:*",
