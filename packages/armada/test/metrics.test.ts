@@ -6,15 +6,22 @@ import { join } from "node:path";
 import { queryVehicleMetrics, resolveVehicleMetricsPath } from "../src/fleet/metrics.js";
 
 /**
- * rmSync's own recursive-delete retry, not a bare rmSync -- on Windows, a just-closed bun:sqlite
- * Database's OS-level file handle can lag slightly behind its own synchronous close() return,
- * so an immediate rmSync of the containing directory can fail with EBUSY ("resource busy or
- * locked") even though every close() call in this test already returned. Confirmed live on a
- * real windows-latest CI run. maxRetries/retryDelay are exactly Node's own documented mechanism
- * for this class of transient recursive-rm failure.
+ * Best-effort recursive delete -- on Windows, a just-closed bun:sqlite Database can leave its
+ * containing directory locked (EBUSY, "resource busy or locked") well past its own close() call
+ * returning; confirmed live on a real windows-latest CI run, and NOT just a brief race --
+ * rmSync's own maxRetries/retryDelay (up to 500ms) still weren't enough. Test CLEANUP failing is
+ * a genuinely different concern from a test's own real assertions failing: this suite's temp
+ * dirs live under the OS temp directory of an ephemeral CI runner (wiped after the job
+ * regardless) or a local dev machine (an occasional stray dir there is a nuisance, not a
+ * correctness problem) -- swallowing a cleanup failure here never hides a real behavioral bug,
+ * since every assertion above it in the same test already ran and passed before this executes.
  */
 function removeTestDir(dir: string): void {
-	rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	try {
+		rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	} catch (error) {
+		console.warn(`metrics.test.ts: best-effort cleanup of "${dir}" failed (leaving it for the OS/CI runner to reclaim):`, error);
+	}
 }
 
 /** Seeds a real SQLite file with the exact vehicle_tool_invocations schema vehicle-server's own vehicle-metrics-store.ts creates -- this module reads it independently (see metrics.ts's own header comment on duplication), so the test proves compatibility against the real shape, not just this file's own internal consistency. */
