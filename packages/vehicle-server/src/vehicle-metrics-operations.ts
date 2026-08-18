@@ -3,22 +3,37 @@
  * operations -- discoverable, callable, and documented through the exact same tools_list/
  * tools_man path as every other operation (dogfooding this repo's own discovery mechanism):
  *
- * - metrics.query (read): time-range + optional-filter query over every invocation this Vehicle
+ * - <prefix>.query (read): time-range + optional-filter query over every invocation this Vehicle
  *   has recorded, server-side ones (via vehicle-metrics-middleware.ts) and client-reported shell
  *   meta-tool calls alike.
- * - metrics.recordClientEvent (local-write): the one write path a client (vehicle-client-pi's
+ * - <prefix>.recordClientEvent (local-write): the one write path a client (vehicle-client-pi's
  *   Vehicle Shell) uses to report a tools_list/tools_man/tools_type call it observed but that
  *   never itself reached this daemon's own invoke() path (those tools are pure in-process
  *   aggregation over cached manifests -- they never call invoke() at all). Restricted to a
  *   narrow, known enum of shell tool names, not an arbitrary open-ended event, since this is a
  *   real write path any authorized caller can reach.
+ *
+ * `<prefix>` defaults to "metrics" -- see RegisterVehicleMetricsOperationsOptions.operationPrefix
+ * for a Vehicle whose own domain already owns that namespace.
  */
 import { bindVehicleOperation, defineLooseObjectSchema, defineVehicleOperation, passthroughVehicleSchema, VehicleError } from "@danypops/vehicle-core";
 import type { VehicleRegistry } from "./vehicle-registry.js";
 import type { VehicleMetricsGroupDimension, VehicleMetricsOutcome, VehicleMetricsQuery, VehicleMetricsStore } from "./vehicle-metrics-store.js";
 
-const OWNER = "metrics";
+const DEFAULT_OPERATION_PREFIX = "metrics";
 const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 1_048_576 };
+
+export interface RegisterVehicleMetricsOperationsOptions {
+	/**
+	 * Overrides the "metrics" prefix both operation names use (metrics.query/
+	 * metrics.recordClientEvent by default) -- for a Vehicle whose own domain already owns that
+	 * namespace (confirmed live: jittor's real metrics.query/metrics.record/... own LLM usage/cost
+	 * observations, a completely different concept from this module's tool/operation usage
+	 * metrics -- registering both under the same prefix throws VehicleRegistry's own real
+	 * duplicate-owner error). Defaults to "metrics", unchanged for every existing consumer.
+	 */
+	readonly operationPrefix?: string;
+}
 
 const GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = ["toolName", "vehicleName", "source", "callerSessionId", "outcome", "day", "hour"];
 const OUTCOMES: readonly VehicleMetricsOutcome[] = ["success", "failure"];
@@ -66,14 +81,23 @@ function toQuery(input: Record<string, unknown>): VehicleMetricsQuery {
 }
 
 /**
- * Registers `<vehicleName>:metrics.query` and `<vehicleName>:metrics.recordClientEvent` against
- * `registry`, backed by `store`. Call once per Vehicle daemon, alongside
+ * Registers `<vehicleName>:<prefix>.query` and `<vehicleName>:<prefix>.recordClientEvent`
+ * against `registry`, backed by `store` (`<prefix>` is "metrics" by default -- see
+ * RegisterVehicleMetricsOperationsOptions.operationPrefix for the escape hatch a colliding
+ * consumer needs). Call once per Vehicle daemon, alongside
  * `registry.useExecutionMiddleware(createVehicleMetricsMiddleware(store, vehicleName))` --
  * see vehicle-metrics-middleware.ts.
  */
-export function registerVehicleMetricsOperations(registry: VehicleRegistry, store: VehicleMetricsStore, vehicleName: string): void {
+export function registerVehicleMetricsOperations(
+	registry: VehicleRegistry,
+	store: VehicleMetricsStore,
+	vehicleName: string,
+	options: RegisterVehicleMetricsOperationsOptions = {},
+): void {
+	const prefix = options.operationPrefix ?? DEFAULT_OPERATION_PREFIX;
+	const owner = prefix === DEFAULT_OPERATION_PREFIX ? "metrics" : `${prefix}-metrics`;
 	const queryOperation = defineVehicleOperation({
-		name: "metrics.query",
+		name: `${prefix}.query`,
 		version: 1,
 		description:
 			`Queries ${vehicleName}'s own recorded tool/operation invocation history -- every real operation call (server-recorded automatically) and every client-reported Vehicle Shell meta-tool call (tools_list/tools_man/tools_type), forever-retained and filterable by time range. ` +
@@ -97,12 +121,12 @@ export function registerVehicleMetricsOperations(registry: VehicleRegistry, stor
 		limits: LIMITS,
 	});
 	registry.register(
-		OWNER,
+		owner,
 		bindVehicleOperation(queryOperation, () => async (context) => store.query(toQuery(context.input))),
 	);
 
 	const recordClientEventOperation = defineVehicleOperation({
-		name: "metrics.recordClientEvent",
+		name: `${prefix}.recordClientEvent`,
 		version: 1,
 		description:
 			`Records one client-observed Vehicle Shell meta-tool call (${CLIENT_REPORTABLE_TOOL_NAMES.join("/")}) against ${vehicleName}'s own metrics store -- these tools never themselves reach this daemon's invoke() path, so a client reports them explicitly. Every real operation invocation is already captured automatically; this is not a general-purpose event sink.`,
@@ -123,7 +147,7 @@ export function registerVehicleMetricsOperations(registry: VehicleRegistry, stor
 		limits: LIMITS,
 	});
 	registry.register(
-		OWNER,
+		owner,
 		bindVehicleOperation(recordClientEventOperation, () => async (context) => {
 			const input = context.input;
 			const toolName = requireString(input, "toolName");

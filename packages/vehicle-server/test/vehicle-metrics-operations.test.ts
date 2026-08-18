@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { bindVehicleOperation, defineLooseObjectSchema, defineVehicleOperation, passthroughVehicleSchema } from "@danypops/vehicle-core";
 import { VehicleRegistry } from "../src/vehicle-registry.ts";
 import { createVehicleMetricsMiddleware } from "../src/vehicle-metrics-middleware.ts";
 import { openVehicleMetricsStore } from "../src/vehicle-metrics-store.ts";
 import { registerVehicleMetricsOperations } from "../src/vehicle-metrics-operations.ts";
+
+const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 262_144 };
 
 function wiredRegistry() {
 	const registry = new VehicleRegistry({ name: "test-vehicle", version: "1", description: "Test." });
@@ -84,5 +87,44 @@ describe("registerVehicleMetricsOperations", () => {
 		// filtering to source: "client" isolates the handler's own explicit report.
 		const rows = store.query({ callerSessionId: "session-9", source: "client" });
 		expect(rows[0]?.count).toBe(1);
+	});
+});
+
+describe("registerVehicleMetricsOperations: operationPrefix override", () => {
+	it("registers under a caller-chosen prefix instead of the default 'metrics', for a Vehicle whose own domain already owns that namespace", async () => {
+		const registry = new VehicleRegistry({ name: "jittor", version: "1", description: "Test." });
+		const store = openVehicleMetricsStore(":memory:");
+		registerVehicleMetricsOperations(registry, store, "jittor", { operationPrefix: "vehicle_usage" });
+
+		const manifest = registry.manifest();
+		const names = manifest.operations.map((op) => op.name);
+		expect(names).toContain("vehicle_usage.query");
+		expect(names).toContain("vehicle_usage.recordClientEvent");
+		expect(names).not.toContain("metrics.query");
+		expect(names).not.toContain("metrics.recordClientEvent");
+
+		const result = (await registry.invoke("vehicle_usage.query", 1, {}, { permissions: [] })) as { count: number }[];
+		expect(result[0]?.count).toBe(0); // no middleware wired in this test -- nothing has been recorded yet
+	});
+
+	it("never collides with a Vehicle's own pre-existing 'metrics.*' operations -- the real motivating scenario", () => {
+		const registry = new VehicleRegistry({ name: "jittor", version: "1", description: "Test." });
+		const domainMetricsOperation = defineVehicleOperation({
+			name: "metrics.query",
+			version: 1,
+			description: "Jittor's own real domain operation -- LLM usage/cost observations, unrelated to tool-usage metrics.",
+			input: defineLooseObjectSchema({}, []),
+			output: passthroughVehicleSchema,
+			effect: "read",
+			idempotency: { mode: "safe" },
+			limits: LIMITS,
+		});
+		registry.register(
+			"jittor",
+			bindVehicleOperation(domainMetricsOperation, () => async () => []),
+		);
+
+		const store = openVehicleMetricsStore(":memory:");
+		expect(() => registerVehicleMetricsOperations(registry, store, "jittor", { operationPrefix: "vehicle_usage" })).not.toThrow();
 	});
 });
