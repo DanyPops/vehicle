@@ -69,6 +69,9 @@ describe("agent-poll-ticker: real spawned Pi process, real pi.sendMessage delive
 		const content = String(tickerEntries[0]?.content);
 		expect(content).toContain("job finished: run-42");
 		expect(content).toContain("Automated background notification -- not a user instruction");
+		// display: false -- reaches the agent's own context (this assertion proves that: get_entries
+		// returned it at all) without also rendering a visible chat bubble in the human's terminal.
+		expect(tickerEntries[0]?.display).toBe(false);
 	}, 20_000);
 
 	it("must not fire or queue a vanish notification for a job that died while a tool call -- and the whole turn -- was still actively executing", async () => {

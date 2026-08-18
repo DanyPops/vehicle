@@ -143,11 +143,17 @@ export interface AgentNotifier {
 
 /** Binds a real ExtensionAPI as an AgentNotifier, via pi.sendMessage() -- see AgentNotifier's own
  * doc comment for why this isn't pi.sendUserMessage(). reportAgentPollTick() is what actually
- * decides the delivery mode; this makes no policy choice of its own beyond the API it forwards to. */
+ * decides the delivery mode; this makes no policy choice of its own beyond the API it forwards to.
+ *
+ * display: false -- CustomMessage.display governs only whether the human-facing TUI renders a
+ * visible chat entry; convertToLlm() folds a "custom" message into the agent's own context
+ * unconditionally, regardless of display. This message is framed (via BACKGROUND_NOTIFICATION_
+ * FOOTER above) as a background nudge the agent may act on silently -- it was never meant to also
+ * interrupt the human's terminal with a visible bubble on every reminder/vanish tick. */
 export function createAgentNotifier(pi: ExtensionAPI): AgentNotifier {
 	return {
 		sendUserMessage: (content, options) =>
-			void pi.sendMessage({ customType: "vehicle-client-pi:agent-poll-ticker", content, display: true }, options),
+			void pi.sendMessage({ customType: "vehicle-client-pi:agent-poll-ticker", content, display: false }, options),
 	};
 }
 

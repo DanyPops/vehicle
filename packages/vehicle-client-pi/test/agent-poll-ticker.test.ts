@@ -355,8 +355,10 @@ describe("createAgentNotifier", () => {
 
 		notifier.sendUserMessage("hello", { deliverAs: "steer" });
 
+		// display: false -- a visible chat bubble was never the point; convertToLlm() still folds this
+		// into the agent's own context regardless of display (see createAgentNotifier's own doc comment).
 		expect(h.sentMessages).toEqual([
-			{ message: { customType: "vehicle-client-pi:agent-poll-ticker", content: "hello", display: true }, options: { deliverAs: "steer" } },
+			{ message: { customType: "vehicle-client-pi:agent-poll-ticker", content: "hello", display: false }, options: { deliverAs: "steer" } },
 		]);
 		expect(h.userMessages).toEqual([]); // never the always-turn-triggering sendUserMessage channel
 	});
