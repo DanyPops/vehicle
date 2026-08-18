@@ -1216,4 +1216,21 @@ describe("Vehicle Shell meta-tools report their own usage to the relevant vehicl
 		expect(reports).toHaveLength(1);
 		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list", callerSessionId: undefined, callerProjectRoot: undefined });
 	});
+
+	it("survives ctx itself being undefined -- a stricter case than a defined ctx missing sessionManager/cwd (some hand-rolled test harnesses across the ecosystem pass no 5th arg at all)", async () => {
+		const { pi, tools } = fakePi();
+		const client = new SpyClient(manifest([operation("tasks.create")]));
+		await registerVehicleTools(pi, client, { shell: {} });
+
+		const tool = tools.find((t) => t.name === "tools_list");
+		if (!tool) throw new Error("tools_list not registered");
+		const result = (await tool.execute("call-1", {} as never, undefined as never, undefined as never, undefined as never)) as {
+			content: Array<{ text: string }>;
+		};
+		await flushBackgroundReporting();
+		expect(result.content[0]?.text).toContain("tasks.create");
+		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list", callerSessionId: undefined, callerProjectRoot: undefined });
+	});
 });

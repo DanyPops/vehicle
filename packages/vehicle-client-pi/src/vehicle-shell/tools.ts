@@ -72,8 +72,8 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now();
-			const callerSessionId = ctx.sessionManager?.getSessionId();
-			const callerProjectRoot = ctx.cwd;
+			const callerSessionId = ctx?.sessionManager?.getSessionId();
+			const callerProjectRoot = ctx?.cwd;
 			const report = (outcome: "success" | "failure") =>
 				reportShellToolUsageToAllDiscovered(discoverAllVehicles, "tools_list", outcome, Date.now() - startedAt, callerSessionId, callerProjectRoot);
 			try {
@@ -151,8 +151,8 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now();
-			const callerSessionId = ctx.sessionManager?.getSessionId();
-			const callerProjectRoot = ctx.cwd;
+			const callerSessionId = ctx?.sessionManager?.getSessionId();
+			const callerProjectRoot = ctx?.cwd;
 			const names = (params as { names: string[] }).names;
 			reportToolsManExecute("vehicle", names);
 			const byKey = new Map(handle.managedTools.map((tool) => [`${tool.vehicleName}:${tool.operationName}`, tool]));
@@ -247,8 +247,8 @@ export function createToolsTypeTool(
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now();
-			const callerSessionId = ctx.sessionManager?.getSessionId();
-			const callerProjectRoot = ctx.cwd;
+			const callerSessionId = ctx?.sessionManager?.getSessionId();
+			const callerProjectRoot = ctx?.cwd;
 			const names = (params as { names: string[] }).names;
 			// Same as tools_man: deliberately always fresh, never tools_list's own cache -- a status check
 			// that itself lags reality would defeat its whole diagnostic purpose.
