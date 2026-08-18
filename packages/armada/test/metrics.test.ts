@@ -5,6 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { queryVehicleMetrics, resolveVehicleMetricsPath } from "../src/fleet/metrics.js";
 
+/**
+ * rmSync's own recursive-delete retry, not a bare rmSync -- on Windows, a just-closed bun:sqlite
+ * Database's OS-level file handle can lag slightly behind its own synchronous close() return,
+ * so an immediate rmSync of the containing directory can fail with EBUSY ("resource busy or
+ * locked") even though every close() call in this test already returned. Confirmed live on a
+ * real windows-latest CI run. maxRetries/retryDelay are exactly Node's own documented mechanism
+ * for this class of transient recursive-rm failure.
+ */
+function removeTestDir(dir: string): void {
+	rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
 /** Seeds a real SQLite file with the exact vehicle_tool_invocations schema vehicle-server's own vehicle-metrics-store.ts creates -- this module reads it independently (see metrics.ts's own header comment on duplication), so the test proves compatibility against the real shape, not just this file's own internal consistency. */
 function seedMetricsDb(
 	path: string,
@@ -105,7 +117,7 @@ describe("queryVehicleMetrics", () => {
 			const rows = queryVehicleMetrics(path, {});
 			expect(rows).toEqual([{ key: {}, count: 2, successCount: 1, failureCount: 1, avgDurationMs: 15 }]);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			removeTestDir(dir);
 		}
 	});
 
@@ -124,7 +136,7 @@ describe("queryVehicleMetrics", () => {
 			expect(queryVehicleMetrics(path, { toolName: "tasks.create" })[0]?.count).toBe(1);
 			expect(queryVehicleMetrics(path, { vehicleName: "tickets" })[0]?.count).toBe(1);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			removeTestDir(dir);
 		}
 	});
 
@@ -142,7 +154,7 @@ describe("queryVehicleMetrics", () => {
 			expect(byToolMap.get("tasks.create")).toMatchObject({ count: 2, successCount: 2 });
 			expect(byToolMap.get("docs.list")).toMatchObject({ count: 1, failureCount: 1 });
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			removeTestDir(dir);
 		}
 	});
 
@@ -159,7 +171,7 @@ describe("queryVehicleMetrics", () => {
 			check.close();
 			expect(count).toBe(1);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			removeTestDir(dir);
 		}
 	});
 });

@@ -120,7 +120,12 @@ describe("VehicleMetricsStore", () => {
 			expect(store2.query({})[0]?.count).toBe(1);
 			store2.close();
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			// maxRetries/retryDelay, not a bare rmSync -- on Windows a just-closed SQLite handle can
+			// lag slightly behind its own close() return, so an immediate recursive rm of the
+			// containing directory can fail with EBUSY (confirmed live on a real windows-latest CI
+			// run of armada's own equivalent test, which surfaced this same latent pattern first --
+			// this suite is currently ubuntu-only in CI, but the fix costs nothing to apply here too).
+			rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 		}
 	});
 
