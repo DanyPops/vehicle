@@ -21,6 +21,9 @@
 		"src/vehicle-watchers.ts",
 		"src/vehicle-approval-authority.ts",
 		"src/vehicle-scheduler.ts",
-		"src/vehicle-schedule-persistence.ts"
+		"src/vehicle-schedule-persistence.ts",
+		"src/vehicle-metrics-store.ts",
+		"src/vehicle-metrics-middleware.ts",
+		"src/vehicle-metrics-operations.ts"
 	]
 }

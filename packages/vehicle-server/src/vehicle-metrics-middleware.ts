@@ -9,12 +9,7 @@
  * masking a real failure's own error.
  */
 import { isVehicleError } from "@danypops/vehicle-core";
-// Literal .ts extension (not .js), same convention as daemon-lifecycle.ts's own import of
-// daemon.ts -- this file is exported as raw source (see the ./storage-dependency rationale in
-// vehicle-metrics-store.ts's own header), while vehicle-registry.ts is part of the built dist
-// set; the literal .ts specifier resolves to real source under any runtime (Bun natively, a
-// TS-aware Node loader) regardless of that difference.
-import type { VehicleExecutionMiddleware, VehicleExecutionRequest } from "./vehicle-registry.ts";
+import type { VehicleExecutionMiddleware, VehicleExecutionRequest } from "./vehicle-registry.js";
 import type { VehicleMetricsStore } from "./vehicle-metrics-store.js";
 
 /** Distinct id namespace per vehicleName -- useExecutionMiddleware() rejects a duplicate id, and a process can host more than one VehicleRegistry (rare, but not disallowed). */

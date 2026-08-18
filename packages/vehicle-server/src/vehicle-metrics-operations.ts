@@ -14,8 +14,7 @@
  *   real write path any authorized caller can reach.
  */
 import { bindVehicleOperation, defineLooseObjectSchema, defineVehicleOperation, passthroughVehicleSchema, VehicleError } from "@danypops/vehicle-core";
-// Literal .ts extension -- see vehicle-metrics-middleware.ts's own comment on this same import.
-import type { VehicleRegistry } from "./vehicle-registry.ts";
+import type { VehicleRegistry } from "./vehicle-registry.js";
 import type { VehicleMetricsGroupDimension, VehicleMetricsOutcome, VehicleMetricsQuery, VehicleMetricsStore } from "./vehicle-metrics-store.js";
 
 const OWNER = "metrics";

@@ -2,24 +2,92 @@
  * Durable, indexed, forever-retained record of every real Vehicle operation invocation this
  * daemon has served, plus every client-observed Vehicle Shell meta-tool call (tools_list/
  * tools_man/tools_type) reported into it -- one shared SQLite table, `source` distinguishing
- * the two. Built on storage.ts's portable SQLite bootstrap (bun:sqlite under Bun, node:sqlite
- * elsewhere), so this store works unmodified from any Vehicle daemon's own registry setup or
- * from vehicle-client-pi's own reporting path (see vehicle-metrics-middleware.ts and
+ * the two. So this store works unmodified from any Vehicle daemon's own registry setup or from
+ * vehicle-client-pi's own reporting path (see vehicle-metrics-middleware.ts and
  * vehicle-metrics-operations.ts).
  *
  * "Forever retention, queryable by time range" is exactly what an indexed timestamp column is
  * for -- not a periodic in-memory snapshot (which would lose per-invocation granularity and any
  * range narrower than the snapshot interval).
  *
- * Exported as raw source ("./metrics": "./src/vehicle-metrics-store.ts"), not built dist, same
- * reason as paths.ts/storage.ts themselves: this file's own Migration<Handle = Database> default
- * type parameter resolves to bun:sqlite's Database type, which needs "bun-types" in the consuming
- * tsconfig -- present in this package's own plain tsconfig.json (used by `tsc --noEmit`) but not
- * in the stricter tsconfig.build.json used to produce dist/, which was never previously reachable
- * from any file that imports storage.ts. Building this file would just move that same friction
- * from a devDependency choice into a real, harder-to-diagnose dist/ build failure.
+ * SQLite access mirrors @danypops/armada's own fleet/metrics.ts dual-runtime pattern (bun:sqlite
+ * under Bun, node:sqlite everywhere else) via a lazy createRequire -- deliberately NOT
+ * storage.ts's own openSqliteWithPragmas/Migration, even though this file lives in the same
+ * package: Migration<Handle = Database>'s default type parameter resolves to bun:sqlite's real
+ * Database type, which needs "bun-types" in the consuming tsconfig. That's present in this
+ * package's own plain tsconfig.json (used by `tsc --noEmit`) but not the stricter
+ * tsconfig.build.json used to produce dist/ -- and critically, ANY file that imports (even
+ * type-only) from a module with that dependency inherits the same constraint, which would force
+ * vehicle-metrics-middleware.ts/vehicle-metrics-operations.ts to also stay un-built. That in turn
+ * broke every real consumer: those two files' own VehicleRegistry type would resolve to this
+ * package's raw *source* declaration, a different nominal type (TypeScript, unlike at runtime)
+ * from the *built* VehicleRegistry every consumer actually imports from this package's main
+ * entry -- confirmed live wiring a real consumer (tickets): "Types have separate declarations of
+ * a private property 'registrations'". A tiny locally-declared structural interface
+ * (MinimalDatabase) instead of storage.ts's own richer, bun:sqlite-typed API avoids all of this,
+ * at the cost of this file bootstrapping its own pragmas/schema instead of reusing
+ * runMigrations's generic engine -- an acceptable tradeoff for a single-version schema.
  */
-import { openSqliteWithPragmas, type Migration } from "./storage.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+// Same globalThis-indexed check as armada's own fleet/metrics.ts -- see that file's own comment
+// on why a bare `typeof Bun` needs an ambient type declaration this file has no reason to add.
+const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+
+/** Satisfied structurally by both bun:sqlite's Database and node:sqlite's DatabaseSync. */
+interface MinimalDatabase {
+	exec(sql: string): void;
+	prepare(sql: string): {
+		get(params?: Record<string, unknown>): unknown;
+		all(params?: Record<string, unknown>): unknown[];
+		run(params?: Record<string, unknown>): unknown;
+	};
+	close(): void;
+}
+
+function openDatabase(path: string): MinimalDatabase {
+	if (isBun) {
+		const bunSqlite = require("bun:sqlite") as { Database: new (path: string, options?: { create?: boolean }) => MinimalDatabase };
+		return new bunSqlite.Database(path, { create: true });
+	}
+	const nodeSqlite = require("node:sqlite") as { DatabaseSync: new (path: string) => MinimalDatabase };
+	return new nodeSqlite.DatabaseSync(path);
+}
+
+const SCHEMA_VERSION = 1;
+
+/** Applies pragmas and, on first open (PRAGMA user_version 0), the one schema version this store has ever had. Safe to call on every open -- an already-migrated database is left untouched. */
+function bootstrapDatabase(path: string): MinimalDatabase {
+	const db = openDatabase(path);
+	db.exec("PRAGMA foreign_keys = ON");
+	db.exec("PRAGMA busy_timeout = 5000");
+	if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
+	const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+	if (currentVersion < SCHEMA_VERSION) {
+		db.exec(`
+			CREATE TABLE vehicle_tool_invocations (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				source TEXT NOT NULL,
+				vehicle_name TEXT NOT NULL,
+				tool_name TEXT NOT NULL,
+				operation_version INTEGER,
+				outcome TEXT NOT NULL,
+				error_code TEXT,
+				duration_ms INTEGER,
+				caller_session_id TEXT,
+				caller_project_root TEXT,
+				principal_id TEXT
+			)
+		`);
+		db.exec("CREATE INDEX idx_vehicle_tool_invocations_ts ON vehicle_tool_invocations(ts)");
+		db.exec("CREATE INDEX idx_vehicle_tool_invocations_tool ON vehicle_tool_invocations(tool_name, ts)");
+		db.exec("CREATE INDEX idx_vehicle_tool_invocations_session ON vehicle_tool_invocations(caller_session_id, ts)");
+		db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+	}
+	return db;
+}
 
 export type VehicleMetricsSource = "server" | "client";
 export type VehicleMetricsOutcome = "success" | "failure";
@@ -73,33 +141,6 @@ export interface VehicleMetricsStore {
 	close(): void;
 }
 
-const MIGRATIONS: Migration[] = [
-	{
-		version: 1,
-		up: (db) => {
-			db.exec(`
-				CREATE TABLE vehicle_tool_invocations (
-					id INTEGER PRIMARY KEY AUTOINCREMENT,
-					ts INTEGER NOT NULL,
-					source TEXT NOT NULL,
-					vehicle_name TEXT NOT NULL,
-					tool_name TEXT NOT NULL,
-					operation_version INTEGER,
-					outcome TEXT NOT NULL,
-					error_code TEXT,
-					duration_ms INTEGER,
-					caller_session_id TEXT,
-					caller_project_root TEXT,
-					principal_id TEXT
-				)
-			`);
-			db.exec("CREATE INDEX idx_vehicle_tool_invocations_ts ON vehicle_tool_invocations(ts)");
-			db.exec("CREATE INDEX idx_vehicle_tool_invocations_tool ON vehicle_tool_invocations(tool_name, ts)");
-			db.exec("CREATE INDEX idx_vehicle_tool_invocations_session ON vehicle_tool_invocations(caller_session_id, ts)");
-		},
-	},
-];
-
 /** Maps a public groupBy dimension to the real SQL expression it groups by -- day/hour are derived from `ts`, the rest are plain columns. */
 const GROUP_EXPRESSION: Readonly<Record<VehicleMetricsGroupDimension, string>> = {
 	toolName: "tool_name",
@@ -113,8 +154,8 @@ const GROUP_EXPRESSION: Readonly<Record<VehicleMetricsGroupDimension, string>> =
 
 /** Column identifiers are drawn only from this module's own fixed GROUP_EXPRESSION map (never caller-supplied text), so building this string directly is safe -- not a SQL-injection surface despite the string interpolation. */
 export function openVehicleMetricsStore(path: string, now: () => number = Date.now): VehicleMetricsStore {
-	const db = openSqliteWithPragmas(path, { migrations: MIGRATIONS });
-	const insert = db.query(`
+	const db = bootstrapDatabase(path);
+	const insert = db.prepare(`
 		INSERT INTO vehicle_tool_invocations
 			(ts, source, vehicle_name, tool_name, operation_version, outcome, error_code, duration_ms, caller_session_id, caller_project_root, principal_id)
 		VALUES ($ts, $source, $vehicleName, $toolName, $operationVersion, $outcome, $errorCode, $durationMs, $callerSessionId, $callerProjectRoot, $principalId)
@@ -182,7 +223,7 @@ export function openVehicleMetricsStore(path: string, now: () => number = Date.n
 				${whereClause}
 				${groupClause}
 			`;
-			const rows = db.query(sql).all(params) as readonly Record<string, unknown>[];
+			const rows = db.prepare(sql).all(params) as readonly Record<string, unknown>[];
 			return rows.map((row) => {
 				const key: Record<string, string> = {};
 				for (const dimension of groupBy) key[dimension] = String(row[dimension] ?? "");
