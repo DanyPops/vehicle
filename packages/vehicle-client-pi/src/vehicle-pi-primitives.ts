@@ -41,6 +41,28 @@ export function defaultToolName(descriptor: VehicleOperationDescriptor, versione
 }
 
 /**
+ * A registerVehicleTools() `toolName` projector for a Vehicle that also adopts
+ * @danypops/vehicle-server's registerVehicleMetricsOperations: keeps defaultToolName's own bare
+ * naming for every ordinary operation, but vehicle-prefixes the shared metrics.query/
+ * metrics.recordClientEvent pair specifically (e.g. "papyrus_metrics_query"). That module's own
+ * operation names default to the same literal "metrics" prefix across every adopting Vehicle, and
+ * Pi's own tool registry enforces global uniqueness across the whole process -- a bare
+ * "metrics_query" from a second adopter collides outright with the first's, aborting that
+ * Vehicle's entire static tool registration rather than just the one colliding tool. The dynamic
+ * tools_man activation path already vehicle-prefixes every tool for exactly this reason (see
+ * buildOperationActivator in vehicle-pi/tool-creation.ts); this gives the static path the same
+ * guarantee for the one operation family multiple Vehicles are expected to share verbatim.
+ * `metricsOperationPrefix` must match whatever operationPrefix (if any) this Vehicle's own
+ * registerVehicleMetricsOperations() call used -- both default to "metrics".
+ */
+export function createMetricsAwareToolName(vehicleName: string, metricsOperationPrefix = "metrics") {
+	return (descriptor: VehicleOperationDescriptor, versioned: boolean): string => {
+		const base = defaultToolName(descriptor, versioned);
+		return descriptor.name.startsWith(`${metricsOperationPrefix}.`) ? `${vehicleName}_${base}` : base;
+	};
+}
+
+/**
  * Same superset check VehicleRegistry.invoke() already enforces at
  * invoke-time -- this is that same rule applied one step earlier, to tool
  * *visibility*, so a caller never sees a tool it has no permissions to call

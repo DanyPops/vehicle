@@ -84,6 +84,7 @@ export type {
 } from "./vehicle-pi/ready-retry.js";
 export {
 	boundVehicleModelContent,
+	createMetricsAwareToolName,
 	DEFAULT_MODEL_CONTENT_MAX_BYTES,
 } from "./vehicle-pi-primitives.js";
 // RegisterVehicleToolsSafetyOptions also has its own public subpath ("./vehicle-safety") since
