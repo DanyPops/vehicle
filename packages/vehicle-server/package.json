@@ -56,6 +56,10 @@
 			"types": "./dist/vehicle-approval-authority.d.ts",
 			"default": "./dist/vehicle-approval-authority.js"
 		},
+		"./grant": {
+			"types": "./dist/vehicle-grant.d.ts",
+			"default": "./dist/vehicle-grant.js"
+		},
 		"./scheduler": {
 			"types": "./dist/vehicle-scheduler.d.ts",
 			"default": "./dist/vehicle-scheduler.js"

@@ -20,6 +20,7 @@
 		"src/vehicle-idempotency-persistence.ts",
 		"src/vehicle-watchers.ts",
 		"src/vehicle-approval-authority.ts",
+		"src/vehicle-grant.ts",
 		"src/vehicle-scheduler.ts",
 		"src/vehicle-schedule-persistence.ts",
 		"src/vehicle-metrics-store.ts",
