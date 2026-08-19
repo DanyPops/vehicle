@@ -9,9 +9,9 @@ import {
 	type VehicleGrantBudget,
 	type VehicleOperationBinding,
 } from "@danypops/vehicle-core";
+import { registerVehicleGrantOperation, VEHICLE_GRANT_CONTINUE_OPERATION_NAME } from "../src/vehicle-grant.ts";
 import { VehicleJobStore } from "../src/vehicle-job-store.ts";
 import { VehicleRegistry } from "../src/vehicle-registry.ts";
-import { registerVehicleGrantOperation, VEHICLE_GRANT_CONTINUE_OPERATION_NAME } from "../src/vehicle-grant.ts";
 
 const passthroughSchema = defineVehicleSchema<Record<string, unknown>>({
 	jsonSchema: { type: "object" },
@@ -40,7 +40,11 @@ function grantAwareJob(registry: VehicleRegistry, initialBudget: VehicleGrantBud
 		idempotency: { mode: "safe" },
 		longRunning: true,
 		limits: LIMITS,
-		background: { supported: true, defaultWakeBudget: { maxCount: 100, maxBytes: 100_000 }, maxWakeBudget: { maxCount: 100, maxBytes: 100_000 } },
+		background: {
+			supported: true,
+			defaultWakeBudget: { maxCount: 100, maxBytes: 100_000 },
+			maxWakeBudget: { maxCount: 100, maxBytes: 100_000 },
+		},
 	});
 	const binding = bindVehicleOperation(operation, () => async (context) => {
 		let budget = initialBudget;
@@ -76,7 +80,10 @@ function grantAwareJob(registry: VehicleRegistry, initialBudget: VehicleGrantBud
 function realRegistry(options: { readonly timeoutMs?: number } = {}): VehicleRegistry {
 	const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
 	registerVehicleGrantOperation(registry);
-	registry.configureApprovals({ requireApprovalForEffects: [], ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}) }); // vehicle.grant.continue always requires approval regardless of effect (see registerVehicleGrantOperation)
+	registry.configureApprovals({
+		requireApprovalForEffects: [],
+		...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+	}); // vehicle.grant.continue always requires approval regardless of effect (see registerVehicleGrantOperation)
 	return registry;
 }
 
@@ -131,7 +138,12 @@ describe("registerVehicleGrantOperation + a real Grant-aware job, composed end t
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(ticks).toEqual(["tick"]);
 
-		const resolution = (await registry.invoke("vehicle.approval.resolve", 1, { requestId, decision: "granted" }, { permissions: ["vehicle:approvals:resolve"] })) as { capability?: string };
+		const resolution = (await registry.invoke(
+			"vehicle.approval.resolve",
+			1,
+			{ requestId, decision: "granted" },
+			{ permissions: ["vehicle:approvals:resolve"] },
+		)) as { capability?: string };
 		expect(resolution.capability).toBeDefined();
 		store.steer(jobId, { maxTurns: 2 });
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -171,7 +183,12 @@ describe("registerVehicleGrantOperation + a real Grant-aware job, composed end t
 		const { jobId } = store.submit("test.grant-aware-task", 1, {});
 		await new Promise((resolve) => setTimeout(resolve, 20));
 
-		const resolution = (await registry.invoke("vehicle.approval.resolve", 1, { requestId, decision: "denied" }, { permissions: ["vehicle:approvals:resolve"] })) as { capability?: string };
+		const resolution = (await registry.invoke(
+			"vehicle.approval.resolve",
+			1,
+			{ requestId, decision: "denied" },
+			{ permissions: ["vehicle:approvals:resolve"] },
+		)) as { capability?: string };
 		expect(resolution.capability).toBeUndefined();
 		store.steer(jobId, { denied: true });
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -195,6 +212,8 @@ describe("registerVehicleGrantOperation + a real Grant-aware job, composed end t
 		expect(requestId).toBeDefined();
 
 		await new Promise((resolve) => setTimeout(resolve, 30)); // well past the 5ms timeout
-		await expect(registry.invoke("vehicle.approval.resolve", 1, { requestId, decision: "granted" }, { permissions: ["vehicle:approvals:resolve"] })).rejects.toThrow(/No pending Vehicle approval request/);
+		await expect(
+			registry.invoke("vehicle.approval.resolve", 1, { requestId, decision: "granted" }, { permissions: ["vehicle:approvals:resolve"] }),
+		).rejects.toThrow(/No pending Vehicle approval request/);
 	});
 });

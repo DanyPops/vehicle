@@ -26,7 +26,11 @@ describe("grantBudgetExhausted", () => {
 
 describe("mergeGrantBudget", () => {
 	it("adds a top-up onto the current remaining amount, dimension by dimension", () => {
-		expect(mergeGrantBudget({ maxTurns: 1, maxToolCalls: 2 }, { maxTurns: 5, maxTokens: 1_000 })).toEqual({ maxTurns: 6, maxToolCalls: 2, maxTokens: 1_000 });
+		expect(mergeGrantBudget({ maxTurns: 1, maxToolCalls: 2 }, { maxTurns: 5, maxTokens: 1_000 })).toEqual({
+			maxTurns: 6,
+			maxToolCalls: 2,
+			maxTokens: 1_000,
+		});
 	});
 
 	it("a dimension absent from the top-up is left exactly as it was", () => {

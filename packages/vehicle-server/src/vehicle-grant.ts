@@ -62,7 +62,12 @@ const inputSchema = defineVehicleSchema<GrantContinueInput>({
 });
 
 const outputSchema = defineVehicleSchema<GrantContinueOutput>({
-	jsonSchema: { type: "object", properties: { acknowledged: { type: "boolean" } }, required: ["acknowledged"], additionalProperties: false },
+	jsonSchema: {
+		type: "object",
+		properties: { acknowledged: { type: "boolean" } },
+		required: ["acknowledged"],
+		additionalProperties: false,
+	},
 	safeParse: () => ({ success: true, value: { acknowledged: true } }),
 });
 
@@ -82,7 +87,8 @@ export function registerVehicleGrantOperation(registry: VehicleRegistry): void {
 	const operation = defineVehicleOperation({
 		name: VEHICLE_GRANT_CONTINUE_OPERATION_NAME,
 		version: 1,
-		description: "Requests more resource budget for an already-running, budget-exhausted long-running Vehicle job. Always requires approval.",
+		description:
+			"Requests more resource budget for an already-running, budget-exhausted long-running Vehicle job. Always requires approval.",
 		input: inputSchema,
 		output: outputSchema,
 		permissions: [],
@@ -91,5 +97,8 @@ export function registerVehicleGrantOperation(registry: VehicleRegistry): void {
 		idempotency: { mode: "unsafe" },
 		limits: { defaultTimeoutMs: 5_000, maxTimeoutMs: 5_000, maxRequestBytes: 4_096, maxResponseBytes: 1_024 },
 	});
-	registry.register("vehicle-grant", bindVehicleOperation(operation, () => async () => ({ acknowledged: true })));
+	registry.register(
+		"vehicle-grant",
+		bindVehicleOperation(operation, () => async () => ({ acknowledged: true })),
+	);
 }
