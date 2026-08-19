@@ -1,3 +1,4 @@
+export * from "./grant.js";
 export * from "./identity.js";
 export * from "./replay.js";
 export * from "./retention.js";
