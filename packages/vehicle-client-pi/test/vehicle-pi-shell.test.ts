@@ -537,6 +537,95 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools).toContain("tools_man");
 	});
 
+	describe("the Toolbox Reminder -- a bounded, one-shot background nudge for a core operation gone quiet", () => {
+		it("fires only once the configured turn threshold is crossed, never before", async () => {
+			const { pi, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+				shell: { coreOperations: ["tasks.create"], budget: zeroBudget, toolboxReminder: { minTurnsSinceInactive: 2, minMsSinceInactive: Number.POSITIVE_INFINITY } },
+			});
+
+			// The reminder tracker's own turn counter advances on every turn_end regardless of eviction
+			// (tick() runs unconditionally each turn boundary, exactly like evictToBudget's own decay) --
+			// so "2 turns since inactive" is reached 2 turn_end calls after the one that evicted it, not 2
+			// calls after that.
+			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }); // protected -- just seeded
+			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // evicted this turn -- episode starts now
+			expect(harness.activeTools).not.toContain("tasks_create");
+			expect(harness.sentMessages).toEqual([]); // not due yet -- only 1 turn into the episode
+
+			await harness.emit("turn_end", { turnIndex: 2, message: {}, toolResults: [] }); // 2 turns in -- threshold crossed
+			expect(harness.sentMessages).toHaveLength(1);
+			const sent = harness.sentMessages[0] as { message: { content: string; display: boolean }; options: { deliverAs: string } };
+			expect(sent.message.content).toContain("test-vehicle:tasks.create");
+			expect(sent.message.display).toBe(false); // background nudge, no visible chat bubble
+			expect(sent.options.deliverAs).toBe("followUp"); // gentle -- never forces an immediate turn
+		});
+
+		it("is capacity-bounded -- never throws even with more candidates than maxTrackedCandidates", async () => {
+			const { pi, harness } = fakePi();
+			await registerVehicleTools(
+				pi,
+				new FakeClient(manifest([operation("tasks.create"), operation("tasks.depend"), operation("docs.list")])),
+				{
+					shell: {
+						coreOperations: ["tasks.create", "tasks.depend", "docs.list"],
+						budget: zeroBudget,
+						toolboxReminder: { minTurnsSinceInactive: 100, minMsSinceInactive: Number.POSITIVE_INFINITY, maxTrackedCandidates: 1 },
+					},
+				},
+			);
+			await expect(harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] })).resolves.toBeUndefined();
+			await expect(harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] })).resolves.toBeUndefined();
+			// All 3 core operations evicted in the same turn, but maxTrackedCandidates: 1 -- never throws.
+			expect(harness.activeTools).not.toContain("tasks_create");
+			expect(harness.activeTools).not.toContain("tasks_depend");
+			expect(harness.activeTools).not.toContain("docs_list");
+		});
+
+		it("never forces reactivation -- the nudged tool stays inactive, only a message was sent", async () => {
+			const { pi, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+				shell: { coreOperations: ["tasks.create"], budget: zeroBudget, toolboxReminder: { minTurnsSinceInactive: 1, minMsSinceInactive: Number.POSITIVE_INFINITY } },
+			});
+			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
+			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // evicted
+			await harness.emit("turn_end", { turnIndex: 2, message: {}, toolResults: [] }); // 1 turn in -- due, message sent
+
+			expect(harness.sentMessages).toHaveLength(1);
+			expect(harness.activeTools).not.toContain("tasks_create"); // never auto-reactivated
+			expect(harness.activeTools).toContain("tools_man"); // still reachable the normal way
+		});
+
+		it("disabled via toolboxReminder.enabled: false sends no message even past the threshold", async () => {
+			const { pi, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+				shell: {
+					coreOperations: ["tasks.create"],
+					budget: zeroBudget,
+					toolboxReminder: { enabled: false, minTurnsSinceInactive: 1, minMsSinceInactive: Number.POSITIVE_INFINITY },
+				},
+			});
+			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
+			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] });
+			await harness.emit("turn_end", { turnIndex: 2, message: {}, toolResults: [] });
+			expect(harness.sentMessages).toEqual([]);
+		});
+
+		it("reactivating via tools_man before the threshold clears the episode -- no stale nudge later", async () => {
+			const { pi, tools, harness } = fakePi();
+			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
+				shell: { coreOperations: ["tasks.create"], budget: zeroBudget, toolboxReminder: { minTurnsSinceInactive: 2, minMsSinceInactive: Number.POSITIVE_INFINITY } },
+			});
+			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
+			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // evicted
+			await callTool(tools, "tools_man", { names: ["test-vehicle:tasks.create"] }); // reactivated -- episode cleared
+
+			await harness.emit("turn_end", { turnIndex: 2, message: {}, toolResults: [] }); // protected -- just reactivated
+			await harness.emit("turn_end", { turnIndex: 3, message: {}, toolResults: [] }); // evicted again -- fresh episode
+			expect(harness.sentMessages).toEqual([]); // only 0 turns into the fresh episode, not due
+		});
+	});
+
 	it("never activates an unavailable operation via tools_man", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.depend", { available: false })])), { shell: {} });

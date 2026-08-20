@@ -10,6 +10,7 @@ import { syncManagedActiveTools } from "../pi-tool-availability.js";
 import type { DiscoveredVehicle } from "../vehicle-shell-broker.js";
 import { type InProcessDiscoveredVehicle, listInProcessVehicles } from "../vehicle-shell-registry.js";
 import type { ContextBudgetOptions } from "./context-budget.js";
+import type { ToolboxReminderOptions, ToolboxReminderTracker } from "./toolbox-reminder.js";
 import type { WeightedLruTracker } from "./weighted-lru.js";
 
 export const DEFAULT_LIST_TOOL_NAME = "tools_list";
@@ -126,10 +127,26 @@ export interface VehicleShellOptions {
 		 * never returned a real reading at all (no prior turn_end to fall back on either). */
 		readonly fallbackBudgetTokens?: number;
 	};
+	/**
+	 * Configures the "Toolbox Reminder" -- a bounded, one-shot, non-turn-forcing background message
+	 * nudging about a consumer-declared core operation that fell out of the active set (evicted
+	 * under budget pressure) and has stayed inactive long enough to be worth mentioning again. Every
+	 * field optional and independently overridable, mirroring `budget` above; an omitted field keeps
+	 * its own DEFAULT_* constant from toolbox-reminder.ts.
+	 *
+	 * Defaults to enabled: unlike aggregateCacheTtlMs (default off for a specific, already-regressed
+	 * reason -- see that field's own doc comment), this has no comparable prior tested guarantee to
+	 * break, and reuses agent-poll-ticker.ts's already-shipped, non-controversial background-message
+	 * contract (pi-pipes/pi-papyrus both already send this exact shape of message today). Set
+	 * `enabled: false` to opt a consumer out entirely.
+	 */
+	readonly toolboxReminder?: ToolboxReminderOptions & { readonly enabled?: boolean };
 }
 
 export interface VehicleShellHandle {
 	readonly tracker: WeightedLruTracker;
+	readonly toolboxReminder: ToolboxReminderTracker;
+	readonly toolboxReminderEnabled: boolean;
 	readonly listToolName: string;
 	readonly manToolName: string;
 	readonly typeToolName: string;
@@ -198,6 +215,28 @@ export function desiredShellActiveNames(handle: VehicleShellHandle): string[] {
 		return tool?.available === true && !tool.blocked;
 	});
 	return [...new Set([handle.listToolName, handle.manToolName, handle.typeToolName, ...tracked])];
+}
+
+/**
+ * Feeds one turn's own eviction outcome (evictToBudget's own returned `evicted` list) into this
+ * handle's ToolboxReminderTracker, then clears tracking for anything currently active again --
+ * called once per turn_end, right alongside evictToBudget/applyShellActivation (see bootstrap.ts).
+ * Only ever tracks a CORE operation's own toolName as a reminder candidate: see
+ * toolbox-reminder.ts's own doc comment for why ("plausibly relevant" == a vehicle already
+ * declared it important enough to seed eagerly at registration) -- a merely tools_man-activated
+ * discovered operation cycling out is never nudged about. A complete no-op when
+ * handle.toolboxReminderEnabled is false.
+ */
+export function recordToolboxReminderTransitions(handle: VehicleShellHandle, evictedToolNames: readonly string[]): void {
+	if (!handle.toolboxReminderEnabled) return;
+	const byToolName = new Map(handle.managedTools.map((tool) => [tool.toolName, tool]));
+	for (const toolName of evictedToolNames) {
+		const managed = byToolName.get(toolName);
+		if (managed && handle.coreOperationNames.has(managed.operationName)) {
+			handle.toolboxReminder.recordInactive(toolName, `${managed.vehicleName}:${managed.operationName}`);
+		}
+	}
+	for (const toolName of desiredShellActiveNames(handle)) handle.toolboxReminder.recordActive(toolName);
 }
 
 export function applyShellActivation(pi: ExtensionAPI, handle: VehicleShellHandle): void {

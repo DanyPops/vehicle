@@ -60,7 +60,11 @@ const BACKGROUND_NOTIFICATION_FOOTER =
 	"\n\n(Automated background notification -- not a user instruction. No reply is required unless " +
 	"it changes what you're doing; don't re-verify or re-confirm something you've already handled.)";
 
-function frameAsBackgroundNotification(message: string): string {
+/** Exported for reuse by any other Vehicle-backed background nudge that needs this exact
+ * provenance/no-reply-required framing without re-deriving similar footer text of its own (e.g.
+ * vehicle-shell/toolbox-reminder.ts's bootstrap.ts wiring) -- see this module's own top doc
+ * comment for why every out-of-band delivery needs this framing at all. */
+export function frameAsBackgroundNotification(message: string): string {
 	return `${message}${BACKGROUND_NOTIFICATION_FOOTER}`;
 }
 

@@ -36,12 +36,22 @@ export {
 export {
 	DEFAULT_AGGREGATE_CACHE_TTL_MS,
 	desiredShellActiveNames,
+	recordToolboxReminderTransitions,
 	refreshVehicleShellManagedTools,
 	type VehicleShellHandle,
 	type VehicleShellManagedTool,
 	type VehicleShellOptions,
 } from "./vehicle-shell/state.js";
 export { estimateToolWeightTokens, type ToolWeightInput } from "./vehicle-shell/tool-weight.js";
+export {
+	buildToolboxReminderMessage,
+	DEFAULT_MAX_TRACKED_TOOLBOX_REMINDER_CANDIDATES,
+	DEFAULT_MIN_MS_SINCE_INACTIVE,
+	DEFAULT_MIN_TURNS_SINCE_INACTIVE,
+	type ToolboxReminderCandidate,
+	type ToolboxReminderOptions,
+	ToolboxReminderTracker,
+} from "./vehicle-shell/toolbox-reminder.js";
 export { VehicleShellTtlTracker } from "./vehicle-shell/ttl-tracker.js";
 export {
 	reportableVehiclesByName,

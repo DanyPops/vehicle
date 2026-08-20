@@ -5,6 +5,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createAgentNotifier, frameAsBackgroundNotification } from "../agent-poll-ticker.js";
 import { reportModuleLoad, reportShellRegistered } from "../client-diagnostics.js";
 import { tryExtensionRuntimeAction } from "../pi-tool-availability.js";
 import {
@@ -27,11 +28,13 @@ import {
 	DEFAULT_LIST_TOOL_NAME,
 	DEFAULT_MAN_TOOL_NAME,
 	DEFAULT_TYPE_TOOL_NAME,
+	recordToolboxReminderTransitions,
 	refreshVehicleShellManagedTools,
 	type VehicleShellHandle,
 	type VehicleShellManagedTool,
 	type VehicleShellOptions,
 } from "./state.js";
+import { buildToolboxReminderMessage, ToolboxReminderTracker } from "./toolbox-reminder.js";
 import { createToolsListTool, createToolsManTool, createToolsTypeTool } from "./tools.js";
 import { WeightedLruTracker } from "./weighted-lru.js";
 import { markSharedRegistration } from "../shared-registration-marker.js";
@@ -101,8 +104,16 @@ function registerShellToolsAndListeners(pi: ExtensionAPI, handle: VehicleShellHa
 	pi.on("turn_end", (_event, ctx) => {
 		const budget = computeToolContextBudget(ctx.getContextUsage(), handle.budgetOptions, handle.lastKnownBudgetTokens);
 		handle.lastKnownBudgetTokens = budget;
-		handle.tracker.evictToBudget(budget);
+		const { evicted } = handle.tracker.evictToBudget(budget);
+		recordToolboxReminderTransitions(handle, evicted);
 		applyShellActivation(pi, handle);
+		if (handle.toolboxReminderEnabled) {
+			const { due } = handle.toolboxReminder.tick();
+			if (due.length > 0) {
+				const message = frameAsBackgroundNotification(buildToolboxReminderMessage(due, handle.manToolName));
+				createAgentNotifier(pi).sendUserMessage(message, { deliverAs: "followUp" });
+			}
+		}
 	});
 }
 
@@ -163,6 +174,8 @@ function ensureVehicleShellHandle(pi: ExtensionAPI, options: VehicleShellOptions
 	};
 	const handle: VehicleShellHandle = {
 		tracker: new WeightedLruTracker(),
+		toolboxReminder: new ToolboxReminderTracker(options.toolboxReminder),
+		toolboxReminderEnabled: options.toolboxReminder?.enabled ?? true,
 		listToolName,
 		manToolName,
 		typeToolName,
