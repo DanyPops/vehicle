@@ -34,6 +34,7 @@ import {
 } from "./state.js";
 import { createToolsListTool, createToolsManTool, createToolsTypeTool } from "./tools.js";
 import { WeightedLruTracker } from "./weighted-lru.js";
+import { markSharedRegistration } from "../shared-registration-marker.js";
 
 /**
  * Maps the two deprecated flat TTL fields onto a scale factor for the budget bounds -- see
@@ -86,9 +87,9 @@ function armReregistrationDetection(pi: ExtensionAPI): void {
 function registerShellToolsAndListeners(pi: ExtensionAPI, handle: VehicleShellHandle, claimedElsewhere: boolean): void {
 	reportShellRegistered("vehicle", handle.listToolName, handle.manToolName, !claimedElsewhere);
 	if (!claimedElsewhere) {
-		pi.registerTool(createToolsListTool(handle.listToolName, handle.manToolName, handle));
-		pi.registerTool(createToolsManTool(pi, handle.listToolName, handle.manToolName, handle));
-		pi.registerTool(createToolsTypeTool(handle.listToolName, handle.manToolName, handle.typeToolName, handle));
+		pi.registerTool(markSharedRegistration(createToolsListTool(handle.listToolName, handle.manToolName, handle)));
+		pi.registerTool(markSharedRegistration(createToolsManTool(pi, handle.listToolName, handle.manToolName, handle)));
+		pi.registerTool(markSharedRegistration(createToolsTypeTool(handle.listToolName, handle.manToolName, handle.typeToolName, handle)));
 	}
 
 	pi.on("tool_execution_end", (event) => {

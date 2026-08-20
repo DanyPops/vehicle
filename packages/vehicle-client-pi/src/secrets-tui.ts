@@ -46,6 +46,7 @@ import {
 	type SecretsContribution,
 	type SecretsContributor,
 } from "./secrets-registry.ts";
+import { markSharedRegistration } from "./shared-registration-marker.ts";
 
 /** Top-level menu item values, exported so a consumer's own tests can recognize navigation through the two-menu split without hardcoding magic strings. */
 export const SERVICES_MENU = "__daemon_kit_secrets_services_menu__";
@@ -455,13 +456,16 @@ export function mergeSecretsContributions(contributions: SecretsContribution[]):
 export function registerSharedSecretsCommand(pi: ExtensionAPI, contributor: SecretsContributor, commandName = "secrets"): void {
 	registerSecretsContributor(contributor);
 	if (!claimSecretsCommandName(commandName)) return; // another consumer already owns the actual command registration -- my contribution above still merges in
-	pi.registerCommand(commandName, {
-		description: "Manage credentials: view status, rotate, or revoke, across every configured backend",
-		handler: async (_args, ctx) => {
-			const resolved = await Promise.all(listSecretsContributors().map((c) => c.resolve()));
-			await runSecretsCommand(ctx, mergeSecretsContributions(resolved));
-		},
-	});
+	pi.registerCommand(
+		commandName,
+		markSharedRegistration({
+			description: "Manage credentials: view status, rotate, or revoke, across every configured backend",
+			handler: async (_args, ctx) => {
+				const resolved = await Promise.all(listSecretsContributors().map((c) => c.resolve()));
+				await runSecretsCommand(ctx, mergeSecretsContributions(resolved));
+			},
+		}),
+	);
 }
 
 export type { SecretsContribution, SecretsContributor } from "./secrets-registry.ts";

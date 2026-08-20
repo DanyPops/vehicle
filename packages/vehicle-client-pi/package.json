@@ -43,6 +43,7 @@
 		"./secrets-backend-env": "./src/secrets-backend-env.ts",
 		"./secrets-backend-local": "./src/secrets-backend-local.ts",
 		"./secrets-registry": "./src/secrets-registry.ts",
+		"./shared-registration-marker": "./src/shared-registration-marker.ts",
 		"./secrets-tui": "./src/secrets-tui.ts",
 		"./vehicle-render": {
 			"types": "./dist/vehicle-render.d.ts",

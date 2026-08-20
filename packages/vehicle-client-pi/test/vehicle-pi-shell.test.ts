@@ -117,6 +117,15 @@ describe("registerVehicleTools with shell activation", () => {
 		expect(harness.activeTools.sort()).toEqual(["tasks_create", "tools_list", "tools_man", "tools_type"].sort());
 	});
 
+	it("registers tools_list/tools_man/tools_type with shared: true -- lets a smoke-test-based conflict scan (e.g. pi-packed's own doctor) tell a genuine, coincidental name collision apart from every Vehicle-based extension deliberately landing on the same 3 meta-tool names by design", async () => {
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), { shell: { coreOperations: [] } });
+
+		const metaTools = tools.filter((tool) => ["tools_list", "tools_man", "tools_type"].includes(tool.name));
+		expect(metaTools).toHaveLength(3);
+		for (const tool of metaTools) expect((tool as unknown as { shared?: boolean }).shared).toBe(true);
+	});
+
 	it("tools_list returns every operation as a one-liner, namespaced by vehicle name, without activating any of them", async () => {
 		const { pi, tools, harness } = fakePi();
 		await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create"), operation("docs.list")])), { shell: {} });
