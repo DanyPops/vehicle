@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderToTerminal } from "@danypops/pi-tui-harness";
 import type { VehicleEffect, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import { initTheme, Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Box, visibleWidth } from "@earendil-works/pi-tui";
@@ -251,6 +252,135 @@ describe("renderVehicleCall", () => {
 		expect(text).toContain("task-42");
 		expect(text).toContain("extendMs=5000");
 		expect(text).not.toContain("capability-secret");
+	});
+
+	it("follows a schema-marked streaming field with a bounded rolling visual-line window", async () => {
+		const streaming = descriptor("local-write", {
+			name: "tasks.create",
+			inputSchema: {
+				type: "object",
+				properties: {
+					title: { type: "string" },
+					body: { type: "string", "x-vehicle-presentation": "stream" },
+				},
+			},
+		});
+		const body = Array.from({ length: 14 }, (_, index) => `line-${String(index + 1).padStart(2, "0")}`).join("\n");
+		const partial = renderVehicleCall(
+			streaming,
+			{ title: "Rolling task", body },
+			fakeTheme,
+			callContext({ argsComplete: false, isPartial: true }),
+		);
+		const rendered = partial.render(40);
+		const terminal = await renderToTerminal(rendered, { cols: 40, rows: rendered.length });
+		const lines = terminal.plainLines();
+		terminal.dispose();
+
+		expect(lines[0]).toContain("Tasks Create");
+		expect(lines).not.toContain("line-04");
+		expect(lines).toContain("line-05");
+		expect(lines.at(-1)).toBe("line-14▌");
+		expect(lines.length).toBeLessThanOrEqual(11);
+	});
+
+	it("reuses the call component and advances the window when more argument text arrives", () => {
+		const streaming = descriptor("local-write", {
+			name: "tasks.create",
+			inputSchema: {
+				type: "object",
+				properties: { body: { type: "string", "x-vehicle-presentation": "stream" } },
+			},
+		});
+		const firstBody = Array.from({ length: 10 }, (_, index) => `line-${index + 1}`).join("\n");
+		const first = renderVehicleCall(
+			streaming,
+			{ body: firstBody },
+			fakeTheme,
+			callContext({ argsComplete: false, isPartial: true }),
+		);
+		const secondBody = `${firstBody}\nline-11`;
+		const second = renderVehicleCall(
+			streaming,
+			{ body: secondBody },
+			fakeTheme,
+			callContext({ argsComplete: false, isPartial: true, lastComponent: first }),
+		);
+		const lines = second.render(40);
+
+		expect(second).toBe(first);
+		expect(lines).not.toContain("line-1");
+		expect(lines).toContain("line-2");
+		expect(lines.at(-1)).toContain("line-11");
+		expect(lines.at(-1)).toContain("▌");
+	});
+
+	it("finds schema-marked streaming fields recursively inside edit arrays", () => {
+		const streamingEdit = descriptor("local-write", {
+			name: "workspace.edit",
+			inputSchema: {
+				type: "object",
+				properties: {
+					edits: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: { newText: { type: "string", "x-vehicle-presentation": "stream" } },
+						},
+					},
+				},
+			},
+		});
+		const newText = Array.from({ length: 12 }, (_, index) => `edit-${index + 1}`).join("\n");
+		const component = renderVehicleCall(
+			streamingEdit,
+			{ edits: [{ newText }] },
+			fakeTheme,
+			callContext({ argsComplete: false, isPartial: true }),
+		);
+		const lines = component.render(40);
+
+		expect(lines).not.toContain("edit-2");
+		expect(lines).toContain("edit-3");
+		expect(lines.at(-1)).toContain("edit-12▌");
+	});
+
+	it("collapses a completed streaming field back to a one-line size summary without a cursor", () => {
+		const streaming = descriptor("local-write", {
+			name: "tasks.create",
+			inputSchema: {
+				type: "object",
+				properties: { body: { type: "string", "x-vehicle-presentation": "stream" } },
+			},
+		});
+		const body = "first line\nsecond line";
+		const component = renderVehicleCall(streaming, { body }, fakeTheme, callContext({ argsComplete: true }));
+		const lines = component.render(80);
+
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("body=<22 chars>");
+		expect(lines[0]).not.toContain("first line");
+		expect(lines[0]).not.toContain("▌");
+	});
+
+	it("never streams a field whose standard schema metadata requires omission", () => {
+		const streamingSecret = descriptor("external-write", {
+			name: "secrets.store",
+			inputSchema: {
+				type: "object",
+				properties: { secret: { type: "string", writeOnly: true, "x-vehicle-presentation": "stream" } },
+			},
+		});
+		const component = renderVehicleCall(
+			streamingSecret,
+			{ secret: "TOP_SECRET" },
+			fakeTheme,
+			callContext({ argsComplete: false, isPartial: true }),
+		);
+		const text = component.render(80).join("\n");
+
+		expect(text).not.toContain("TOP_SECRET");
+		expect(text).not.toContain("▌");
 	});
 });
 

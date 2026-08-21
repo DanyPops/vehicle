@@ -52,7 +52,11 @@ compatibility path.
 Generic call rendering consults each operation's input JSON Schema recursively.
 `writeOnly: true`, `format: "password"`, and credential-shaped field names are
 always omitted. Use `x-vehicle-presentation: "omit"` for another sensitive or
-noisy field, or `"summarize"` to show only shape/size without its value.
+noisy field, `"summarize"` to show only shape/size without its value, or
+`"stream"` on a string field to show a bounded ten-visual-line rolling preview
+while partial tool arguments arrive. The stream window follows the newest
+character with a cursor and collapses back to a size summary when the call
+settles.
 
 A consumer-local side effect the operation's own output can't carry --
 e.g. broadcasting on a same-process Pi extension event bus so a sibling

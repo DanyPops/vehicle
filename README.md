@@ -205,9 +205,11 @@ application mutation, if any, has already happened and is not rolled back.
 Expanded/collapsed rendering never changes `content` or `details`.
 
 Input call rows are schema-aware: standard `writeOnly` and password format plus
-`x-vehicle-presentation: "omit" | "summarize"` control human display
-recursively. The shared credential-name vocabulary is defense in depth, never
-the only contract.
+`x-vehicle-presentation: "omit" | "summarize" | "stream"` control human display
+recursively. `stream` shows a bounded ten-visual-line rolling preview while Pi
+receives partial tool arguments, following the newest character with a cursor,
+then collapses to a size summary when the call settles. The shared
+credential-name vocabulary is defense in depth, never the only contract.
 
 ## Use a Vehicle from a Pi extension
 

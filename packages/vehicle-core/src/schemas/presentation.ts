@@ -21,8 +21,10 @@ export function isVehicleCredentialFieldName(name: string): boolean {
 
 /**
  * JSON Schema property annotation consumed by human-facing Vehicle adapters.
- * `omit` hides the field; `summarize` may show shape/size but never its value.
+ * `omit` hides the field; `summarize` may show shape/size but never its value;
+ * `stream` exposes a string through a bounded, tail-following call preview while
+ * the host receives partial tool arguments, then collapses it to a size summary.
  * Standard `writeOnly: true` and `format: "password"` always imply omission.
  */
 export const VEHICLE_SCHEMA_PRESENTATION_EXTENSION = "x-vehicle-presentation" as const;
-export type VehicleSchemaPresentation = "omit" | "summarize";
+export type VehicleSchemaPresentation = "omit" | "summarize" | "stream";

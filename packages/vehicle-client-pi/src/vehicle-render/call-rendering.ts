@@ -103,9 +103,9 @@ function propertySchema(schema: SchemaNode | undefined, key: string): SchemaNode
 	return typeof child === "object" && child !== null && !Array.isArray(child) ? (child as SchemaNode) : undefined;
 }
 
-function presentationMode(schema: SchemaNode | undefined): "omit" | "summarize" | undefined {
+function presentationMode(schema: SchemaNode | undefined): "omit" | "summarize" | "stream" | undefined {
 	const mode = schema?.[VEHICLE_SCHEMA_PRESENTATION_EXTENSION];
-	return mode === "omit" || mode === "summarize" ? mode : undefined;
+	return mode === "omit" || mode === "summarize" || mode === "stream" ? mode : undefined;
 }
 
 function isSensitiveSchema(key: string, schema: SchemaNode | undefined): boolean {
@@ -123,7 +123,8 @@ function summarizedValue(value: unknown): string {
 }
 
 function sanitizeCallValue(value: unknown, schema: SchemaNode | undefined): unknown {
-	if (presentationMode(schema) === "summarize") return summarizedValue(value);
+	const mode = presentationMode(schema);
+	if (mode === "summarize" || mode === "stream") return summarizedValue(value);
 	if (Array.isArray(value)) {
 		const itemSchema =
 			typeof schema?.items === "object" && schema.items !== null && !Array.isArray(schema.items) ? (schema.items as SchemaNode) : undefined;
@@ -135,6 +136,78 @@ function sanitizeCallValue(value: unknown, schema: SchemaNode | undefined): unkn
 			.filter(([key]) => !isSensitiveSchema(key, propertySchema(schema, key)))
 			.map(([key, child]) => [key, sanitizeCallValue(child, propertySchema(schema, key))]),
 	);
+}
+
+interface StreamField {
+	readonly path: string;
+	readonly value: string;
+}
+
+function collectStreamFields(
+	value: unknown,
+	schema: SchemaNode | undefined,
+	path: string,
+	cwd: string | undefined,
+	fields: StreamField[],
+): void {
+	if (value === cwd) return;
+	const mode = presentationMode(schema);
+	if (mode === "omit" || mode === "summarize") return;
+	if (mode === "stream") {
+		if (typeof value === "string" && value.length > 0) {
+			fields.push({ path, value: value.replace(/\r\n?/g, "\n") });
+		}
+		return;
+	}
+	if (Array.isArray(value)) {
+		const itemSchema =
+			typeof schema?.items === "object" && schema.items !== null && !Array.isArray(schema.items)
+				? (schema.items as SchemaNode)
+				: undefined;
+		for (let index = 0; index < value.length; index++) {
+			collectStreamFields(value[index], itemSchema, `${path}[${index}]`, cwd, fields);
+		}
+		return;
+	}
+	if (typeof value !== "object" || value === null) return;
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		const childSchema = propertySchema(schema, key);
+		if (isSensitiveSchema(key, childSchema)) continue;
+		collectStreamFields(child, childSchema, path ? `${path}.${key}` : key, cwd, fields);
+	}
+}
+
+function streamPreview(args: unknown, inputSchema: JsonSchema, cwd: string | undefined): string | undefined {
+	const fields: StreamField[] = [];
+	collectStreamFields(args, inputSchema as SchemaNode, "", cwd, fields);
+	if (fields.length === 0) return undefined;
+	return fields.map((field) => `${field.path}:\n${field.value}`).join("\n");
+}
+
+const STREAM_PREVIEW_MAX_VISUAL_LINES = 10;
+
+class VehicleCallRenderComponent implements Component {
+	private readonly header = new Text({ text: "", measure });
+	private readonly preview = new Text({ text: "", wrap: true, measure });
+	private showPreview = false;
+
+	setContent(header: string, preview: string | undefined): void {
+		this.header.setText(header);
+		this.showPreview = preview !== undefined;
+		this.preview.setText(preview ?? "");
+	}
+
+	invalidate(): void {
+		this.header.invalidate();
+		this.preview.invalidate();
+	}
+
+	render(width: number): string[] {
+		const headerLines = this.header.render(width);
+		if (!this.showPreview) return headerLines;
+		const previewLines = this.preview.render(width);
+		return [...headerLines, ...previewLines.slice(-STREAM_PREVIEW_MAX_VISUAL_LINES)];
+	}
 }
 
 function splitArgsForDisplay(args: unknown, cwd: string | undefined, width: number, inputSchema: JsonSchema): ArgsDisplay {
@@ -187,5 +260,9 @@ export function renderVehicleCall(
 		...(identity ? [theme.fg("accent", identity)] : []),
 		...(rest ? [theme.fg("dim", rest)] : []),
 	];
-	return new Text({ text: effectStyle(theme, descriptor.effect, segments.join(" ")), measure });
+	const component =
+		context.lastComponent instanceof VehicleCallRenderComponent ? context.lastComponent : new VehicleCallRenderComponent();
+	const preview = context.isPartial && !context.argsComplete ? streamPreview(args, descriptor.inputSchema, context.cwd) : undefined;
+	component.setContent(effectStyle(theme, descriptor.effect, segments.join(" ")), preview === undefined ? undefined : `${preview}▌`);
+	return component;
 }
