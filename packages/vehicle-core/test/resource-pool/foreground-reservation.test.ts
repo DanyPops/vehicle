@@ -10,6 +10,7 @@ import {
 	type PooledResource,
 	ResourceAdmissionQueueFull,
 	ResourceAdmissionQueueTimedOut,
+	ResourceCapacityExceeded,
 } from "../../src/resource-pool/bounded-resource-pool.js";
 
 function fakeResource(label: string, closed: string[]): PooledResource {
@@ -102,6 +103,77 @@ describe("BoundedResourcePool foreground reservation", () => {
 		expect(pool.status().waitingBackgroundAdmissions).toBe(0);
 	});
 
+	it("preserves fail-fast foreground admission unless bounded foreground waiting is explicitly enabled", async () => {
+		const pool = new Pool<string, PooledResource>({ maxActive: 1, partitionLimits: { lang: 10 } });
+		await using _held = await pool.acquire("fg-a", "lang", () => fakeResource("fg-a", []));
+		await expect(pool.acquire("fg-b", "lang", () => fakeResource("fg-b", []))).rejects.toBeInstanceOf(ResourceCapacityExceeded);
+	});
+
+	it("admits an opted-in foreground waiter promptly after a sibling lease completes without exceeding capacity", async () => {
+		const closed: string[] = [];
+		const pool = new Pool<string, PooledResource>({
+			maxActive: 1,
+			partitionLimits: { lang: 10 },
+			foregroundAdmissionQueueTimeoutMs: 2_000,
+		});
+		const held = await pool.acquire("fg-a", "lang", () => fakeResource("fg-a", closed));
+		const queued = pool.acquire("fg-b", "lang", () => fakeResource("fg-b", closed));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(pool.status()).toMatchObject({ active: 1, waitingForegroundAdmissions: 1, waitingBackgroundAdmissions: 0 });
+
+		await held[Symbol.asyncDispose]();
+		await using admitted = await queued;
+		expect(admitted.value).toBeDefined();
+		expect(pool.status()).toMatchObject({ active: 1, waitingForegroundAdmissions: 0 });
+	});
+
+	it("bounds the opt-in foreground wait queue and reports its work kind on timeout", async () => {
+		const pool = new Pool<string, PooledResource>({
+			maxActive: 1,
+			partitionLimits: { lang: 10 },
+			foregroundAdmissionQueueTimeoutMs: 50,
+			maxQueuedForegroundAdmissions: 1,
+		});
+		await using _held = await pool.acquire("fg-a", "lang", () => fakeResource("fg-a", []));
+		const firstQueued = pool.acquire("fg-b", "lang", () => fakeResource("fg-b", []));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		await expect(pool.acquire("fg-c", "lang", () => fakeResource("fg-c", []))).rejects.toMatchObject({
+			name: "ResourceAdmissionQueueFull",
+			workKind: "foreground",
+		});
+		await expect(firstQueued).rejects.toMatchObject({ name: "ResourceAdmissionQueueTimedOut", workKind: "foreground" });
+		expect(pool.status().waitingForegroundAdmissions).toBe(0);
+	});
+
+	it("gives queued foreground demand admission before an older background waiter", async () => {
+		const admitted: string[] = [];
+		const pool = new Pool<string, PooledResource>({
+			maxActive: 1,
+			partitionLimits: { lang: 10 },
+			foregroundAdmissionQueueTimeoutMs: 2_000,
+			backgroundAdmissionQueueTimeoutMs: 2_000,
+		});
+		const held = await pool.acquire("held", "lang", () => fakeResource("held", []));
+		const background = pool.acquire("background", "lang", () => {
+			admitted.push("background");
+			return fakeResource("background", []);
+		}, "background");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		const foreground = pool.acquire("foreground", "lang", () => {
+			admitted.push("foreground");
+			return fakeResource("foreground", []);
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		await held[Symbol.asyncDispose]();
+		const foregroundLease = await foreground;
+		expect(admitted).toEqual(["foreground"]);
+		await foregroundLease[Symbol.asyncDispose]();
+		await using _backgroundLease = await background;
+		expect(admitted).toEqual(["foreground", "background"]);
+	});
+
 	it("never queues foreground admission even while background waits at the same reduced ceiling", async () => {
 		const closed: string[] = [];
 		const pool = new Pool<string, PooledResource>({
@@ -133,6 +205,6 @@ describe("BoundedResourcePool foreground reservation", () => {
 
 		await using bg = await pool.acquire("bg-a", "lang", () => fakeResource("bg-a", closed), "background");
 		expect(bg.value).toBeDefined();
-		expect(pool.status()).toMatchObject({ active: 1, maxActive: 1, waitingBackgroundAdmissions: 0 });
+		expect(pool.status()).toMatchObject({ active: 1, maxActive: 1, waitingForegroundAdmissions: 0, waitingBackgroundAdmissions: 0 });
 	});
 });

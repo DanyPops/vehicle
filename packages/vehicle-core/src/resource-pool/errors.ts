@@ -18,26 +18,26 @@ export class ResourceInUse extends Error {
 	}
 }
 
-/** Raised when background admission is already waiting at maxQueuedBackgroundAdmissions -- fails fast rather than growing the wait queue without bound. */
+/** Raised when one admission class is already at its configured queue bound. */
 export class ResourceAdmissionQueueFull extends Error {
 	constructor(
 		readonly partitionKey: string,
 		readonly maxQueued: number,
+		readonly workKind: "foreground" | "background" = "background",
 	) {
-		super(`background admission for partition "${partitionKey}" is already waiting at capacity (${maxQueued} queued); retry later`);
+		super(`${workKind} admission for partition "${partitionKey}" is already waiting at capacity (${maxQueued} queued); retry later`);
 		this.name = "ResourceAdmissionQueueFull";
 	}
 }
 
-/** Raised when a queued background admission waits past backgroundAdmissionQueueTimeoutMs without a slot freeing. */
+/** Raised when a queued admission waits past its configured timeout without room becoming available. */
 export class ResourceAdmissionQueueTimedOut extends Error {
 	constructor(
 		readonly partitionKey: string,
 		readonly timeoutMs: number,
+		readonly workKind: "foreground" | "background" = "background",
 	) {
-		super(
-			`background admission for partition "${partitionKey}" waited ${timeoutMs}ms for a resource-pool slot and gave up -- foreground demand is holding every admittable slot`,
-		);
+		super(`${workKind} admission for partition "${partitionKey}" waited ${timeoutMs}ms for a resource-pool slot and gave up`);
 		this.name = "ResourceAdmissionQueueTimedOut";
 	}
 }

@@ -132,6 +132,7 @@ describe("BoundedResourcePool", () => {
 			activeCeilingSource: "configured",
 			absoluteMaxActive: 32,
 			byPartition: { lang: 2 },
+			waitingForegroundAdmissions: 0,
 			waitingBackgroundAdmissions: 0,
 		});
 	});
