@@ -603,21 +603,43 @@ export async function invokeWithApprovalRetry(ctx: InvocationContext): Promise<u
 			options.requestApproval,
 		);
 		const approved = answer?.approved === true;
+		const decision = approved ? "granted" : "denied";
 		let capability: string | undefined;
+		// Distinct from the resolve call throwing below: this tracks whether the resolve round trip
+		// itself actually completed, so a genuine "a human looked at this and said no" (resolved,
+		// decision "denied") can be told apart from "we never even found out" (the round trip itself
+		// failed -- missing permission, expired request) when neither case ends up with a capability.
+		let resolved = false;
 		try {
 			const resolveOutput = (await client.invoke(
 				VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
 				1,
-				{ requestId, decision: approved ? "granted" : "denied", ...(answer?.comment ? { comment: answer.comment } : {}) },
+				{ requestId, decision, ...(answer?.comment ? { comment: answer.comment } : {}) },
 				{ permissions: options.permissions, principal: options.principal, signal },
 			)) as { capability?: string };
 			capability = resolveOutput.capability;
+			resolved = true;
 		} catch {
 			// The resolve round trip itself failed (missing permission, expired
 			// request) -- fall through to the original approval-required failure,
 			// never mint or assume a capability that was never actually granted.
 		}
 		if (!capability) {
+			// A confirmed denial (the resolve round trip completed and recorded "denied") gets its own
+			// distinct, non-retryable failure carrying the human's own comment when they gave one --
+			// re-throwing the stale pre-ask `failure` here would silently drop both the comment and the
+			// fact that a human, not just an expired/unreachable request, is why this didn't go through.
+			if (resolved && decision === "denied") {
+				const denial: VehicleFailure = {
+					code: "approval-denied",
+					category: "authorization",
+					message: answer?.comment ? `denied by human review: ${answer.comment}` : "denied by human review",
+					retryable: false,
+					...(answer?.comment ? { details: { comment: answer.comment } } : {}),
+				};
+				publishOperationActivity("failed", ctx.identity, descriptor, { code: denial.code });
+				throw new PiVehicleInvocationError(denial, manifest.name);
+			}
 			publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}

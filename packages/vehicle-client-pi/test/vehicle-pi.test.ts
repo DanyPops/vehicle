@@ -609,16 +609,51 @@ describe("registerVehicleTools", () => {
 		expect(confirmCalls[0]?.message).toContain("destructive");
 	});
 
-	it("denies and never retries invoke() when the local prompt returns false", async () => {
+	it("denies and never retries invoke() when the local prompt returns false, surfacing a distinct approval-denied failure rather than the stale pre-ask one", async () => {
 		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(pi, client);
 
 		await expect(
 			execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: { confirm: async () => false } }),
-		).rejects.toMatchObject({ failure: { code: "approval-required" } });
+		).rejects.toMatchObject({ failure: { code: "approval-denied", retryable: false, message: "denied by human review" } });
 		expect(client.calls.map((call) => call.name)).toEqual(["risk.destructive", "vehicle.approval.resolve"]);
 		expect(client.calls[1]?.input).toMatchObject({ decision: "denied" });
+	});
+
+	it("surfaces the human's own denial comment in both the failure message and its details, instead of dropping it", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, client, { requestApproval: async () => ({ approved: false, comment: "wrong environment" }) });
+
+		await expect(execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: {} })).rejects.toMatchObject({
+			failure: {
+				code: "approval-denied",
+				retryable: false,
+				message: "denied by human review: wrong environment",
+				details: { comment: "wrong environment" },
+			},
+		});
+		expect(client.calls[1]?.input).toMatchObject({ decision: "denied", comment: "wrong environment" });
+	});
+
+	it("falls back to the original approval-required failure when the resolve round trip itself fails, rather than fabricating a denial", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		client.value = manifest([operation("risk.destructive", 1, { effect: "destructive" })]);
+		const resolveFailingClient: VehicleClient = {
+			manifest: () => client.manifest(),
+			invoke: async <Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions) => {
+				if (name === "vehicle.approval.resolve") throw new Error("resolve endpoint unreachable");
+				return client.invoke<Output>(name, version, input, options);
+			},
+			close: () => Promise.resolve(),
+		};
+		const { pi, tools } = fakePi();
+		await registerVehicleTools(pi, resolveFailingClient);
+
+		await expect(
+			execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: { confirm: async () => false } }),
+		).rejects.toMatchObject({ failure: { code: "approval-required" } });
 	});
 
 	// No UI means no prompt is possible; surface approval-required directly instead.
@@ -662,13 +697,13 @@ describe("registerVehicleTools", () => {
 		expect(result.content).toBeTruthy();
 	});
 
-	it("options.requestApproval denying means never retrying invoke(), same as the default prompt", async () => {
+	it("options.requestApproval denying means never retrying invoke(), same as the default prompt, and still surfaces a distinct approval-denied failure", async () => {
 		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
 		const { pi, tools } = fakePi();
 		await registerVehicleTools(pi, client, { requestApproval: async () => null });
 
 		await expect(execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: {} })).rejects.toMatchObject({
-			failure: { code: "approval-required" },
+			failure: { code: "approval-denied", retryable: false },
 		});
 		expect(client.calls.map((call) => call.name)).toEqual(["risk.destructive", "vehicle.approval.resolve"]);
 		expect(client.calls[1]?.input).toMatchObject({ decision: "denied" });
