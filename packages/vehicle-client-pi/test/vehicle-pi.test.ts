@@ -420,6 +420,7 @@ describe("invokeVehicleOperation's extracted steps, exercised in isolation", () 
 	it("invokeWithApprovalRetry surfaces the original approval-required failure when no UI can ask", async () => {
 		const descriptor = operation("category.remove", 1, { effect: "local-write" });
 		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const pendingCalls: Array<{ requestId: string; operationName: string }> = [];
 		const ctx = await buildInvocationContext({
 			client,
 			manifest: client.value,
@@ -428,11 +429,96 @@ describe("invokeVehicleOperation's extracted steps, exercised in isolation", () 
 			toolCallId: "call-1",
 			input: { value: "x" },
 			context: fakeContext({ hasUI: false }),
-			options: {},
+			options: { onApprovalPending: (requestId, d) => pendingCalls.push({ requestId, operationName: d.name }) },
 		});
 		await expect(invokeWithApprovalRetry(ctx)).rejects.toMatchObject({ failure: { code: "approval-required" } });
+		// onApprovalPending fires with the real requestId -- this call's own return value can never
+		// carry a later decision, since no UI was ever available to ask in the first place.
+		expect(pendingCalls).toEqual([{ requestId: "req-1", operationName: "category.remove" }]);
 		// Only the original attempt happened -- no vehicle.approval.resolve round trip without a UI.
 		expect(client.calls.filter((call) => call.name === "vehicle.approval.resolve")).toHaveLength(0);
+	});
+
+	it("invokeWithApprovalRetry never fires onApprovalPending for an outcome this same call already knows in full -- a synchronous grant", async () => {
+		const descriptor = operation("category.remove", 1, { effect: "local-write" });
+		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const pendingCalls: unknown[] = [];
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: true, ui: { confirm: () => Promise.resolve(true) } }),
+			options: { onApprovalPending: (requestId, d) => pendingCalls.push({ requestId, operationName: d.name }) },
+		});
+		await invokeWithApprovalRetry(ctx);
+		expect(pendingCalls).toEqual([]);
+	});
+
+	it("invokeWithApprovalRetry never fires onApprovalPending for an outcome this same call already knows in full -- a confirmed denial", async () => {
+		const descriptor = operation("category.remove", 1, { effect: "local-write" });
+		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const pendingCalls: unknown[] = [];
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: true, ui: { confirm: () => Promise.resolve(false) } }),
+			options: { onApprovalPending: (requestId, d) => pendingCalls.push({ requestId, operationName: d.name }) },
+		});
+		await expect(invokeWithApprovalRetry(ctx)).rejects.toMatchObject({ failure: { code: "approval-denied" } });
+		expect(pendingCalls).toEqual([]);
+	});
+
+	it("invokeWithApprovalRetry fires onApprovalPending when the resolve round trip itself fails -- the outcome genuinely isn't known", async () => {
+		const descriptor = operation("category.remove", 1, { effect: "local-write" });
+		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const resolveFailingClient = {
+			manifest: () => client.manifest(),
+			invoke: async <Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> => {
+				if (name === "vehicle.approval.resolve") throw new Error("resolve endpoint unreachable");
+				return client.invoke<Output>(name, version, input, options);
+			},
+			close: () => Promise.resolve(),
+		};
+		const pendingCalls: Array<{ requestId: string; operationName: string }> = [];
+		const ctx = await buildInvocationContext({
+			client: resolveFailingClient,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: true, ui: { confirm: () => Promise.resolve(false) } }),
+			options: { onApprovalPending: (requestId, d) => pendingCalls.push({ requestId, operationName: d.name }) },
+		});
+		await expect(invokeWithApprovalRetry(ctx)).rejects.toMatchObject({ failure: { code: "approval-required" } });
+		expect(pendingCalls).toEqual([{ requestId: "req-1", operationName: "category.remove" }]);
+	});
+
+	it("invokeWithApprovalRetry never lets a throwing onApprovalPending affect the gated call's own outcome", async () => {
+		const descriptor = operation("category.remove", 1, { effect: "local-write" });
+		const client = new ApprovalFlowClient(manifest([descriptor]));
+		const ctx = await buildInvocationContext({
+			client,
+			manifest: client.value,
+			descriptor,
+			toolName: "web_category",
+			toolCallId: "call-1",
+			input: { value: "x" },
+			context: fakeContext({ hasUI: false }),
+			options: {
+				onApprovalPending: () => {
+					throw new Error("boom");
+				},
+			},
+		});
+		await expect(invokeWithApprovalRetry(ctx)).rejects.toMatchObject({ failure: { code: "approval-required" } });
 	});
 });
 

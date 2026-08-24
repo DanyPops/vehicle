@@ -275,6 +275,22 @@ export interface RegisterVehicleToolsOptions {
 	 * a direct pi.events.emit() call would carry on its own.
 	 */
 	readonly onInvoked?: (request: PiVehicleInvocationRequest, output: unknown) => void | Promise<void>;
+	/**
+	 * Fires with a gated call's own requestId whenever invokeWithApprovalRetry surfaces an
+	 * approval-required (or a denial the resolve round trip itself couldn't confirm) failure to
+	 * the caller WITHOUT ever having learned the eventual decision -- no UI to prompt with, a
+	 * local prompt this exact call's own lifetime didn't outlive, or the resolve call itself
+	 * failing. Never fires for a decision this same call already knows in full (a synchronous
+	 * grant, or the confirmed-denial failure requestLocalApproval's own answer already carries).
+	 *
+	 * A caller's own gated tool call already returned by the time a human eventually decides in
+	 * those cases -- there is no later return value to carry the outcome to. This hook exists so
+	 * a consumer can remember the requestId and poll vehicle.approval.status for it later (see
+	 * vehicle-approval-outcome-poll.ts's VehicleApprovalOutcomePoll) instead of the decision and
+	 * any comment being effectively unrecoverable. Best-effort, same contract as onInvoked above:
+	 * a throwing callback is swallowed and must never affect the gated call's own outcome.
+	 */
+	readonly onApprovalPending?: (requestId: string, descriptor: VehicleOperationDescriptor) => void;
 	readonly toolName?: (descriptor: VehicleOperationDescriptor, versioned: boolean) => string;
 	readonly closeClientOnSessionShutdown?: boolean;
 	/** @deprecated Use `rendering.renderers` instead -- see RegisterVehicleToolsRenderingOptions. */
@@ -569,6 +585,15 @@ export async function applyLocalSafetyGate(ctx: InvocationContext): Promise<void
 	throw new PiVehicleInvocationError(failure, manifest.name);
 }
 
+/** Best-effort: see RegisterVehicleToolsApprovalOptions.onApprovalPending's own doc comment for why a throw here must never affect the gated call's own outcome. */
+function notifyApprovalPending(options: RegisterVehicleToolsOptions, requestId: string, descriptor: VehicleOperationDescriptor): void {
+	try {
+		options.onApprovalPending?.(requestId, descriptor);
+	} catch {
+		// see this function's own doc comment
+	}
+}
+
 // Owns the whole approval-required catch/resolve/retry dance around the core invokeOrRunAsJob
 // call -- the registry (once configureApprovals() is enabled there) records a durable
 // approval.requested event before ever failing this way, so a caller always has a path forward
@@ -590,6 +615,7 @@ export async function invokeWithApprovalRetry(ctx: InvocationContext): Promise<u
 		// later) rather than this call eagerly denying it on the caller's behalf.
 		if (!requestId || !context.hasUI) {
 			publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
+			if (requestId) notifyApprovalPending(options, requestId, descriptor);
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 
@@ -641,6 +667,7 @@ export async function invokeWithApprovalRetry(ctx: InvocationContext): Promise<u
 				throw new PiVehicleInvocationError(denial, manifest.name);
 			}
 			publishOperationActivity("failed", ctx.identity, descriptor, { code: failure.code });
+			notifyApprovalPending(options, requestId, descriptor);
 			throw new PiVehicleInvocationError(failure, manifest.name);
 		}
 		try {
