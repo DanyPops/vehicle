@@ -97,6 +97,16 @@ describe("Armada service ownership", () => {
 		expect(deps.commands).toEqual([]);
 	});
 
+	it("projects a declared contentSignature into Armada desired state, omitting it when absent", () => {
+		const deps = fakeDeps();
+		installUserService({ ...SPEC, contentSignature: "a".repeat(64) }, deps);
+		expect(JSON.parse(deps.commands[0]?.input ?? "{}")).toMatchObject({ contentSignature: "a".repeat(64) });
+
+		const plainDeps = fakeDeps();
+		installUserService(SPEC, plainDeps);
+		expect(JSON.parse(plainDeps.commands[0]?.input ?? "{}")).not.toHaveProperty("contentSignature");
+	});
+
 	it("projects portable hardening and network-readiness requirements into Armada desired state", () => {
 		const deps = fakeDeps();
 		expect(installUserService({ ...SPEC, noNewPrivileges: true, privateTmp: true, waitForNetwork: true }, deps)).toEqual({
@@ -173,6 +183,12 @@ describe("Armada service ownership -- in-process registrar path", () => {
 				readiness: { timeoutMs: 10000, pollIntervalMs: 100 },
 			},
 		]);
+	});
+
+	it("passes a declared contentSignature through to the registrar", async () => {
+		const registrar = new FakeVehicleRegistrar();
+		await registerVehicleService({ ...SPEC, contentSignature: "b".repeat(64) }, registrar);
+		expect(registrar.registerCalls[0]).toMatchObject({ contentSignature: "b".repeat(64) });
 	});
 
 	it("fails before ever calling the registrar when environment or credential material is supplied", async () => {

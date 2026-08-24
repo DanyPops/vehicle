@@ -8,6 +8,7 @@ export function vehicle(overrides: Partial<Omit<VehicleSpec, "name">> & { name?:
 	return Object.freeze({
 		name: name.value,
 		version: overrides.version ?? "1.0.0",
+		...(overrides.contentSignature === undefined ? {} : { contentSignature: overrides.contentSignature }),
 		executable: overrides.executable ?? "/opt/papyrus/cli.js",
 		arguments: overrides.arguments ?? ["serve"],
 		handlePath: overrides.handlePath ?? "/run/user/1000/papyrus/handle.json",

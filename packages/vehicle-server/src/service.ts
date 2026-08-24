@@ -14,6 +14,8 @@ export interface ServiceSpec {
 	displayName?: string;
 	/** Installed package or daemon version projected into Armada desired state. */
 	version: string;
+	/** A content-derived signal (e.g. a hash of the installed package's own files) distinct from `version` -- lets Armada detect real drift even when a caller's declared version did not change. */
+	contentSignature?: string;
 	/** Absolute path to the daemon's entry point (e.g. a `#!/usr/bin/env bun` cli.ts). */
 	binPath: string;
 	args?: string[];
@@ -173,6 +175,7 @@ function toVehicleRegistrationInput(spec: ServiceSpec): VehicleRegistrationInput
 	return {
 		name: spec.name,
 		version: spec.version,
+		...(spec.contentSignature === undefined ? {} : { contentSignature: spec.contentSignature }),
 		executable: spec.binPath,
 		arguments: spec.args ?? [],
 		...(spec.workingDirectory === undefined ? {} : { workingDirectory: spec.workingDirectory }),

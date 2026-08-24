@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { type NativeServiceState, planFleet, systemdStrategy } from "../src/index.js";
+import { type ManifestHash, type NativeServiceState, planFleet, systemdStrategy } from "../src/index.js";
 import { manifest, vehicle } from "./fixtures.js";
 
-function specHashOf(spec: ReturnType<typeof vehicle>): string {
+function specHashOf(spec: ReturnType<typeof vehicle>): ManifestHash {
 	const outcome = systemdStrategy.generateDescriptor(spec);
 	if (!outcome.ok) throw new Error("fixture vehicle must be systemd-compatible");
 	return outcome.descriptor.specHash;
@@ -44,6 +44,28 @@ describe("planFleet", () => {
 			"start:start",
 			"update:update",
 		]);
+	});
+
+	it("plans an update when contentSignature drifts even though version did not", () => {
+		// The gap this closes: a package's declared version can stay constant while its real
+		// installed bytes change (a local rebuild, an unpublished re-materialization). specHash
+		// must react to that even when `version` alone would not.
+		const before = vehicle({ contentSignature: "a".repeat(64) });
+		const after = vehicle({ contentSignature: "b".repeat(64) });
+		const actual: NativeServiceState = { name: before.name, status: "running", specHash: specHashOf(before) };
+		const outcome = planFleet(manifest([after]), [actual], systemdStrategy);
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.plan.operations).toEqual([{ kind: "update", name: after.name, specHash: specHashOf(after) }]);
+	});
+
+	it("produces an empty plan when only contentSignature is unset on both sides", () => {
+		const spec = vehicle();
+		const actual: NativeServiceState = { name: spec.name, status: "running", specHash: specHashOf(spec) };
+		const outcome = planFleet(manifest([spec]), [actual], systemdStrategy);
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.plan.operations).toEqual([]);
 	});
 
 	it("rejects duplicate and unbounded actual state", () => {

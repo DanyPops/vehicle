@@ -52,6 +52,8 @@ const VehicleSchema = Type.Object(
 	{
 		name: Type.String({ pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }),
 		version: Type.String({ minLength: 1, maxLength: 128 }),
+		/** A content-derived signal (e.g. a hash of the installed package's own files) distinct from the declared `version` string -- lets planFleet detect real drift even when a caller's declared version did not change. Optional: not every Vehicle source can produce one. */
+		contentSignature: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
 		executable: BoundedString,
 		arguments: Type.Optional(Type.Array(BoundedString, { maxItems: 64 })),
 		workingDirectory: Type.Optional(BoundedString),
@@ -144,6 +146,8 @@ export type VehicleRestartPolicy =
 export interface VehicleSpec {
 	readonly name: VehicleName;
 	readonly version: string;
+	/** A content-derived signal distinct from `version` -- see VehicleSchema's own doc comment for why this exists. */
+	readonly contentSignature?: string;
 	readonly executable: string;
 	readonly arguments: readonly string[];
 	readonly workingDirectory?: string;
@@ -194,6 +198,7 @@ function toVehicle(raw: RawVehicle): VehicleSpec {
 	return freeze({
 		name: name.value,
 		version: raw.version,
+		...(raw.contentSignature === undefined ? {} : { contentSignature: raw.contentSignature }),
 		executable: raw.executable,
 		arguments: [...(raw.arguments ?? [])],
 		...(raw.workingDirectory === undefined ? {} : { workingDirectory: raw.workingDirectory }),

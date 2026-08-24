@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,8 +16,17 @@ function success(): NativeOperationOutcome {
 	return { ok: true, diagnostics: [] };
 }
 
+// Every mkdtemp'd directory this suite creates, removed after each test regardless of pass/fail
+// -- otherwise every run leaks its own tmpdir permanently.
+const createdDirs: string[] = [];
+afterEach(() => {
+	for (const dir of createdDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 function tempManifestPath(): string {
-	return join(mkdtempSync(join(tmpdir(), "armada-registrar-")), "armada.json");
+	const dir = mkdtempSync(join(tmpdir(), "armada-registrar-"));
+	createdDirs.push(dir);
+	return join(dir, "armada.json");
 }
 
 const RESTART = { policy: "on-failure" as const, delayMs: 1_000, maxAttempts: 3, windowMs: 60_000 };
@@ -103,6 +112,26 @@ describe("createVehicleRegistrar", () => {
 		events.length = 0;
 
 		const second = await registrar.register(papyrus({ version: "1.1.0" }));
+
+		expect(second).toMatchObject({ ok: true, applied: [{ kind: "update", name: "papyrus" }] });
+		expect(events).toEqual([
+			"stop:armada-papyrus.service",
+			"replace:armada-papyrus.service",
+			"start:armada-papyrus.service",
+			"ready:papyrus",
+		]);
+	});
+
+	it("reconciles an update when contentSignature drifts even though the declared version did not", async () => {
+		const manifestPath = tempManifestPath();
+		const { controller, readiness, events } = statefulHarness();
+		const registrar = createVehicleRegistrar({ manifestPath, controller, readiness });
+
+		const first = await registrar.register(papyrus({ contentSignature: "a".repeat(64) }));
+		expect(first.ok).toBe(true);
+		events.length = 0;
+
+		const second = await registrar.register(papyrus({ contentSignature: "b".repeat(64) }));
 
 		expect(second).toMatchObject({ ok: true, applied: [{ kind: "update", name: "papyrus" }] });
 		expect(events).toEqual([

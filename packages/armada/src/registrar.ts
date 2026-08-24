@@ -24,6 +24,8 @@ import type { NativeServiceController, ReadinessProbe } from "./native/service-m
 export interface VehicleRegistrationInput {
 	readonly name: string;
 	readonly version: string;
+	/** A content-derived signal distinct from `version` -- see VehicleSchema's own doc comment (fleet/manifest.ts) for why this exists. */
+	readonly contentSignature?: string;
 	readonly executable: string;
 	readonly arguments?: readonly string[];
 	readonly workingDirectory?: string;

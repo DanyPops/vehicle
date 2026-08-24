@@ -154,6 +154,22 @@ describe("decodeArmadaManifest", () => {
 		expect(outcome.diagnostics[0]?.code).toBe("MANIFEST_VEHICLE_DUPLICATE");
 	});
 
+	it("accepts and preserves a Vehicle's contentSignature", () => {
+		const outcome = decodeArmadaManifest(
+			manifestJson([{ ...JSON.parse(manifestJson()).vehicles[0], contentSignature: "a".repeat(64) }]),
+		);
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.manifest.vehicles[0]?.contentSignature).toBe("a".repeat(64));
+	});
+
+	it("omits contentSignature when the source vehicle never declared one", () => {
+		const outcome = decodeArmadaManifest(manifestJson());
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.manifest.vehicles[0]?.contentSignature).toBeUndefined();
+	});
+
 	it("accepts and preserves a Vehicle's env map", () => {
 		const outcome = decodeArmadaManifest(manifestJson([{ ...JSON.parse(manifestJson()).vehicles[0], env: { PI_BIN: "/abs/path/pi" } }]));
 		expect(outcome.ok).toBe(true);
