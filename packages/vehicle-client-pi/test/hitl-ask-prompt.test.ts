@@ -403,6 +403,50 @@ describe("hitl-ask-prompt: shared dual-host HITL ask experience, owned end-to-en
 		});
 	});
 
+	// commentToggleKey lets a caller (e.g. hitl-approval-ask-prompt.ts's requestPiApprovalViaAskPrompt)
+	// repurpose the default ctrl+g toggle to a key that reads more naturally for its own use case --
+	// confirms the override actually reaches the real component's own key matching, not just that the
+	// option is accepted and ignored.
+	it("a custom commentToggleKey (e.g. tab) opens the same optional-comment editor the default ctrl+g toggle would", async () => {
+		const tui = { terminal: { rows: 30 }, requestRender: () => {} } as unknown as TUI;
+		let component: Component | undefined;
+		const ctx = {
+			cwd: "/tmp",
+			hasUI: true,
+			ui: {
+				select: async () => {
+					throw new Error("unexpected dialog fallback");
+				},
+				input: async () => {
+					throw new Error("unexpected dialog fallback");
+				},
+				notify: () => {},
+				theme,
+				getEditorText: () => "",
+				getEditorComponent: () => undefined,
+				setEditorComponent: (factory: EditorFactory) => {
+					if (factory) component = factory(tui, fakeEditorTheme, keybindings);
+				},
+			} as unknown as ExtensionContext["ui"],
+		} as ExtensionContext;
+
+		const pending = requestPiAskPrompt(ctx, {
+			question: "Approve Issue Create?",
+			options: [{ title: "Approve" }, { title: "Deny" }],
+			allowComment: true,
+			commentToggleKey: "tab",
+		});
+		const driven = driveComponent(component!);
+
+		driven.pressKey("down"); // highlight Deny
+		driven.pressKey("tab"); // toggle the optional comment via the custom key, not ctrl+g
+		driven.pressKey("enter"); // confirm Deny -- wants a comment, so this opens the comment editor rather than resolving
+		driven.type("wrong environment");
+		driven.pressKey("enter"); // submit the comment
+
+		expect(await pending).toEqual({ content: "Deny — wrong environment", selected: ["Deny"] });
+	});
+
 	it("escape cancels the picker -- resolves to undefined, never a fabricated answer", async () => {
 		const ctx = interactiveCtx([ESCAPE]);
 		const answer = await requestPiAskPrompt(ctx, {
