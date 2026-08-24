@@ -46,11 +46,12 @@ describe("requestPiApprovalViaAskPrompt", () => {
 
 		// No freeform sentinel: requestPiApprovalViaAskPrompt always disables freeform. The prompt's
 		// message rides along as requestPiAskPrompt's own "Context:" section (see the dedicated test
-		// below for that exact formatting).
+		// below for that exact formatting). Three real options -- Approve/Deny alone never trigger a
+		// second, comment-collecting ask; only "Deny (add comment)" does (see its own dedicated test).
 		expect(selectCalls).toEqual([
 			{
 				title: "Approve Issue Create?\n\nContext:\nissue.create@1 (external-write effect) requests approval.",
-				options: ["Approve", "Deny"],
+				options: ["Approve", "Deny", "Deny (add comment)"],
 			},
 		]);
 		expect(answer).toEqual({ approved: true });
@@ -65,12 +66,38 @@ describe("requestPiApprovalViaAskPrompt", () => {
 		expect(await requestPiApprovalViaAskPrompt(ctx, params())).toEqual({ approved: false });
 	});
 
-	it("threads an optional comment through onto the resolved PiApprovalAnswer", async () => {
+	it("plain Deny resolves immediately with no comment prompt at all -- a comment only ever makes sense on denial-with-reason", async () => {
+		const inputCalls: unknown[] = [];
 		const ctx = {
 			hasUI: true,
 			ui: {
 				select: async () => "Deny",
-				input: async () => "This backend doesn't have field X configured yet.",
+				input: async (...args: unknown[]) => {
+					inputCalls.push(args);
+					return undefined;
+				},
+				notify: () => {},
+			},
+		} as unknown as ExtensionContext;
+
+		expect(await requestPiApprovalViaAskPrompt(ctx, params())).toEqual({ approved: false });
+		expect(inputCalls).toEqual([]); // no second ask at all for plain Deny
+	});
+
+	it('"Deny (add comment)" asks a genuinely separate freeform question and threads the answer through as PiApprovalAnswer.comment', async () => {
+		const selectCalls: unknown[] = [];
+		const inputCalls: string[] = [];
+		const ctx = {
+			hasUI: true,
+			ui: {
+				select: async (title: string) => {
+					selectCalls.push(title);
+					return "Deny (add comment)";
+				},
+				input: async (prompt: string) => {
+					inputCalls.push(prompt);
+					return "This backend doesn't have field X configured yet.";
+				},
 				notify: () => {},
 			},
 		} as unknown as ExtensionContext;
@@ -79,6 +106,22 @@ describe("requestPiApprovalViaAskPrompt", () => {
 			approved: false,
 			comment: "This backend doesn't have field X configured yet.",
 		});
+		expect(selectCalls).toHaveLength(1); // the original Approve/Deny/Deny-with-comment choice
+		expect(inputCalls).toHaveLength(1); // the dedicated freeform reason ask -- a genuinely separate question
+		expect(inputCalls[0]).toContain("Reason for denial");
+	});
+
+	it('"Deny (add comment)" with an empty/whitespace-only reason still resolves denied, just without a comment', async () => {
+		const ctx = {
+			hasUI: true,
+			ui: {
+				select: async () => "Deny (add comment)",
+				input: async () => "   ",
+				notify: () => {},
+			},
+		} as unknown as ExtensionContext;
+
+		expect(await requestPiApprovalViaAskPrompt(ctx, params())).toEqual({ approved: false });
 	});
 
 	it("passes the resolved prompt's title/message through as question/context", async () => {
