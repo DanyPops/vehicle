@@ -42,6 +42,21 @@ export const DEFAULT_APPROVAL_EFFECTS: readonly VehicleEffect[] = ["destructive"
  */
 export const VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME = "vehicle.approval.resolve";
 
+/**
+ * The name VehicleRegistry.configureApprovals() registers its own read-only status-lookup
+ * operation under. Unlike vehicle.approval.resolve, this one is deliberately left projectable
+ * as an ordinary Pi/model-callable tool: reading a requestId's own already-made decision (who
+ * decided, when, and any comment) can never let a caller grant its own pending request -- it
+ * only ever surfaces a decision a human (or other authority) already recorded. Exists because a
+ * gated invoke()'s own local HITL prompt and the eventual human decision can genuinely happen on
+ * two different calls (a caller-side timeout, a UI presented asynchronously outside the
+ * originating call's own lifetime, a session restart in between) -- without this, a decision
+ * (and any comment explaining it) made after the originating call already gave up is
+ * unrecoverable, since vehicle.approval.resolve's own vehicleApprovalResolvedEvent is transient
+ * pub/sub with no replay for a caller that wasn't subscribed at that exact moment.
+ */
+export const VEHICLE_APPROVAL_STATUS_OPERATION_NAME = "vehicle.approval.status";
+
 /** How long a request stays resolvable before it lapses and must be re-requested. */
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
 

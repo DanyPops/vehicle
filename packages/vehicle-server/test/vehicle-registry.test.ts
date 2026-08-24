@@ -718,6 +718,47 @@ describe("VehicleRegistry approval gate", () => {
 		).rejects.toMatchObject({ code: "not-found" });
 	});
 
+	it("vehicle.approval.status reports pending while unresolved, then resolved with the decision and comment once answered -- even for a caller that never itself called resolve", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals();
+		const requestId = await requestApprovalGate(registry);
+
+		await expect(registry.invoke("vehicle.approval.status", 1, { requestId }, {})).resolves.toEqual({ requestId, status: "pending" });
+
+		await registry.invoke(
+			"vehicle.approval.resolve",
+			1,
+			{ requestId, decision: "denied", decidedBy: "alice", comment: "wrong environment" },
+			{ permissions: ["vehicle:approvals:resolve"] },
+		);
+
+		// A totally independent caller (no special permission, never itself invoked resolve) can
+		// still learn the outcome -- the whole point: the human's decision and comment must not be
+		// stranded on whichever specific call happened to trigger the original request.
+		await expect(registry.invoke("vehicle.approval.status", 1, { requestId }, {})).resolves.toEqual({
+			requestId,
+			status: "resolved",
+			outcome: expect.objectContaining({ requestId, decision: "denied", decidedBy: "alice", comment: "wrong environment" }),
+		});
+	});
+
+	it("vehicle.approval.status reports unknown for a requestId that never existed", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals();
+
+		await expect(registry.invoke("vehicle.approval.status", 1, { requestId: "never-issued" }, {})).resolves.toEqual({
+			requestId: "never-issued",
+			status: "unknown",
+		});
+	});
+
+	it("vehicle.approval.status is not projected as vehicle.approval.resolve is -- it stays in the manifest since observing an outcome can never let a caller grant its own request", () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals();
+
+		expect(registry.manifest().operations.map((op) => op.name)).toContain("vehicle.approval.status");
+	});
+
 	it("rejects an arbitrary non-empty string as a capability instead of rubber-stamping it", async () => {
 		const registry = destructiveEchoRegistry();
 		registry.configureApprovals();
@@ -840,7 +881,7 @@ describe("VehicleRegistry approval gate", () => {
 		expect(
 			registry
 				.manifest()
-				.operations.filter((op) => op.name !== "vehicle.approval.resolve")
+				.operations.filter((op) => op.name !== "vehicle.approval.resolve" && op.name !== "vehicle.approval.status")
 				.map((op) => [op.name, op.approvalRequired]),
 		).toEqual([
 			["test.echo", false],

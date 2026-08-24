@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import type {
 	VehicleApprovalAuthority,
+	VehicleApprovalOutcome,
 	VehicleApprovalRequest,
 	VehicleEffect,
 	VehicleEvent,
@@ -27,6 +28,7 @@ import {
 	defineVehicleOperation,
 	defineVehicleSchema,
 	VEHICLE_APPROVAL_RESOLVE_OPERATION_NAME,
+	VEHICLE_APPROVAL_STATUS_OPERATION_NAME,
 	VehicleError,
 	vehicleApprovalRequestedEvent,
 	vehicleApprovalResolvedEvent,
@@ -35,6 +37,11 @@ import { HmacApprovalAuthority, hashApprovalInput } from "../vehicle-approval-au
 
 /** Bounds how many gated invoke()s can be simultaneously awaiting a human/authority decision -- the same bounded-resource discipline as every other Vehicle capacity limit. */
 const MAX_PENDING_APPROVALS = 256;
+
+/** Bounds how many already-resolved outcomes vehicle.approval.status can still look up -- the
+ * oldest resolved entry is evicted to make room, the same bounded-history discipline as
+ * MAX_PENDING_APPROVALS itself, never an unbounded audit log. */
+const MAX_RESOLVED_APPROVAL_OUTCOMES = 256;
 
 interface ApprovalPolicy {
 	readonly requireApprovalForEffects: ReadonlySet<VehicleEffect>;
@@ -82,6 +89,21 @@ interface ApprovalResolveOutput {
 	readonly capability?: string;
 }
 
+interface ApprovalStatusInput {
+	readonly requestId: string;
+}
+
+/** "pending": still awaiting a decision. "resolved": a decision (in `outcome`) was already made,
+ * however long ago -- a caller whose own originating call already gave up can still learn what
+ * happened and why. "unknown": this requestId never existed, expired without ever being
+ * resolved, or its resolved outcome aged out of the bounded MAX_RESOLVED_APPROVAL_OUTCOMES
+ * history. */
+interface ApprovalStatusOutput {
+	readonly requestId: string;
+	readonly status: "pending" | "resolved" | "unknown";
+	readonly outcome?: VehicleApprovalOutcome;
+}
+
 /** The narrow slice of VehicleRegistry this workflow needs -- registering its own resolve
  * operation, and declaring/emitting its own two built-in approval events. */
 export interface ApprovalPolicyCollaborators {
@@ -93,6 +115,9 @@ export interface ApprovalPolicyCollaborators {
 export class VehicleApprovalPolicyManager {
 	private policy?: ApprovalPolicy;
 	private readonly pendingApprovals = new Map<string, VehicleApprovalRequest>();
+	/** Insertion-ordered (a `Map` preserves it) so the oldest entry is always whichever one a
+	 * capacity eviction removes first -- see MAX_RESOLVED_APPROVAL_OUTCOMES. */
+	private readonly resolvedOutcomes = new Map<string, VehicleApprovalOutcome>();
 
 	constructor(private readonly collaborators: ApprovalPolicyCollaborators) {}
 
@@ -215,6 +240,70 @@ export class VehicleApprovalPolicyManager {
 			"vehicle-registry",
 			bindVehicleOperation(ResolveOperation, () => async (context) => this.resolveApprovalRequest(context.input)),
 		);
+
+		const statusInputSchema = defineVehicleSchema<ApprovalStatusInput>({
+			jsonSchema: {
+				type: "object",
+				properties: { requestId: { type: "string" } },
+				required: ["requestId"],
+				additionalProperties: false,
+			},
+			safeParse(value) {
+				if (typeof value !== "object" || value === null) {
+					return { success: false, issues: [{ path: [], message: "input must be an object" }] };
+				}
+				const row = value as Record<string, unknown>;
+				if (typeof row.requestId !== "string" || !row.requestId.trim()) {
+					return { success: false, issues: [{ path: ["requestId"], message: "requestId must be a non-empty string" }] };
+				}
+				return { success: true, value: { requestId: row.requestId } };
+			},
+		});
+		const statusOutputSchema = defineVehicleSchema<ApprovalStatusOutput>({
+			jsonSchema: {
+				type: "object",
+				properties: {
+					requestId: { type: "string" },
+					status: { type: "string", enum: ["pending", "resolved", "unknown"] },
+					outcome: { type: "object" },
+				},
+				required: ["requestId", "status"],
+				additionalProperties: false,
+			},
+			safeParse(value) {
+				const row = value as { requestId?: unknown; status?: unknown; outcome?: unknown };
+				if (
+					typeof row?.requestId !== "string" ||
+					(row.status !== "pending" && row.status !== "resolved" && row.status !== "unknown")
+				) {
+					return { success: false, issues: [{ path: [], message: "invalid approval status output" }] };
+				}
+				return {
+					success: true,
+					value: {
+						requestId: row.requestId,
+						status: row.status,
+						...(row.outcome !== undefined ? { outcome: row.outcome as VehicleApprovalOutcome } : {}),
+					},
+				};
+			},
+		});
+		const StatusOperation = defineVehicleOperation({
+			name: VEHICLE_APPROVAL_STATUS_OPERATION_NAME,
+			version: 1,
+			description:
+				"Looks up a Vehicle approval request's status by id -- pending, resolved (with the decision, decidedBy, and any comment), or unknown (never existed, expired unresolved, or aged out of the bounded resolved-outcome history).",
+			input: statusInputSchema,
+			output: statusOutputSchema,
+			permissions: [],
+			effect: "read",
+			idempotency: { mode: "safe" },
+			limits: { defaultTimeoutMs: 5_000, maxTimeoutMs: 5_000, maxRequestBytes: 4_096, maxResponseBytes: 4_096 },
+		});
+		this.collaborators.register(
+			"vehicle-registry",
+			bindVehicleOperation(StatusOperation, () => async (context) => this.getApprovalStatus(context.input)),
+		);
 	}
 
 	private resolveApprovalRequest(input: ApprovalResolveInput): ApprovalResolveOutput {
@@ -226,14 +315,32 @@ export class VehicleApprovalPolicyManager {
 		this.pendingApprovals.delete(input.requestId);
 
 		const capability = input.decision === "granted" ? this.policy?.authority.mint(request) : undefined;
-		this.collaborators.emit(vehicleApprovalResolvedEvent.descriptor.name, vehicleApprovalResolvedEvent.descriptor.version, {
+		const outcome: VehicleApprovalOutcome = {
 			requestId: input.requestId,
 			decision: input.decision,
 			decidedAt: Date.now(),
 			...(input.decidedBy ? { decidedBy: input.decidedBy } : {}),
 			...(input.comment ? { comment: input.comment } : {}),
-		});
+		};
+		this.recordResolvedOutcome(outcome);
+		this.collaborators.emit(vehicleApprovalResolvedEvent.descriptor.name, vehicleApprovalResolvedEvent.descriptor.version, outcome);
 		return { requestId: input.requestId, decision: input.decision, ...(capability ? { capability } : {}) };
+	}
+
+	private recordResolvedOutcome(outcome: VehicleApprovalOutcome): void {
+		if (this.resolvedOutcomes.size >= MAX_RESOLVED_APPROVAL_OUTCOMES) {
+			const oldestId = this.resolvedOutcomes.keys().next().value as string | undefined;
+			if (oldestId !== undefined) this.resolvedOutcomes.delete(oldestId);
+		}
+		this.resolvedOutcomes.set(outcome.requestId, outcome);
+	}
+
+	private getApprovalStatus(input: ApprovalStatusInput): ApprovalStatusOutput {
+		this.prunePendingApprovals();
+		if (this.pendingApprovals.has(input.requestId)) return { requestId: input.requestId, status: "pending" };
+		const outcome = this.resolvedOutcomes.get(input.requestId);
+		if (outcome) return { requestId: input.requestId, status: "resolved", outcome };
+		return { requestId: input.requestId, status: "unknown" };
 	}
 
 	private prunePendingApprovals(): void {
