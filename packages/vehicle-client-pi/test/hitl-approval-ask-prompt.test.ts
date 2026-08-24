@@ -8,6 +8,7 @@ function params(overrides: Partial<LocalApprovalRequestParams> = {}): LocalAppro
 		descriptor: { name: "issue.create", version: 1, effect: "external-write" } as LocalApprovalRequestParams["descriptor"],
 		input: { backend: "github" },
 		prompt: { title: "Approve Issue Create?", message: "issue.create@1 (external-write effect) requests approval." },
+		timeoutMs: 2 * 60_000,
 		...overrides,
 	};
 }
@@ -113,5 +114,41 @@ describe("requestPiApprovalViaAskPrompt", () => {
 	it("denies (returns null) when there is no interactive UI at all", async () => {
 		const ctx = { hasUI: false, ui: {} } as unknown as ExtensionContext;
 		expect(await requestPiApprovalViaAskPrompt(ctx, params())).toBeNull();
+	});
+
+	it("passes params.timeoutMs straight through to the dialog fallback's own timeout option, never a hardcoded value of its own", async () => {
+		const dialogOpts: unknown[] = [];
+		const ctx = {
+			hasUI: true,
+			ui: {
+				select: async (_title: string, _options: string[], opts: unknown) => {
+					dialogOpts.push(opts);
+					return "Approve";
+				},
+				input: async () => undefined,
+				notify: () => {},
+			},
+		} as unknown as ExtensionContext;
+
+		await requestPiApprovalViaAskPrompt(ctx, params({ timeoutMs: 45_000 }));
+		expect(dialogOpts).toEqual([{ timeout: 45_000 }]);
+	});
+
+	it("a timeoutMs of 0 (block indefinitely) reaches the dialog fallback as no timeout option at all, matching hostDualPresentationComponent's own contract", async () => {
+		const dialogOpts: unknown[] = [];
+		const ctx = {
+			hasUI: true,
+			ui: {
+				select: async (_title: string, _options: string[], opts: unknown) => {
+					dialogOpts.push(opts);
+					return "Approve";
+				},
+				input: async () => undefined,
+				notify: () => {},
+			},
+		} as unknown as ExtensionContext;
+
+		await requestPiApprovalViaAskPrompt(ctx, params({ timeoutMs: 0 }));
+		expect(dialogOpts).toEqual([undefined]);
 	});
 });

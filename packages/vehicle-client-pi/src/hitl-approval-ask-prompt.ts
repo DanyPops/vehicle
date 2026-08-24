@@ -20,15 +20,6 @@ const APPROVE_OPTION_TITLE = "Approve";
 const DENY_OPTION_TITLE = "Deny";
 
 /**
- * Mirrors vehicle-pi.ts's own (unexported) LOCAL_APPROVAL_PROMPT_TIMEOUT_MS -- deliberately
- * shorter than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses
- * server-side while still mid-prompt locally. Kept as a separate constant here rather than
- * importing the private one: this file's timeout is its own implementation detail of the
- * requestPiAskPrompt-based prompt, not a shared value the two need to stay byte-identical on.
- */
-const ASK_PROMPT_APPROVAL_TIMEOUT_MS = 2 * 60_000;
-
-/**
  * requestPiAskPrompt's own toAskAnswer (hitl-ask-prompt.ts) folds an optional comment into
  * `content` as ``${selections.join(", ")} — ${comment}`` -- PiAskPromptAnswer carries no separate
  * field to read it back from. Recovers it from that exact, known format; returns undefined when
@@ -50,7 +41,12 @@ export const requestPiApprovalViaAskPrompt: LocalApprovalRequester = async (cont
 		allowComment: true,
 		presentation: params.presentation,
 		signal: params.signal,
-		timeout: ASK_PROMPT_APPROVAL_TIMEOUT_MS,
+		// params.timeoutMs is always already resolved by requestLocalApproval (the configured
+		// RegisterVehicleToolsOptions.approvalPromptTimeoutMs, or its own built-in default) -- never
+		// this file's own hardcoded value, so a consumer's timeout choice applies uniformly regardless
+		// of which LocalApprovalRequester it wires in. 0/negative means "block indefinitely", passed
+		// straight through to requestPiAskPrompt's own hostDualPresentationComponent timer.
+		timeout: params.timeoutMs,
 	});
 	// Cancel, timeout, no UI, or (defensively, since allowFreeform is false) a freeform response
 	// with no selection all mean "no decision was made" -- deny, never approve, matching

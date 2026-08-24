@@ -12,7 +12,12 @@ import { displayLabel, formatJson, operationKey } from "./vehicle-pi-primitives.
  * grant.
  */
 
-/** How long a local HITL prompt stays open before auto-denying -- deliberately shorter than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses server-side while still mid-prompt locally. */
+/** Default: how long a local HITL prompt stays open before auto-denying -- deliberately shorter
+ * than the registry's own DEFAULT_APPROVAL_TIMEOUT_MS so a request never lapses server-side
+ * while still mid-prompt locally. Overridable per registerVehicleTools() call via
+ * RegisterVehicleToolsOptions.approvalPromptTimeoutMs -- see its own doc comment for why a
+ * consumer whose real users are commonly away from the keyboard longer than this needs to raise
+ * or disable it, not just live with an auto-deny they never actually made. */
 const LOCAL_APPROVAL_PROMPT_TIMEOUT_MS = 2 * 60_000;
 
 /**
@@ -32,6 +37,15 @@ export interface LocalApprovalRequestParams {
 	readonly signal?: AbortSignal;
 	readonly presentation?: PiHitlPresentation;
 	readonly prompt: LocalApprovalPrompt;
+	/**
+	 * Fully resolved by the time a LocalApprovalRequester sees it (RegisterVehicleToolsOptions.
+	 * approvalPromptTimeoutMs's own configured value, or the built-in default) -- 0 or a negative
+	 * number means "block indefinitely", matching hostDualPresentationComponent's own
+	 * `if (timeout && timeout > 0)` contract; a custom requester (e.g. requestPiApprovalViaAskPrompt)
+	 * should pass this straight through to whatever timeout option its own underlying prompt takes,
+	 * never substitute its own hardcoded value.
+	 */
+	readonly timeoutMs: number;
 }
 
 /**
@@ -79,6 +93,19 @@ export interface RegisterVehicleToolsApprovalOptions {
 	 * LocalApprovalRequester's own doc comment.
 	 */
 	readonly requestApproval?: LocalApprovalRequester;
+	/**
+	 * How long the local approval prompt (whichever mechanism -- the default requestPiApproval, or
+	 * a custom requestApproval) waits for a human before giving up. On timeout, per
+	 * LocalApprovalRequester's own contract, the request is treated exactly like an explicit denial
+	 * and resolved as "denied" server-side -- fail-closed by design, but that means a human who
+	 * answers even a few seconds late finds the request already consumed, their real click landing
+	 * on nothing. Defaults to LOCAL_APPROVAL_PROMPT_TIMEOUT_MS (2 minutes), tuned for someone
+	 * actively watching the prompt appear. Pass 0 (or a negative number) to block indefinitely
+	 * instead -- appropriate for a consumer whose real users are commonly away from the keyboard
+	 * longer than that between actions; an explicit deny/cancel/abort still fails closed exactly as
+	 * before, only the elapsed-time-based auto-deny is disabled.
+	 */
+	readonly approvalPromptTimeoutMs?: number;
 }
 
 /**
@@ -96,11 +123,16 @@ export async function requestLocalApproval(
 	presentation: PiHitlPresentation | undefined,
 	promptOverride: { title: string; message: string } | undefined,
 	requester: LocalApprovalRequester | undefined,
+	/** RegisterVehicleToolsOptions.approvalPromptTimeoutMs's own resolved value -- undefined means
+	 * "caller didn't configure one, use the built-in default" (LOCAL_APPROVAL_PROMPT_TIMEOUT_MS);
+	 * 0/negative means "block indefinitely", passed straight through. */
+	timeoutMs: number | undefined,
 ): Promise<PiApprovalAnswer | null> {
+	const resolvedTimeoutMs = timeoutMs ?? LOCAL_APPROVAL_PROMPT_TIMEOUT_MS;
 	const { title, message } = promptOverride ?? {
 		title: `Approve ${displayLabel(descriptor)}?`,
 		message: `${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
 	};
-	if (requester) return requester(context, { descriptor, input, signal, presentation, prompt: { title, message } });
-	return requestPiApproval(context, { title, message, presentation, signal, timeout: LOCAL_APPROVAL_PROMPT_TIMEOUT_MS });
+	if (requester) return requester(context, { descriptor, input, signal, presentation, prompt: { title, message }, timeoutMs: resolvedTimeoutMs });
+	return requestPiApproval(context, { title, message, presentation, signal, timeout: resolvedTimeoutMs });
 }

@@ -573,6 +573,7 @@ export async function applyLocalSafetyGate(ctx: InvocationContext): Promise<void
 		options.approvalPresentation,
 		options.approvalPrompt?.(descriptor, input),
 		options.requestApproval,
+		options.approval?.approvalPromptTimeoutMs,
 	);
 	if (answer?.approved) return;
 	const failure: VehicleFailure = {
@@ -627,6 +628,7 @@ export async function invokeWithApprovalRetry(ctx: InvocationContext): Promise<u
 			options.approvalPresentation,
 			options.approvalPrompt?.(descriptor, input),
 			options.requestApproval,
+			options.approval?.approvalPromptTimeoutMs,
 		);
 		const approved = answer?.approved === true;
 		const decision = approved ? "granted" : "denied";

@@ -783,6 +783,57 @@ describe("registerVehicleTools", () => {
 		expect(result.content).toBeTruthy();
 	});
 
+	it("requestApproval's params.timeoutMs defaults to the built-in 2-minute value when options.approval.approvalPromptTimeoutMs is never configured", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		const requestApprovalCalls: Array<{ timeoutMs: number }> = [];
+		await registerVehicleTools(pi, client, {
+			requestApproval: async (_context, requestParams) => {
+				requestApprovalCalls.push(requestParams);
+				return { approved: true };
+			},
+		});
+
+		await execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: {} });
+		expect(requestApprovalCalls).toEqual([expect.objectContaining({ timeoutMs: 2 * 60_000 })]);
+	});
+
+	it("options.approval.approvalPromptTimeoutMs overrides the default, reaching a custom requestApproval as params.timeoutMs verbatim", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		const requestApprovalCalls: Array<{ timeoutMs: number }> = [];
+		await registerVehicleTools(pi, client, {
+			approval: {
+				approvalPromptTimeoutMs: 45_000,
+				requestApproval: async (_context, requestParams) => {
+					requestApprovalCalls.push(requestParams);
+					return { approved: true };
+				},
+			},
+		});
+
+		await execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: {} });
+		expect(requestApprovalCalls).toEqual([expect.objectContaining({ timeoutMs: 45_000 })]);
+	});
+
+	it("approvalPromptTimeoutMs: 0 (block indefinitely, no elapsed-time auto-deny) reaches a custom requestApproval verbatim as well", async () => {
+		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
+		const { pi, tools } = fakePi();
+		const requestApprovalCalls: Array<{ timeoutMs: number }> = [];
+		await registerVehicleTools(pi, client, {
+			approval: {
+				approvalPromptTimeoutMs: 0,
+				requestApproval: async (_context, requestParams) => {
+					requestApprovalCalls.push(requestParams);
+					return { approved: true };
+				},
+			},
+		});
+
+		await execute(tools[0]!, { value: "go" }, undefined, undefined, { hasUI: true, ui: {} });
+		expect(requestApprovalCalls).toEqual([expect.objectContaining({ timeoutMs: 0 })]);
+	});
+
 	it("options.requestApproval denying means never retrying invoke(), same as the default prompt, and still surfaces a distinct approval-denied failure", async () => {
 		const client = new ApprovalFlowClient(manifest([operation("risk.destructive", 1, { effect: "destructive" })]));
 		const { pi, tools } = fakePi();
