@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,18 @@ import {
 	windowsTaskSchedulerStrategy,
 } from "../src/index.js";
 import { vehicle } from "./fixtures.js";
+
+// Every mkdtemp'd directory this suite creates, removed after each test regardless of pass/fail
+// -- otherwise every run leaks its own tmpdir permanently.
+const createdDirs: string[] = [];
+afterEach(async () => {
+	await Promise.all(createdDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+async function tempDir(prefix: string): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), prefix));
+	createdDirs.push(dir);
+	return dir;
+}
 
 function runner(outputs: CommandOutcome[] = []) {
 	const calls: string[][] = [];
@@ -25,7 +37,7 @@ function runner(outputs: CommandOutcome[] = []) {
 
 describe("native controller", () => {
 	it("writes, reloads, starts, stops, and inspects systemd user units", async () => {
-		const root = await mkdtemp(join(tmpdir(), "armada-systemd-"));
+		const root = await tempDir("armada-systemd-");
 		const empty = { ok: true as const, stdout: "", stderr: "" };
 		const fake = runner([
 			empty,
@@ -66,7 +78,7 @@ describe("native controller", () => {
 	});
 
 	it("maps launchd and Task Scheduler lifecycle commands without a resident supervisor", async () => {
-		const root = await mkdtemp(join(tmpdir(), "armada-native-"));
+		const root = await tempDir("armada-native-");
 		const launch = runner();
 		const launchController = createNativeController({
 			kind: "launchd",

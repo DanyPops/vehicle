@@ -1,13 +1,22 @@
-import { describe, expect, it } from "bun:test";
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHandleReadinessProbe, replaceFileAtomically } from "../src/index.js";
 import { vehicle } from "./fixtures.js";
 
+// Removed after each test regardless of pass/fail -- otherwise every run leaks its own tmpdir permanently.
+let createdDir: string | undefined;
+afterEach(async () => {
+	if (createdDir === undefined) return;
+	await rm(createdDir, { recursive: true, force: true });
+	createdDir = undefined;
+});
+
 describe("native runtime primitives", () => {
 	it("replaces descriptor files atomically without leaving temporary files", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "armada-descriptor-"));
+		createdDir = directory;
 		const path = join(directory, "armada-papyrus.service");
 		expect((await replaceFileAtomically(path, "first\n")).ok).toBe(true);
 		expect((await replaceFileAtomically(path, "second\n")).ok).toBe(true);

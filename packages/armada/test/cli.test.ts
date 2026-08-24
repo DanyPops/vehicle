@@ -1,10 +1,23 @@
-import { describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CliIo, isCliEntrypoint, runCli } from "../src/cli.js";
 import { type NativeServiceController, type NativeServiceManager, systemdStrategy } from "../src/index.js";
 import { manifestJson } from "./fixtures.js";
+
+// Every mkdtemp'd directory this suite creates, removed after each test regardless of pass/fail
+// -- otherwise every run leaks its own tmpdirs permanently (confirmed live: 4374 leftover
+// /tmp/armada-* directories on one host from repeated test runs with no cleanup).
+const createdDirs: string[] = [];
+afterEach(async () => {
+	await Promise.all(createdDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+async function tempDir(prefix: string): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), prefix));
+	createdDirs.push(dir);
+	return dir;
+}
 
 function output(): { io: CliIo; stdout: string[]; stderr: string[] } {
 	const stdout: string[] = [];
@@ -31,7 +44,7 @@ const manager: NativeServiceManager = {
 
 describe("armada CLI entrypoint", () => {
 	it("recognizes an installed bin symlink", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-entrypoint-"));
+		const directory = await tempDir("armada-cli-entrypoint-");
 		const modulePath = join(directory, "dist", "cli.js");
 		const binPath = join(directory, "bin", "armada");
 		await mkdir(join(directory, "dist"));
@@ -44,7 +57,7 @@ describe("armada CLI entrypoint", () => {
 
 describe("armada plan", () => {
 	it("runs manifest to plan through the injected native strategy", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const path = join(directory, "armada.json");
 		await writeFile(path, manifestJson());
 		const captured = output();
@@ -59,7 +72,7 @@ describe("armada plan", () => {
 	});
 
 	it("reconciles through the injected native controller", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const path = join(directory, "armada.json");
 		await writeFile(path, manifestJson());
 		const events: string[] = [];
@@ -90,7 +103,7 @@ describe("armada plan", () => {
 	});
 
 	it("reports status and doctor diagnostics as bounded JSON", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const path = join(directory, "armada.json");
 		await writeFile(path, manifestJson());
 		const captured = output();
@@ -109,7 +122,7 @@ describe("armada plan", () => {
 	});
 
 	it("plans duplicate cleanup without signaling before explicit approval", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const path = join(directory, "armada.json");
 		await writeFile(path, manifestJson());
 		const captured = output();
@@ -131,7 +144,7 @@ describe("armada plan", () => {
 	});
 
 	it("restarts one named Vehicle unconditionally, even with zero declared drift", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const path = join(directory, "armada.json");
 		await writeFile(path, manifestJson());
 		const events: string[] = [];
@@ -165,7 +178,7 @@ describe("armada plan", () => {
 	});
 
 	it("upserts integration Vehicle files into the authoritative manifest", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const manifestPath = join(directory, "armada.json");
 		const vehiclePath = join(directory, "vehicle.json");
 		await writeFile(vehiclePath, JSON.stringify(JSON.parse(manifestJson()).vehicles[0]));
@@ -180,7 +193,7 @@ describe("armada plan", () => {
 	});
 
 	it("upserts a Vehicle declaration from bounded stdin", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const manifestPath = join(directory, "armada.json");
 		const captured = output();
 		const vehicleJson = JSON.stringify(JSON.parse(manifestJson()).vehicles[0]);
@@ -194,7 +207,7 @@ describe("armada plan", () => {
 	});
 
 	it("returns stable machine-readable diagnostics for invalid input", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "armada-cli-"));
+		const directory = await tempDir("armada-cli-");
 		const path = join(directory, "armada.json");
 		await writeFile(path, "{");
 		const captured = output();
@@ -327,7 +340,7 @@ describe("armada metrics", () => {
 		const { resolveVehicleMetricsPath } = await import("../src/fleet/metrics.js");
 		const { mkdir: mkdirNode } = await import("node:fs/promises");
 		const { dirname } = await import("node:path");
-		const home = await mkdtemp(join(tmpdir(), "armada-metrics-e2e-"));
+		const home = await tempDir("armada-metrics-e2e-");
 		const env = {};
 		const dbPath = resolveVehicleMetricsPath("acme-vehicle", process.platform, env, home);
 		await mkdirNode(dirname(dbPath), { recursive: true });

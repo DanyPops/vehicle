@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,19 @@ import {
 
 function success(): NativeOperationOutcome {
 	return { ok: true, diagnostics: [] };
+}
+
+// Every mkdtemp'd directory this suite creates, removed after each test regardless of pass/fail
+// -- otherwise every run leaks its own tmpdir permanently.
+const createdDirs: string[] = [];
+afterEach(() => {
+	for (const dir of createdDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function tempManifestPath(): string {
+	const dir = mkdtempSync(join(tmpdir(), "armada-isregistered-"));
+	createdDirs.push(dir);
+	return join(dir, "armada.json");
 }
 
 function harness() {
@@ -30,7 +43,7 @@ function harness() {
 
 describe("createVehicleRegistrar().isRegistered", () => {
 	it("is false before register() and before the manifest file exists at all", async () => {
-		const manifestPath = join(mkdtempSync(join(tmpdir(), "armada-isregistered-")), "armada.json");
+		const manifestPath = tempManifestPath();
 		const { controller, readiness } = harness();
 		const registrar = createVehicleRegistrar({ manifestPath, controller, readiness });
 
@@ -38,7 +51,7 @@ describe("createVehicleRegistrar().isRegistered", () => {
 	});
 
 	it("is true once registered, and false again after unregister()", async () => {
-		const manifestPath = join(mkdtempSync(join(tmpdir(), "armada-isregistered-")), "armada.json");
+		const manifestPath = tempManifestPath();
 		const { controller, readiness } = harness();
 		const registrar = createVehicleRegistrar({ manifestPath, controller, readiness });
 		await registrar.register({
