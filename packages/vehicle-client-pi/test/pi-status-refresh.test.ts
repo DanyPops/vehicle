@@ -3,7 +3,9 @@ import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import { registerVehicleStatusRefresh } from "../src/pi-status-refresh.ts";
 
 function harnessFor(options: Parameters<typeof registerVehicleStatusRefresh>[1]) {
-	return createExtensionHarness((pi) => registerVehicleStatusRefresh(pi, options));
+	return createExtensionHarness((pi) => {
+		registerVehicleStatusRefresh(pi, options);
+	});
 }
 
 describe("registerVehicleStatusRefresh", () => {
@@ -53,5 +55,46 @@ describe("registerVehicleStatusRefresh", () => {
 			},
 		});
 		await expect(h.emit("session_start")).resolves.toBeUndefined();
+	});
+
+	it("does not block session_start on a passive async refresh and exposes an explicit wait boundary", async () => {
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let handle!: ReturnType<typeof registerVehicleStatusRefresh>;
+		const h = createExtensionHarness((pi) => {
+			handle = registerVehicleStatusRefresh(pi, { ownToolPrefixes: ["foo_"], refresh: () => blocked });
+		});
+
+		await expect(h.emit("session_start")).resolves.toBeUndefined();
+		let settled = false;
+		void handle.waitForRefresh().then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		release();
+		await handle.waitForRefresh();
+		expect(settled).toBe(true);
+	});
+
+	it("skips a detached startup refresh invalidated by session shutdown", async () => {
+		let calls = 0;
+		let handle!: ReturnType<typeof registerVehicleStatusRefresh>;
+		const h = createExtensionHarness((pi) => {
+			handle = registerVehicleStatusRefresh(pi, {
+				ownToolPrefixes: ["foo_"],
+				refresh: () => void calls++,
+			});
+		});
+
+		const startup = h.emit("session_start");
+		const shutdown = h.emit("session_shutdown");
+		await Promise.all([startup, shutdown]);
+		await handle.waitForRefresh();
+
+		expect(calls).toBe(0);
 	});
 });

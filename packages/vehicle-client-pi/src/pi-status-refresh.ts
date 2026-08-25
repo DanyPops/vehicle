@@ -22,22 +22,43 @@ export interface VehicleStatusRefreshOptions {
 	readonly refresh: (ctx: ExtensionContext) => Promise<void> | void;
 }
 
-export function registerVehicleStatusRefresh(pi: ExtensionAPI, options: VehicleStatusRefreshOptions): void {
-	async function safeRefresh(ctx: ExtensionContext): Promise<void> {
-		try {
-			await options.refresh(ctx);
-		} catch {
-			// Daemon down/unreachable, or the refresh itself failed -- leave
-			// whatever status was last shown rather than surfacing this.
-		}
+export interface VehicleStatusRefreshHandle {
+	/** Waits for the most recently scheduled refresh, including the detached startup repaint. */
+	waitForRefresh(): Promise<void>;
+}
+
+export function registerVehicleStatusRefresh(pi: ExtensionAPI, options: VehicleStatusRefreshOptions): VehicleStatusRefreshHandle {
+	let latestRefresh = Promise.resolve();
+	let sessionGeneration = 0;
+
+	function scheduleRefresh(ctx: ExtensionContext, generation = sessionGeneration): Promise<void> {
+		latestRefresh = Promise.resolve()
+			.then(() => {
+				if (generation !== sessionGeneration) return;
+				return options.refresh(ctx);
+			})
+			.catch(() => {
+				// Daemon down/unreachable, or the refresh itself failed -- leave
+				// whatever status was last shown rather than surfacing this.
+			});
+		return latestRefresh;
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		await safeRefresh(ctx);
+	pi.on("session_start", (_event, ctx) => {
+		const generation = ++sessionGeneration;
+		// Passive status/widget I/O must not delay Pi's first paint. Consumers that
+		// need a test or shutdown boundary can await the returned handle explicitly.
+		void scheduleRefresh(ctx, generation);
+	});
+
+	pi.on("session_shutdown", () => {
+		sessionGeneration++;
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (!options.ownToolPrefixes.some((prefix) => event.toolName.startsWith(prefix))) return;
-		await safeRefresh(ctx);
+		await scheduleRefresh(ctx);
 	});
+
+	return { waitForRefresh: () => latestRefresh };
 }

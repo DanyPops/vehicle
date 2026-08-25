@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { createExtensionHarness } from "@danypops/pi-extension-harness";
 import type { VehicleClient, VehicleInvocationOptions, VehicleManifest, VehicleManifestOperation } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { registerVehicleToolsWhenReady, type VehicleReadyEvent } from "../src/vehicle-pi.ts";
+import { registerVehicleToolsWhenReady, type VehicleReadyEvent, type VehicleReadyTimingEvent } from "../src/vehicle-pi.ts";
 
 const limits = { defaultTimeoutMs: 1_000, maxTimeoutMs: 5_000, maxRequestBytes: 1_024, maxResponseBytes: 1_024 };
 
@@ -149,6 +149,48 @@ describe("registerVehicleToolsWhenReady", () => {
 
 		expect(events.filter((e) => e.kind === "client-unavailable")).toHaveLength(3);
 		expect(events.filter((e) => e.kind === "exhausted")).toHaveLength(1);
+	});
+
+	it("reports monotonic resolution, retry, registration, and total phase durations", async () => {
+		const { pi, emit } = fakePi();
+		const client = new FakeClient(manifest([operation("issues.search")]));
+		const timings: VehicleReadyTimingEvent[] = [];
+		let attempts = 0;
+		const ready = registerVehicleToolsWhenReady(
+			pi,
+			() => Promise.resolve(++attempts === 1 ? undefined : client),
+			{
+				retry: { attempts: 2, initialDelayMs: 1, maxDelayMs: 1 },
+				onTiming: (event) => timings.push(event),
+			},
+		);
+
+		await emit("session_start");
+		await ready;
+
+		expect(timings.map(({ phase, outcome }) => `${phase}:${outcome}`)).toEqual([
+			"client-resolution:unavailable",
+			"retry-delay:slept",
+			"client-resolution:available",
+			"registration:registered",
+			"total:registered",
+		]);
+		expect(timings.every(({ durationMs }) => Number.isFinite(durationMs) && durationMs >= 0)).toBe(true);
+		expect(timings.every(({ attempts: totalAttempts, ctx }) => totalAttempts === 2 && ctx !== undefined)).toBe(true);
+	});
+
+	it("isolates a throwing timing observer from registration", async () => {
+		const { pi, emit } = fakePi();
+		const client = new FakeClient(manifest([operation("issues.search")]));
+		const ready = registerVehicleToolsWhenReady(pi, () => Promise.resolve(client), {
+			retry: { attempts: 1 },
+			onTiming: () => {
+				throw new Error("observer failed");
+			},
+		});
+
+		await emit("session_start");
+		await expect(ready).resolves.toBeDefined();
 	});
 
 	it("passes RegisterVehicleToolsOptions through unchanged, including shell", async () => {

@@ -81,6 +81,7 @@ export type {
 	RegisterVehicleToolsWhenReadyOptions,
 	VehicleReadyEvent,
 	VehicleReadyRetryOptions,
+	VehicleReadyTimingEvent,
 } from "./vehicle-pi/ready-retry.js";
 export {
 	boundVehicleModelContent,

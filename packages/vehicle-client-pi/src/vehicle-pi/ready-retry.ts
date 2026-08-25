@@ -5,6 +5,7 @@
  * vehicle-pi.ts's own bundled concerns (Vehicle Pass 1 SRP audit finding #5).
  */
 
+import { performance } from "node:perf_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RegisteredPiVehicle, RegisterVehicleToolsOptions, registerVehicleTools } from "../vehicle-pi.js";
 import { sleep } from "../vehicle-pi-primitives.js";
@@ -48,9 +49,20 @@ export interface VehicleReadyRetryOptions {
 	readonly growFactor?: number;
 }
 
+export interface VehicleReadyTimingEvent {
+	readonly phase: "client-resolution" | "registration" | "retry-delay" | "total";
+	readonly outcome: "available" | "unavailable" | "failed" | "registered" | "slept" | "exhausted";
+	readonly attempt?: number;
+	readonly attempts: number;
+	readonly durationMs: number;
+	readonly ctx: ExtensionContext;
+}
+
 export interface RegisterVehicleToolsWhenReadyOptions extends RegisterVehicleToolsOptions {
 	/** Every resolution/registration outcome, success or failure -- see VehicleReadyEvent. Omitting this restores today's silent behavior; a caller wanting the fix should always supply one (e.g. ctx.ui.notify or a structured logger). */
 	readonly log?: (event: VehicleReadyEvent) => void;
+	/** Monotonic phase durations for startup profiling. Callback failures are isolated exactly like log failures. */
+	readonly onTiming?: (event: VehicleReadyTimingEvent) => void;
 	readonly retry?: VehicleReadyRetryOptions;
 }
 
@@ -126,23 +138,73 @@ export function registerVehicleToolsWhenReady(
 		}
 	}
 
-	async function attempt(attemptNumber: number, ctx: ExtensionContext): Promise<void> {
+	function safeTiming(event: VehicleReadyTimingEvent): void {
+		try {
+			options.onTiming?.(event);
+		} catch (error) {
+			console.error(`registerVehicleToolsWhenReady: timing callback threw for a "${event.phase}" event -- ${error}`);
+		}
+	}
+
+	async function attempt(attemptNumber: number, ctx: ExtensionContext, totalStartedAt: number): Promise<void> {
 		let client: Parameters<typeof deps.registerVehicleTools>[1] | undefined;
 		let resolutionFailed = false;
+		const resolutionStartedAt = performance.now();
 		try {
 			client = await resolveClient();
+			safeTiming({
+				phase: "client-resolution",
+				outcome: client ? "available" : "unavailable",
+				attempt: attemptNumber,
+				attempts,
+				durationMs: Math.max(0, performance.now() - resolutionStartedAt),
+				ctx,
+			});
 		} catch (error) {
+			safeTiming({
+				phase: "client-resolution",
+				outcome: "failed",
+				attempt: attemptNumber,
+				attempts,
+				durationMs: Math.max(0, performance.now() - resolutionStartedAt),
+				ctx,
+			});
 			safeLog({ kind: "client-resolution-failed", attempt: attemptNumber, attempts, error, ctx });
 			resolutionFailed = true;
 		}
 
 		if (client) {
+			const registrationStartedAt = performance.now();
 			try {
 				const registered = await deps.registerVehicleTools(pi, client, options);
+				safeTiming({
+					phase: "registration",
+					outcome: "registered",
+					attempt: attemptNumber,
+					attempts,
+					durationMs: Math.max(0, performance.now() - registrationStartedAt),
+					ctx,
+				});
+				safeTiming({
+					phase: "total",
+					outcome: "registered",
+					attempt: attemptNumber,
+					attempts,
+					durationMs: Math.max(0, performance.now() - totalStartedAt),
+					ctx,
+				});
 				safeLog({ kind: "registered", attempt: attemptNumber, ctx });
 				settle(registered);
 				return;
 			} catch (error) {
+				safeTiming({
+					phase: "registration",
+					outcome: "failed",
+					attempt: attemptNumber,
+					attempts,
+					durationMs: Math.max(0, performance.now() - registrationStartedAt),
+					ctx,
+				});
 				safeLog({ kind: "registration-failed", attempt: attemptNumber, attempts, error, ctx });
 			}
 		} else if (!resolutionFailed) {
@@ -150,16 +212,33 @@ export function registerVehicleToolsWhenReady(
 		}
 
 		if (attemptNumber >= attempts) {
+			safeTiming({
+				phase: "total",
+				outcome: "exhausted",
+				attempt: attemptNumber,
+				attempts,
+				durationMs: Math.max(0, performance.now() - totalStartedAt),
+				ctx,
+			});
 			safeLog({ kind: "exhausted", attempts, ctx });
 			settle(undefined);
 			return;
 		}
+		const delayStartedAt = performance.now();
 		await sleep(readyRetryDelayMs(attemptNumber, options.retry));
-		await attempt(attemptNumber + 1, ctx);
+		safeTiming({
+			phase: "retry-delay",
+			outcome: "slept",
+			attempt: attemptNumber,
+			attempts,
+			durationMs: Math.max(0, performance.now() - delayStartedAt),
+			ctx,
+		});
+		await attempt(attemptNumber + 1, ctx, totalStartedAt);
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		void attempt(1, ctx);
+		void attempt(1, ctx, performance.now());
 	});
 
 	return done;
