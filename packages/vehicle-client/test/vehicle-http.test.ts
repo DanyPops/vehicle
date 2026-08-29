@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { bindVehicleOperation, defineVehicleOperation, defineVehicleSchema, type JsonValue, VehicleError } from "@danypops/vehicle-core";
+import {
+	bindVehicleOperation,
+	defineVehicleOperation,
+	defineVehicleSchema,
+	type JsonValue,
+	MAX_VEHICLE_PROTOCOL_OFFER_BYTES,
+	VehicleError,
+} from "@danypops/vehicle-core";
 import { VehicleRegistry } from "@danypops/vehicle-server";
-import { createVehicleHttpApp } from "@danypops/vehicle-server/http";
+import { createVehicleHttpApp, type VehicleHttpProviderOptions } from "@danypops/vehicle-server/http";
 import type { Logger } from "@danypops/vehicle-server/logging";
 import { createReconnectingVehicleClient, daemonInstanceIdentity } from "../src/daemon-client.ts";
 import { RemoteVehicleClient } from "../src/vehicle-http-client.ts";
@@ -142,7 +149,7 @@ function countingFetch(pathSubstring: string): { fetchImpl: typeof globalThis.fe
 	return { fetchImpl, count: () => count };
 }
 
-function startTestServer(options: { logger?: Logger } = {}): { baseUrl: string; token: string; registry: VehicleRegistry } {
+function startTestServer(options: { logger?: Logger; invocationAuthority?: VehicleHttpProviderOptions["invocationAuthority"] } = {}): { baseUrl: string; token: string; registry: VehicleRegistry } {
 	const token = "test-token";
 	const registry = new VehicleRegistry({ name: "test-vehicle", version: "1.0.0", description: "Test Vehicle" });
 	registry.register(
@@ -183,7 +190,7 @@ function startTestServer(options: { logger?: Logger } = {}): { baseUrl: string; 
 			callerProjectRoot: context.callerProjectRoot ?? null,
 		})),
 	);
-	const app = createVehicleHttpApp({ registry, token, logger: options.logger });
+	const app = createVehicleHttpApp({ registry, token, logger: options.logger, invocationAuthority: options.invocationAuthority });
 	server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: app.fetch });
 	return { baseUrl: `http://127.0.0.1:${server.port}`, token, registry };
 }
@@ -196,10 +203,32 @@ describe("Vehicle HTTP provider + RemoteVehicleClient: local/HTTP parity", () =>
 		expect(manifest).toEqual(registry.manifest());
 	});
 
+	it("negotiate() round-trips a compatible agreement and typed incompatibility", async () => {
+		const { baseUrl, token } = startTestServer();
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		await expect(
+			client.negotiate({ minimumVersion: 1, maximumVersion: 2, requiredCapabilities: [], optionalCapabilities: ["future"] }),
+		).resolves.toEqual({ version: 1, capabilities: [] });
+		await expect(
+			client.negotiate({ minimumVersion: 2, maximumVersion: 3, requiredCapabilities: [], optionalCapabilities: [] }),
+		).rejects.toMatchObject({ code: "protocol-version-incompatible", category: "conflict" });
+	});
+
+	it("bounds protocol offers before negotiation", async () => {
+		const { baseUrl, token } = startTestServer();
+		const response = await fetch(`${baseUrl}/vehicle/negotiate`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+			body: JSON.stringify({ padding: "x".repeat(MAX_VEHICLE_PROTOCOL_OFFER_BYTES) }),
+		});
+		expect(response.status).toBe(413);
+	});
+
 	it("manifest()/invoke() reject without the correct Bearer token", async () => {
 		const { baseUrl } = startTestServer();
 		const client = new RemoteVehicleClient({ baseUrl, token: "wrong-token" });
 		await expect(client.manifest()).rejects.toThrow();
+		await expect(client.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] })).rejects.toThrow();
 	});
 
 	it("invoke() round-trips input/output exactly like LocalVehicleClient would", async () => {
@@ -207,6 +236,65 @@ describe("Vehicle HTTP provider + RemoteVehicleClient: local/HTTP parity", () =>
 		const client = new RemoteVehicleClient({ baseUrl, token });
 		const result = await client.invoke<{ echoed: string }>("test.echo", 1, { value: "hi" }, { permissions: ["test:echo"] });
 		expect(result).toEqual({ echoed: "hi" });
+	});
+
+	it("explicit caller-asserted compatibility mode preserves existing trusted-client behavior", async () => {
+		const { baseUrl, token } = startTestServer({ invocationAuthority: { mode: "caller-asserted" } });
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		await expect(client.invoke("test.echo", 1, { value: "hi" }, { permissions: ["test:echo"] })).resolves.toEqual({ echoed: "hi" });
+	});
+
+	it("attested authority ignores caller-asserted permissions and principal", async () => {
+		const { baseUrl, token, registry } = startTestServer({
+			invocationAuthority: {
+				mode: "attested",
+				resolve: () => ({ permissions: [], principal: { id: "attested-user" } }),
+			},
+		});
+		const observedPrincipals: unknown[] = [];
+		registry.useExecutionMiddleware({
+			id: "observe-principal",
+			async intercept(request, next) {
+				observedPrincipals.push(request.principal);
+				return next(request.input);
+			},
+		});
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		await expect(
+			client.invoke("test.echo", 1, { value: "hi" }, { permissions: ["test:echo"], principal: { id: "forged-user" } }),
+		).rejects.toMatchObject({ code: "permission-denied" });
+		expect(observedPrincipals).toEqual([]);
+	});
+
+	it("rejects a malformed attested authority before operation dispatch", async () => {
+		const { baseUrl, token } = startTestServer({
+			invocationAuthority: {
+				mode: "attested",
+				resolve: () => ({ permissions: [""] }),
+			},
+		});
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		await expect(client.invoke("test.echo", 1, { value: "hi" }, {})).rejects.toMatchObject({ code: "invalid-invocation-authority" });
+	});
+
+	it("attested authority grants only resolver-provided permissions and principal", async () => {
+		const { baseUrl, token, registry } = startTestServer({
+			invocationAuthority: {
+				mode: "attested",
+				resolve: () => ({ permissions: ["test:echo"], principal: { id: "attested-user" } }),
+			},
+		});
+		const observedPrincipals: unknown[] = [];
+		registry.useExecutionMiddleware({
+			id: "observe-principal",
+			async intercept(request, next) {
+				observedPrincipals.push(request.principal);
+				return next(request.input);
+			},
+		});
+		const client = new RemoteVehicleClient({ baseUrl, token });
+		await expect(client.invoke("test.echo", 1, { value: "hi" }, {})).resolves.toEqual({ echoed: "hi" });
+		expect(observedPrincipals).toEqual([{ id: "attested-user" }]);
 	});
 
 	it("a missing permission surfaces the identical VehicleError shape as the local registry would throw", async () => {

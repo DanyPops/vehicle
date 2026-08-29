@@ -4,7 +4,7 @@
 	"packageManager": "bun@1.3.14",
 	"workspaces": ["packages/*"],
 	"scripts": {
-		"build": "bun run --cwd packages/armada build && bun run --cwd packages/vehicle-core build && bun run --cwd packages/vehicle-server build && bun run --cwd packages/vehicle-client build && bun run --cwd packages/vehicle-client-pi build",
+		"build": "bun run --cwd packages/armada build && bun run --cwd packages/vehicle-core build && bun run --cwd packages/vehicle-server build && bun run --cwd packages/vehicle-client build && bun run --cwd packages/vehicle-conformance build && bun run --cwd packages/vehicle-client-pi build",
 		"test": "bun run build && bun test packages/*/test scripts/test",
 		"typecheck": "bun run build && bun run --filter './packages/*' typecheck",
 		"format": "biome format --write .",

@@ -1,11 +1,14 @@
 import type { VehicleManifestEvent } from "../events/event.js";
 import type { VehicleOperationDescriptor } from "../operations/operation.js";
+import type { VehicleProtocolSupport } from "../protocol/negotiation.js";
 
 export interface VehicleManifestIdentity {
 	readonly name: string;
 	readonly version: string;
 	readonly description: string;
 	readonly guidance?: readonly string[];
+	/** Wire compatibility served independently from this package's version and each operation's version. */
+	readonly protocol?: VehicleProtocolSupport;
 }
 
 /**

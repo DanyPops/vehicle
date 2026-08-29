@@ -1,4 +1,4 @@
-import { runToolShellDualChannelConformance, type ToolShellDualChannelFixture } from "../src/vehicle-conformance.ts";
+import { runToolShellDualChannelConformance, type ToolShellDualChannelFixture } from "../src/bun.ts";
 
 const fixture: ToolShellDualChannelFixture = {
 	label: "synthetic provider",

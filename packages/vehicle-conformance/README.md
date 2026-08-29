@@ -1,9 +1,10 @@
 # @danypops/vehicle-conformance
 
-Host-neutral `bun:test` conformance suite for any `VehicleClient`
+Compiled runner-neutral conformance suite for any `VehicleClient`
 implementation -- one shared assertion set that a `LocalVehicleClient`, a
-`RemoteVehicleClient`, or any future transport must satisfy identically.
-Ships raw TypeScript; a test-time devDependency, not a runtime library.
+`RemoteVehicleClient`, or any future transport must satisfy identically. The
+root export registers through Bun; `./core` exposes the runner-neutral matrix,
+and `./vitest` adapts a Vitest-compatible API.
 
 ```bash
 bun add -d @danypops/vehicle-conformance
@@ -15,6 +16,15 @@ import {
   runVehicleClientConformance,
   runToolShellDualChannelConformance,
 } from "@danypops/vehicle-conformance";
+```
+
+Vitest consumers provide their installed runner API rather than loading Bun:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { runVehicleClientConformanceWithVitest } from "@danypops/vehicle-conformance/vitest";
+
+runVehicleClientConformanceWithVitest({ describe, expect, it }, fixture);
 ```
 
 `runToolShellDualChannelConformance(fixture)` is the host-neutral Tool Shell

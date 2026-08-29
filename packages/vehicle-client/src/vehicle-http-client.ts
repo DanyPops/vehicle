@@ -29,10 +29,12 @@ import type {
 	VehicleJobSubmitResult,
 	VehicleJobTailResult,
 	VehicleManifest,
+	VehicleProtocolAgreement,
+	VehicleProtocolOffer,
 	VehicleRecovery,
 	VehicleSubscription,
 } from "@danypops/vehicle-core";
-import { VehicleError, vehicleEventTopic } from "@danypops/vehicle-core";
+import { isVehicleProtocolAgreement, VehicleError, vehicleEventTopic } from "@danypops/vehicle-core";
 import { connectPushChannel } from "./daemon-client.js";
 
 const KNOWN_FAILURE_CATEGORIES: readonly VehicleFailureCategory[] = [
@@ -133,6 +135,21 @@ export class RemoteVehicleClient implements VehicleClient {
 			this.cachedManifest = { manifest, expiresAt: Date.now() + this.options.manifestCacheTtlMs };
 		}
 		return manifest;
+	}
+
+	async negotiate(offer: VehicleProtocolOffer): Promise<VehicleProtocolAgreement> {
+		this.ensureOpen();
+		const response = await this.fetchImpl(`${this.options.baseUrl}/vehicle/negotiate`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${this.options.token}`, "content-type": "application/json" },
+			body: JSON.stringify(offer),
+		});
+		if (!response.ok) throw await this.errorFromResponse(response);
+		const body = (await response.json()) as { agreement?: unknown };
+		if (!isVehicleProtocolAgreement(body.agreement)) {
+			throw new VehicleError("invalid-response", "Vehicle protocol negotiation returned an invalid agreement", { category: "internal" });
+		}
+		return body.agreement;
 	}
 
 	async invoke<Output = unknown>(name: string, version: number, input: unknown, options: VehicleInvocationOptions = {}): Promise<Output> {

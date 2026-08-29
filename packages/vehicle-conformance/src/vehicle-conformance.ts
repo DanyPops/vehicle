@@ -18,8 +18,30 @@
  * argument parsing) stay out of this module entirely, per the extraction
  * scope this generalizes.
  */
-import { describe, expect, it } from "bun:test";
 import type { VehicleClient } from "@danypops/vehicle-core";
+
+export interface VehicleConformanceMatchers {
+	toEqual(expected: unknown): unknown;
+	toMatchObject(expected: unknown): unknown;
+	toBe(expected: unknown): unknown;
+	toBeTruthy(): unknown;
+	toBeUndefined(): unknown;
+	toContain(expected: unknown): unknown;
+	toMatch(expected: RegExp | string): unknown;
+	toBeGreaterThan(expected: number): unknown;
+	toBeGreaterThanOrEqual(expected: number): unknown;
+	toBeLessThan(expected: number): unknown;
+	toBeLessThanOrEqual(expected: number): unknown;
+	readonly not: VehicleConformanceMatchers;
+	readonly rejects: VehicleConformanceMatchers;
+	readonly resolves: VehicleConformanceMatchers;
+}
+
+export interface VehicleConformanceRunner {
+	describe(name: string, body: () => void): unknown;
+	it(name: string, body: () => void | Promise<void>): unknown;
+	expect(actual: unknown, message?: string): VehicleConformanceMatchers;
+}
 import { bindVehicleOperation, defineVehicleOperation, defineVehicleSchema, VehicleError } from "@danypops/vehicle-core";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
 
@@ -173,7 +195,8 @@ export interface VehicleConformanceFixture {
 	create(): Promise<{ client: VehicleClient; cleanup: () => Promise<void> }>;
 }
 
-export function runVehicleClientConformance(fixture: VehicleConformanceFixture): void {
+export function registerVehicleClientConformance(runner: VehicleConformanceRunner, fixture: VehicleConformanceFixture): void {
+	const { describe, expect, it } = runner;
 	describe(`Vehicle client conformance: ${fixture.label}`, () => {
 		it("manifest() lists every registered operation with its real descriptor fields", async () => {
 			const { client, cleanup } = await fixture.create();
@@ -196,6 +219,21 @@ export function runVehicleClientConformance(fixture: VehicleConformanceFixture):
 				// not just the in-process local one.
 				expect(manifest.operations.every((op) => op.available === true)).toBe(true);
 				expect(echo?.unavailableReason).toBeUndefined();
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("negotiate() agrees on the shared protocol and rejects an incompatible range", async () => {
+			const { client, cleanup } = await fixture.create();
+			try {
+				if (!client.negotiate) throw new Error("Vehicle client does not implement protocol negotiation");
+				await expect(
+					client.negotiate({ minimumVersion: 1, maximumVersion: 2, requiredCapabilities: [], optionalCapabilities: ["future"] }),
+				).resolves.toEqual({ version: 1, capabilities: [] });
+				await expect(
+					client.negotiate({ minimumVersion: 2, maximumVersion: 3, requiredCapabilities: [], optionalCapabilities: [] }),
+				).rejects.toMatchObject({ code: "protocol-version-incompatible" });
 			} finally {
 				await cleanup();
 			}
@@ -526,7 +564,7 @@ function utf8Length(value: string): number {
 // biome-ignore lint/complexity/useRegexLiterals: a constructor avoids control-character lint on the equivalent literal.
 const ANSI_CSI_PATTERN = new RegExp("\\u001B\\[[0-?]*[ -/]*[@-~]", "g");
 
-function assertPhysicalLines(lines: readonly string[], width: number): void {
+function assertPhysicalLines(expect: VehicleConformanceRunner["expect"], lines: readonly string[], width: number): void {
 	expect(lines.length).toBeGreaterThan(0);
 	for (const line of lines) {
 		expect(line).not.toContain("\n");
@@ -537,7 +575,8 @@ function assertPhysicalLines(lines: readonly string[], width: number): void {
 }
 
 /** Reusable provider-facing dual-channel contract matrix. */
-export function runToolShellDualChannelConformance(fixture: ToolShellDualChannelFixture): void {
+export function registerToolShellDualChannelConformance(runner: VehicleConformanceRunner, fixture: ToolShellDualChannelFixture): void {
+	const { describe, expect, it } = runner;
 	describe(`Vehicle Tool Shell dual-channel conformance: ${fixture.label}`, () => {
 		it("keeps model and persisted-presentation sentinels isolated under independent named bounds", async () => {
 			const { subject, cleanup } = await fixture.create();
@@ -576,9 +615,9 @@ export function runToolShellDualChannelConformance(fixture: ToolShellDualChannel
 				const snapshot = await subject.execute();
 				const before = JSON.stringify(snapshot);
 				for (const width of [40, 80, 120] as const) {
-					assertPhysicalLines(subject.render(snapshot, { width, expanded: false }), width);
-					assertPhysicalLines(subject.render(snapshot, { width, expanded: true }), width);
-					assertPhysicalLines(subject.render(snapshot, { width, expanded: false, partial: true }), width);
+					assertPhysicalLines(expect, subject.render(snapshot, { width, expanded: false }), width);
+					assertPhysicalLines(expect, subject.render(snapshot, { width, expanded: true }), width);
+					assertPhysicalLines(expect, subject.render(snapshot, { width, expanded: false, partial: true }), width);
 				}
 				expect(JSON.stringify(snapshot)).toBe(before);
 			} finally {
@@ -611,7 +650,7 @@ export function runToolShellDualChannelConformance(fixture: ToolShellDualChannel
 				const renderDeclaredValue = subject.renderDeclaredValue.bind(subject);
 				const options: ToolShellRenderOptions = { width: 80, expanded: true };
 				for (const { value, rawPayload } of cases) {
-					assertPhysicalLines(renderDeclaredValue(value, rawPayload, options), options.width);
+					assertPhysicalLines(expect, renderDeclaredValue(value, rawPayload, options), options.width);
 				}
 				const { nonRawValues, rawValues } = evaluateDeclaredValueCoverage(cases, renderDeclaredValue, options);
 				expect(

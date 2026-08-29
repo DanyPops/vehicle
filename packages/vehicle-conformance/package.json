@@ -1,16 +1,28 @@
 {
 	"name": "@danypops/vehicle-conformance",
 	"version": "0.4.1",
-	"description": "Host-neutral conformance suite for any VehicleClient implementation: one shared bun:test assertion set that LocalVehicleClient, RemoteVehicleClient, and any future transport must satisfy identically. A Bun-only devDependency for testing, not a runtime library -- ships raw TypeScript, never precompiled.",
+	"description": "Runner-neutral conformance suite for VehicleClient implementations, with Bun and Vitest adapters over one shared assertion matrix.",
 	"license": "MIT",
 	"type": "module",
-	"main": "./src/vehicle-conformance.ts",
-	"types": "./src/vehicle-conformance.ts",
+	"main": "./dist/bun.js",
+	"types": "./dist/bun.d.ts",
 	"exports": {
-		".": "./src/vehicle-conformance.ts"
+		".": {
+			"types": "./dist/bun.d.ts",
+			"default": "./dist/bun.js"
+		},
+		"./core": {
+			"types": "./dist/vehicle-conformance.d.ts",
+			"default": "./dist/vehicle-conformance.js"
+		},
+		"./vitest": {
+			"types": "./dist/vitest.d.ts",
+			"default": "./dist/vitest.js"
+		}
 	},
 	"scripts": {
-		"test": "bun test test",
+		"build": "rm -rf dist && tsc -p tsconfig.build.json",
+		"test": "bun run build && bun test test",
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
@@ -28,5 +40,5 @@
 		"directory": "packages/vehicle-conformance"
 	},
 	"keywords": ["vehicle", "agent-tools", "testing"],
-	"files": ["src", "README.md"]
+	"files": ["src", "dist", "README.md"]
 }

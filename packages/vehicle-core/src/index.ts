@@ -26,6 +26,7 @@ export * from "./jobs/index.js";
 export * from "./manifest/index.js";
 export * from "./operations/index.js";
 export * from "./persistence/index.js";
+export * from "./protocol/index.js";
 export * from "./resource-pool/index.js";
 export * from "./schedules/index.js";
 export * from "./schemas/index.js";

@@ -54,13 +54,13 @@ using.
 | `@danypops/vehicle-server` | `armada`, `vehicle-core` | The daemon itself: process lifecycle, SQLite storage bootstrap, structured logging, HTTP auth/RPC scaffolding, Armada service projection, credential vault, process supervision -- plus `VehicleRegistry` (execution engine) at `.` and its authenticated HTTP hosting surface at `./http`. See its own module table below. |
 | `@danypops/vehicle-client` | `vehicle-core`, `vehicle-server` | Every way to reach a Vehicle server: `LocalVehicleClient` at `./local`, `RemoteVehicleClient` at `./http`, plus the generic connection-resilience toolkit (retry, auto-spawn policy, version check, push-channel reconnection, RPC over HTTP or a Unix socket) any client needs. See its own module table below. |
 | `@danypops/vehicle-client-pi` | `vehicle-core`, `vehicle-server` | Projects any `VehicleClient` into native Pi tools, with live availability curation, plus the rest of this house's Pi-extension-facing surface: jiti-load-safety verification and the shared `/secrets` command. |
-| `@danypops/vehicle-conformance` | `vehicle-core`, `vehicle-server` | Host-neutral `bun:test` conformance suite any `VehicleClient` implementation must satisfy identically. Ships raw TypeScript -- a test-time devDependency, not a runtime library. |
+| `@danypops/vehicle-conformance` | `vehicle-core`, `vehicle-server` | Compiled runner-neutral conformance suite any `VehicleClient` implementation must satisfy identically, with Bun and Vitest adapters over one scenario matrix. |
 
 The tables below are the hand-maintained, narrative version of this layout --
 why each module exists, what it replaced, and the design rationale behind it.
 For the mechanical, always-current version (every real export, its exact
 signature, and its own TSDoc description where seeded) generated straight
-from source, see **[`docs/api/`](docs/api/README.md)** -- run `npm run docs` to regenerate it after changing an export. `@danypops/vehicle-conformance` is deliberately excluded (test-time-only, per its own row above).
+from source, see **[`docs/api/`](docs/api/README.md)** -- run `npm run docs` to regenerate it after changing an export. `@danypops/vehicle-conformance` is deliberately excluded because it is test-time-only.
 
 ## `@danypops/vehicle-server` modules
 
@@ -96,9 +96,11 @@ etc.) so a consumer only pulls in what it uses.
 
 `@danypops/vehicle-core` defines operation descriptors, schema codecs,
 executable bindings, unique provider ownership, structured failures,
-permissions, idempotency requirements, deadlines, cancellation, progress, and
-request/response bounds. The serializable descriptor stays separate from
-executable code. Zero runtime dependencies.
+permissions, idempotency requirements, deadlines, cancellation, progress,
+request/response bounds, and explicit wire-version/capability negotiation. Wire
+compatibility is independent from package versions and per-operation versions.
+The serializable descriptor stays separate from executable code. Zero runtime
+dependencies.
 
 `@danypops/vehicle-server`'s root export is `VehicleRegistry`: registration,
 permission/deadline/payload enforcement, an execution policy hook, and
@@ -107,18 +109,28 @@ registered operation's usability at runtime (e.g. a credential got configured
 or removed) -- there's no unregister, an operation's shape is permanent once
 registered, only whether `manifest()` reports it `available` and whether
 `invoke()` accepts it. Its `./http` export, `createVehicleHttpApp()`, exposes a
-registry over `GET /vehicle/manifest`, `POST /vehicle/invoke` (JSON by default,
-Server-Sent Events when `Accept: text/event-stream` -- needed for progress),
-and `POST /vehicle/cancel`, Bearer-authenticated via this same package's own
+registry over `GET /vehicle/manifest`, `POST /vehicle/negotiate`,
+`POST /vehicle/invoke` (JSON by default, Server-Sent Events when
+`Accept: text/event-stream` -- needed for progress), and `POST /vehicle/cancel`,
+Bearer-authenticated via this same package's own
 `./rpc-http`. Kept as a separate subpath from the root export on purpose: a
 consumer that only builds/tests a registry never pulls in HTTP request/response
-plumbing.
+plumbing. `createVehicleHttpApp()` also accepts an `invocationAuthority` policy.
+The compatibility `caller-asserted` mode preserves established trusted-client
+behavior; `attested` mode resolves permissions and principal only after transport
+authentication and ignores matching fields in caller JSON. A Unix RPC host can
+pass its kernel-verified peer credential as the fetch context.
 
 `@danypops/vehicle-client` has no root export -- `./local` (`LocalVehicleClient`,
 a same-process client wrapping a `VehicleRegistry` directly) and `./http`
 (`RemoteVehicleClient`, authenticated HTTP with the same semantics as local)
 are each a real, independent way to reach a `VehicleClient`; importing one must
-never pull the other in. `RemoteVehicleClient` accepts an opt-in
+never pull the other in. Both concrete clients implement `negotiate()` to select
+the highest shared wire version, require declared capabilities, and ignore
+unknown optional capabilities. The additive `invokeVehicleOutcome()` helper
+wraps the existing throwing `invoke()` API in discriminated success,
+Vehicle-failure, cancellation, transport-failure, and unexpected-failure values;
+raw transport and unexpected messages are not exposed. `RemoteVehicleClient` accepts an opt-in
 `manifestCacheTtlMs` (default off -- every `manifest()` call hits
 `/vehicle/manifest` fresh, today's exact behavior): when set, a call within
 the TTL is served from a single cached slot instead of a new HTTP round trip,
@@ -164,9 +176,9 @@ session (Enigma, Pipes, Tickets) merge into one `/secrets` command instead of
 each registering its own.
 
 `@danypops/vehicle-conformance`'s `runVehicleClientConformance()` runs one
-shared assertion suite -- manifest accuracy, input validation, permissions,
-real handler failures, keyed idempotency, byte bounds, not-found,
-progress-before-result ordering, cancellation, deadlines, close() -- against
+shared assertion suite -- manifest accuracy, protocol negotiation, input
+validation, permissions, real handler failures, keyed idempotency, byte bounds,
+not-found, progress-before-result ordering, cancellation, deadlines, close() -- against
 any `VehicleClient` a fixture supplies. Caught a real bug live:
 `LocalVehicleClient.manifest()` threw synchronously instead of rejecting after
 `close()`, unlike its own `invoke()` and `RemoteVehicleClient.manifest()` --

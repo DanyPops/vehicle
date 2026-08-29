@@ -92,6 +92,31 @@ function registryWith(binding = echoBinding(), policy?: VehicleExecutionPolicy):
 	return registry;
 }
 
+describe("Vehicle protocol negotiation", () => {
+	it("reports default protocol support and negotiates a compatible offer", () => {
+		const registry = registryWith();
+		expect(registry.manifest().protocol).toEqual({ minimumVersion: 1, maximumVersion: 1, capabilities: [] });
+		expect(
+			registry.negotiate({ minimumVersion: 1, maximumVersion: 2, requiredCapabilities: [], optionalCapabilities: ["future"] }),
+		).toEqual({ version: 1, capabilities: [] });
+	});
+
+	it("surfaces incompatible versions and required capabilities as typed Vehicle errors", () => {
+		const registry = new VehicleRegistry({
+			name: "test-vehicle",
+			version: "1.0.0",
+			description: "Vehicle test fixture.",
+			protocol: { minimumVersion: 2, maximumVersion: 3, capabilities: ["events"] },
+		});
+		expect(() => registry.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] })).toThrow(
+			expect.objectContaining({ code: "protocol-version-incompatible" }),
+		);
+		expect(() => registry.negotiate({ minimumVersion: 2, maximumVersion: 2, requiredCapabilities: ["jobs"], optionalCapabilities: [] })).toThrow(
+			expect.objectContaining({ code: "protocol-capability-unsupported" }),
+		);
+	});
+});
+
 describe("Vehicle operation contracts", () => {
 	it("keeps the manifest descriptor serializable and executable code in the binding", () => {
 		const binding = echoBinding();

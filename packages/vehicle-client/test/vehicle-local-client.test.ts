@@ -47,10 +47,18 @@ describe("LocalVehicleClient", () => {
 		await expect(client.invoke("test.echo", 1, { value: "hi" })).resolves.toEqual({ value: "hi" });
 	});
 
+	it("negotiates protocol compatibility through the wrapped registry", async () => {
+		const client = clientWith();
+		await expect(
+			client.negotiate({ minimumVersion: 1, maximumVersion: 2, requiredCapabilities: [], optionalCapabilities: ["future"] }),
+		).resolves.toEqual({ version: 1, capabilities: [] });
+	});
+
 	it("refuses invocation and manifest() after close(), as a rejected promise not a thrown exception", async () => {
 		const client = clientWith();
 		await client.close();
 		await expect(client.manifest()).rejects.toMatchObject({ code: "client-closed", category: "unavailable" });
+		await expect(client.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] })).rejects.toMatchObject({ code: "client-closed" });
 		await expect(client.invoke("test.echo", 1, { value: "hi" })).rejects.toMatchObject({ code: "client-closed" });
 	});
 });

@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { VehicleRegistry } from "@danypops/vehicle-server";
+import { createVehicleHttpApp, type VehicleHttpTransportContext } from "@danypops/vehicle-server/http";
 import { serveUnixRpc } from "@danypops/vehicle-server/unix-rpc-server";
 import { connectUnixRpc } from "../src/unix-rpc-client.ts";
 
@@ -25,6 +27,41 @@ describe("connectUnixRpc", () => {
 			const response = await transport(new Request("http://unix.local/whoami"));
 			expect(response.status).toBe(200);
 			expect(await response.json()).toEqual({ ok: true });
+		} finally {
+			server.stop();
+			try {
+				unlinkSync(path);
+			} catch {}
+		}
+	});
+
+	it("threads a kernel-verified Unix peer into attested invocation authority", async () => {
+		const path = socketPath();
+		const contexts: VehicleHttpTransportContext[] = [];
+		const app = createVehicleHttpApp({
+			registry: new VehicleRegistry({ name: "test", version: "1", description: "Test." }),
+			token: "test-token",
+			invocationAuthority: {
+				mode: "attested",
+				resolve(_request, context) {
+					contexts.push(context);
+					return { permissions: [] };
+				},
+			},
+		});
+		const server = serveUnixRpc({
+			path,
+			handler: (request, peer) => app.fetch(request, { transport: "unix", peer }),
+		});
+		try {
+			const transport = connectUnixRpc({ path });
+			const response = await transport(new Request("http://unix.local/vehicle/invoke", {
+				method: "POST",
+				headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+				body: JSON.stringify({ name: "missing", version: 1, input: {} }),
+			}));
+			expect(response.status).toBe(404);
+			expect(contexts).toEqual([{ transport: "unix", peer: { pid: process.pid, uid: process.getuid?.(), gid: process.getgid?.() } }]);
 		} finally {
 			server.stop();
 			try {

@@ -17,6 +17,8 @@ import type {
 	VehicleJobSubmitResult,
 	VehicleJobTailResult,
 	VehicleManifest,
+	VehicleProtocolAgreement,
+	VehicleProtocolOffer,
 	VehicleSubscription,
 } from "@danypops/vehicle-core";
 import { VehicleError } from "@danypops/vehicle-core";
@@ -58,6 +60,11 @@ export class LocalVehicleClient implements VehicleClient {
 	async manifest(): Promise<VehicleManifest> {
 		this.ensureOpen();
 		return this.registry.manifest();
+	}
+
+	async negotiate(offer: VehicleProtocolOffer): Promise<VehicleProtocolAgreement> {
+		this.ensureOpen();
+		return this.registry.negotiate(offer);
 	}
 
 	async invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> {

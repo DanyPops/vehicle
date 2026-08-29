@@ -11,6 +11,7 @@
  * Daemon-side raw TypeScript, not part of any Pi-loaded compiled surface.
  * Core routes:
  *   GET  /vehicle/manifest        -> the registry's current VehicleManifest
+ *   POST /vehicle/negotiate       -> agree on a wire version and capabilities
  *   POST /vehicle/invoke          -> invoke one operation; JSON by default,
  *                                    Server-Sent Events when the request
  *                                    sends `Accept: text/event-stream`
@@ -49,8 +50,9 @@ import type {
 	VehicleInvocationOptions,
 	VehicleJobSubmitOptions,
 	VehiclePrincipal,
+	VehicleProtocolOffer,
 } from "@danypops/vehicle-core";
-import { isVehicleError } from "@danypops/vehicle-core";
+import { isVehicleError, MAX_VEHICLE_PROTOCOL_OFFER_BYTES, VehicleError } from "@danypops/vehicle-core";
 import { errorResponse, jsonResponse, requireBearerToken } from "./http.js";
 import type { Logger } from "./logging.js";
 import type { VehicleJobStore } from "./vehicle-job-store.js";
@@ -61,9 +63,28 @@ const JOBS_NOT_SUPPORTED_RESPONSE: Response = errorResponse("Vehicle Jobs are no
 
 const NOOP_LOGGER: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
+export interface VehicleInvocationAuthority {
+	readonly permissions: readonly string[];
+	readonly principal?: VehiclePrincipal;
+}
+
+export interface VehicleHttpTransportContext {
+	readonly transport: "http" | "unix";
+	readonly peer?: Readonly<{ pid?: number; uid?: number; gid?: number }>;
+}
+
+export type VehicleInvocationAuthorityPolicy =
+	| { readonly mode: "caller-asserted" }
+	| {
+			readonly mode: "attested";
+			resolve(request: Request, context: VehicleHttpTransportContext): VehicleInvocationAuthority | Promise<VehicleInvocationAuthority>;
+	  };
+
 export interface VehicleHttpProviderOptions {
 	registry: VehicleRegistry;
 	token: string;
+	/** Defaults to caller-asserted for backward compatibility. New cross-trust-boundary deployments use attested authority. */
+	invocationAuthority?: VehicleInvocationAuthorityPolicy;
 	/**
 	 * Defaults to a no-op logger. Without one, a failed invocation is sanitized
 	 * into a wire-safe VehicleFailure (code/category/message only, per this
@@ -145,17 +166,51 @@ function logInvokeFailure(logger: Logger, name: string, version: number, operati
 	});
 }
 
-export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fetch(request: Request): Promise<Response> } {
+function transportContext(value: unknown): VehicleHttpTransportContext {
+	if (typeof value !== "object" || value === null) return { transport: "http" };
+	const candidate = value as { transport?: unknown; peer?: unknown };
+	if (candidate.transport !== "http" && candidate.transport !== "unix") return { transport: "http" };
+	if (typeof candidate.peer !== "object" || candidate.peer === null) return { transport: candidate.transport };
+	const rawPeer = candidate.peer as { pid?: unknown; uid?: unknown; gid?: unknown };
+	const peer = {
+		...(Number.isSafeInteger(rawPeer.pid) ? { pid: rawPeer.pid as number } : {}),
+		...(Number.isSafeInteger(rawPeer.uid) ? { uid: rawPeer.uid as number } : {}),
+		...(Number.isSafeInteger(rawPeer.gid) ? { gid: rawPeer.gid as number } : {}),
+	};
+	return { transport: candidate.transport, peer };
+}
+
+export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fetch(request: Request, context?: unknown): Promise<Response> } {
 	const inFlight = new Map<string, AbortController>();
 	const logger = options.logger ?? NOOP_LOGGER;
 
 	return {
-		async fetch(request: Request): Promise<Response> {
+		async fetch(request: Request, suppliedContext?: unknown): Promise<Response> {
 			if (!requireBearerToken(request, options.token)) return UNAUTHORIZED_RESPONSE;
+			const context = transportContext(suppliedContext);
 			const url = new URL(request.url);
 
 			if (request.method === "GET" && url.pathname === "/vehicle/manifest") {
 				return jsonResponse(options.registry.manifest());
+			}
+
+			if (request.method === "POST" && url.pathname === "/vehicle/negotiate") {
+				let offer: VehicleProtocolOffer;
+				try {
+					const encoded = await request.text();
+					if (new TextEncoder().encode(encoded).byteLength > MAX_VEHICLE_PROTOCOL_OFFER_BYTES) {
+						return errorResponse(`protocol offer exceeds ${MAX_VEHICLE_PROTOCOL_OFFER_BYTES} bytes`, 413);
+					}
+					offer = JSON.parse(encoded) as VehicleProtocolOffer;
+				} catch {
+					return errorResponse("invalid JSON body", 400);
+				}
+				try {
+					return jsonResponse({ agreement: options.registry.negotiate(offer) });
+				} catch (error) {
+					const failure = toFailurePayload(error);
+					return jsonResponse({ error: failure }, { status: statusForCategory(failure.category) });
+				}
 			}
 
 			if (request.method === "POST" && url.pathname === "/vehicle/cancel") {
@@ -170,7 +225,7 @@ export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fet
 			}
 
 			if (request.method === "POST" && url.pathname === "/vehicle/invoke") {
-				return handleInvoke(request, options.registry, inFlight, logger);
+				return handleInvoke(request, options.registry, inFlight, logger, options.invocationAuthority, context);
 			}
 
 			if (url.pathname.startsWith("/vehicle/jobs/")) {
@@ -178,7 +233,7 @@ export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fet
 				if (request.method !== "POST") return errorResponse("not found", 404);
 				switch (url.pathname) {
 					case "/vehicle/jobs/submit":
-						return handleJobSubmit(request, options.jobStore);
+						return handleJobSubmit(request, options.jobStore, options.invocationAuthority, context);
 					case "/vehicle/jobs/poll":
 						return handleJobPoll(request, options.jobStore);
 					case "/vehicle/jobs/tail":
@@ -197,11 +252,47 @@ export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fet
 	};
 }
 
+const MAX_ATTESTED_PERMISSIONS = 128;
+const MAX_ATTESTED_PERMISSION_LENGTH = 200;
+
+function isInvocationAuthority(value: unknown): value is VehicleInvocationAuthority {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as { permissions?: unknown; principal?: unknown };
+	if (
+		!Array.isArray(candidate.permissions) ||
+		candidate.permissions.length > MAX_ATTESTED_PERMISSIONS ||
+		candidate.permissions.some(
+			(permission) => typeof permission !== "string" || !permission.trim() || permission.length > MAX_ATTESTED_PERMISSION_LENGTH,
+		)
+	) return false;
+	if (candidate.principal === undefined) return true;
+	if (typeof candidate.principal !== "object" || candidate.principal === null) return false;
+	const principal = candidate.principal as { id?: unknown; claims?: unknown };
+	return typeof principal.id === "string" && principal.id.trim().length > 0 && (principal.claims === undefined || (typeof principal.claims === "object" && principal.claims !== null));
+}
+
+async function resolveInvocationAuthority(
+	policy: VehicleInvocationAuthorityPolicy | undefined,
+	request: Request,
+	context: VehicleHttpTransportContext,
+): Promise<VehicleInvocationAuthority | undefined> {
+	if (!policy || policy.mode === "caller-asserted") return undefined;
+	const authority = await policy.resolve(request, context);
+	if (!isInvocationAuthority(authority)) {
+		throw new VehicleError("invalid-invocation-authority", "Authenticated transport resolved an invalid invocation authority", {
+			category: "internal",
+		});
+	}
+	return authority;
+}
+
 async function handleInvoke(
 	request: Request,
 	registry: VehicleRegistry,
 	inFlight: Map<string, AbortController>,
 	logger: Logger,
+	authorityPolicy: VehicleInvocationAuthorityPolicy | undefined,
+	transportContext: VehicleHttpTransportContext,
 ): Promise<Response> {
 	let body: InvokeRequestBody;
 	try {
@@ -213,6 +304,14 @@ async function handleInvoke(
 		return errorResponse("name and version are required", 400);
 	}
 
+	let authority: VehicleInvocationAuthority | undefined;
+	try {
+		authority = await resolveInvocationAuthority(authorityPolicy, request, transportContext);
+	} catch (error) {
+		const failure = toFailurePayload(error);
+		return jsonResponse({ error: failure }, { status: statusForCategory(failure.category) });
+	}
+
 	const operationId = typeof body.operationId === "string" && body.operationId.trim() ? body.operationId : randomUUID();
 	const controller = new AbortController();
 	inFlight.set(operationId, controller);
@@ -222,8 +321,8 @@ async function handleInvoke(
 		correlationId: typeof body.correlationId === "string" ? body.correlationId : undefined,
 		signal: controller.signal,
 		deadline: typeof body.deadlineMs === "number" ? Date.now() + body.deadlineMs : undefined,
-		permissions: Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
-		principal: (body.principal as VehiclePrincipal | undefined) ?? undefined,
+		permissions: authority ? [...authority.permissions] : Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
+		principal: authority?.principal ?? ((body.principal as VehiclePrincipal | undefined) ?? undefined),
 		idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
 		expectedRevision: body.expectedRevision as string | number | undefined,
 		approvalCapability: typeof body.approvalCapability === "string" ? body.approvalCapability : undefined,
@@ -357,16 +456,27 @@ async function parseJsonBody<T>(request: Request): Promise<{ ok: true; body: T }
 	}
 }
 
-async function handleJobSubmit(request: Request, jobStore: VehicleJobStore): Promise<Response> {
+async function handleJobSubmit(
+	request: Request,
+	jobStore: VehicleJobStore,
+	authorityPolicy: VehicleInvocationAuthorityPolicy | undefined,
+	transportContext: VehicleHttpTransportContext,
+): Promise<Response> {
 	const parsed = await parseJsonBody<JobSubmitRequestBody>(request);
 	if (!parsed.ok) return parsed.response;
 	const body = parsed.body;
 	if (typeof body.name !== "string" || typeof body.version !== "number") {
 		return errorResponse("name and version are required", 400);
 	}
+	let authority: VehicleInvocationAuthority | undefined;
+	try {
+		authority = await resolveInvocationAuthority(authorityPolicy, request, transportContext);
+	} catch (error) {
+		return jobFailureResponse(error);
+	}
 	const submitOptions: VehicleJobSubmitOptions = {
-		permissions: Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
-		principal: (body.principal as VehiclePrincipal | undefined) ?? undefined,
+		permissions: authority ? [...authority.permissions] : Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
+		principal: authority?.principal ?? ((body.principal as VehiclePrincipal | undefined) ?? undefined),
 		idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
 		expectedRevision: body.expectedRevision as string | number | undefined,
 		approvalCapability: typeof body.approvalCapability === "string" ? body.approvalCapability : undefined,

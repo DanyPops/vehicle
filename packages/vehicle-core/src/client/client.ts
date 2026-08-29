@@ -1,6 +1,7 @@
 import type { VehicleJobSnapshot, VehicleJobSubmitOptions, VehicleJobSubmitResult, VehicleJobTailResult } from "../jobs/wire.js";
 import type { VehicleManifest } from "../manifest/manifest.js";
 import type { VehicleInvocationOptions } from "../operations/context.js";
+import type { VehicleProtocolAgreement, VehicleProtocolOffer } from "../protocol/negotiation.js";
 
 export interface VehicleSubscription {
 	close(): void;
@@ -8,6 +9,8 @@ export interface VehicleSubscription {
 
 export interface VehicleClient {
 	manifest(): Promise<VehicleManifest>;
+	/** Optional for compatibility with clients authored before explicit wire negotiation. */
+	negotiate?(offer: VehicleProtocolOffer): Promise<VehicleProtocolAgreement>;
 	invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output>;
 	close(): Promise<void>;
 	/**

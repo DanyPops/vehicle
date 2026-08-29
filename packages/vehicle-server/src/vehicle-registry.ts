@@ -9,10 +9,21 @@ import type {
 	VehicleOperationContext,
 	VehicleOperationDescriptor,
 	VehiclePrincipal,
+	VehicleProtocolAgreement,
+	VehicleProtocolOffer,
+	VehicleProtocolSupport,
 	VehicleSchemaCodec,
 	VehicleSchemaResult,
 } from "@danypops/vehicle-core";
-import { boundedCauseMessage, boundedValidationDetails, isVehicleError, VehicleError, vehicleEventTopic } from "@danypops/vehicle-core";
+import {
+	boundedCauseMessage,
+	boundedValidationDetails,
+	DEFAULT_VEHICLE_PROTOCOL_SUPPORT,
+	isVehicleError,
+	negotiateVehicleProtocol,
+	VehicleError,
+	vehicleEventTopic,
+} from "@danypops/vehicle-core";
 import { Result } from "better-result";
 import { VehicleApprovalPolicyManager } from "./vehicle-registry/approval-policy.js";
 import { VehicleEventPubSub } from "./vehicle-registry/event-pubsub.js";
@@ -275,6 +286,7 @@ export class VehicleRegistry {
 	private readonly availability = new Map<string, AvailabilityState>();
 	private readonly executionMiddlewares: VehicleExecutionMiddleware[] = [];
 	private readonly identity: VehicleManifestIdentity;
+	private readonly protocol: VehicleProtocolSupport;
 	private readonly eventPubSub = new VehicleEventPubSub();
 	private approvalManager?: VehicleApprovalPolicyManager;
 	/** Default false: an unexpected handler exception's message could contain a credential or internal detail. See setExposeHandlerFailureDetails(). */
@@ -288,8 +300,18 @@ export class VehicleRegistry {
 		if (!identity.description.trim()) throw new Error("Vehicle description must not be empty");
 		const manifestIdentity = resolveManifestIdentity(identity);
 		if (!manifestIdentity.version.trim()) throw new Error("Vehicle version must not be empty");
+		const protocol = manifestIdentity.protocol ?? DEFAULT_VEHICLE_PROTOCOL_SUPPORT;
+		const validation = negotiateVehicleProtocol(protocol, {
+			minimumVersion: protocol.minimumVersion,
+			maximumVersion: protocol.maximumVersion,
+			requiredCapabilities: [],
+			optionalCapabilities: [],
+		});
+		if (!validation.ok) throw new Error(validation.message);
+		this.protocol = Object.freeze({ ...protocol, capabilities: Object.freeze([...protocol.capabilities]) });
 		this.identity = Object.freeze({
 			...manifestIdentity,
+			protocol: this.protocol,
 			...(manifestIdentity.guidance ? { guidance: Object.freeze([...manifestIdentity.guidance]) } : {}),
 		});
 	}
@@ -434,6 +456,16 @@ export class VehicleRegistry {
 		const key = operationKey(name, version);
 		if (!this.registrations.has(key)) throw new Error(`Cannot set availability for unregistered Vehicle operation ${key}`);
 		this.availability.set(key, { available, reason });
+	}
+
+	/** Negotiates this registry's wire compatibility before a client invokes domain operations. */
+	negotiate(offer: VehicleProtocolOffer): VehicleProtocolAgreement {
+		const result = negotiateVehicleProtocol(this.protocol, offer);
+		if (result.ok) return result.value;
+		throw new VehicleError(result.code, result.message, {
+			category: result.code === "protocol-offer-invalid" ? "validation" : "conflict",
+			retryable: false,
+		});
 	}
 
 	manifest(): VehicleManifest {
