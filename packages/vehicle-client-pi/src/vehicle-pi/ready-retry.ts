@@ -101,10 +101,10 @@ export interface ReadyRetryDeps {
  *
  * Registers one `session_start` handler that kicks off the resolve+register
  * sequence in the background (never blocks session_start itself on a
- * multi-attempt backoff) and returns a promise that settles once the
- * sequence either succeeds or exhausts its attempts -- awaiting it is
- * optional, useful mainly for tests and for a caller that wants to know the
- * final outcome (e.g. to show one status line) without polling.
+ * multi-attempt backoff). Session shutdown cancels pending retries before
+ * their captured API and context become stale. The returned promise settles
+ * once registration succeeds, retries exhaust, or the owning session shuts
+ * down -- awaiting it is optional and mainly useful for tests.
  *
  * Every other `RegisterVehicleToolsOptions` field (including the opt-in
  * `shell` activation mode) passes straight through to the eventual
@@ -118,18 +118,19 @@ export function registerVehicleToolsWhenReady(
 ): Promise<RegisteredPiVehicle | undefined> {
 	const attempts = Math.max(1, options.retry?.attempts ?? DEFAULT_READY_RETRY_ATTEMPTS);
 	let settle!: (value: RegisteredPiVehicle | undefined) => void;
+	let settled = false;
+	let sessionGeneration = 0;
 	const done = new Promise<RegisteredPiVehicle | undefined>((resolve) => {
 		settle = resolve;
 	});
+	const settleOnce = (value: RegisteredPiVehicle | undefined): void => {
+		if (settled) return;
+		settled = true;
+		settle(value);
+	};
+	const isCurrentSession = (generation: number): boolean => generation === sessionGeneration;
 
-	// `attempt` reuses one ctx captured at session_start across every retry, including across the
-	// sleep between attempts -- a session replaced or reloaded during that window leaves `ctx`
-	// stale (see extensions.md's "Session replacement lifecycle and footguns"), and a caller's own
-	// `log` reading e.g. event.ctx.ui then throws. `attempt` itself runs fire-and-forget (see the
-	// `void attempt(1, ctx)` call below), so any exception escaping `log` would otherwise surface
-	// as an unhandled rejection that kills the whole host process, not just this one registration
-	// attempt. safeLog swallows that failure so a broken/now-stale log callback can never do that,
-	// and so every terminal branch still reaches its own settle() call.
+	// Observer failures are contained so diagnostics cannot disrupt registration or host lifetime.
 	function safeLog(event: VehicleReadyEvent): void {
 		try {
 			options.log?.(event);
@@ -146,12 +147,14 @@ export function registerVehicleToolsWhenReady(
 		}
 	}
 
-	async function attempt(attemptNumber: number, ctx: ExtensionContext, totalStartedAt: number): Promise<void> {
+	async function attempt(attemptNumber: number, ctx: ExtensionContext, totalStartedAt: number, generation: number): Promise<void> {
+		if (!isCurrentSession(generation)) return;
 		let client: Parameters<typeof deps.registerVehicleTools>[1] | undefined;
 		let resolutionFailed = false;
 		const resolutionStartedAt = performance.now();
 		try {
 			client = await resolveClient();
+			if (!isCurrentSession(generation)) return;
 			safeTiming({
 				phase: "client-resolution",
 				outcome: client ? "available" : "unavailable",
@@ -161,6 +164,7 @@ export function registerVehicleToolsWhenReady(
 				ctx,
 			});
 		} catch (error) {
+			if (!isCurrentSession(generation)) return;
 			safeTiming({
 				phase: "client-resolution",
 				outcome: "failed",
@@ -177,6 +181,7 @@ export function registerVehicleToolsWhenReady(
 			const registrationStartedAt = performance.now();
 			try {
 				const registered = await deps.registerVehicleTools(pi, client, options);
+				if (!isCurrentSession(generation)) return;
 				safeTiming({
 					phase: "registration",
 					outcome: "registered",
@@ -194,9 +199,10 @@ export function registerVehicleToolsWhenReady(
 					ctx,
 				});
 				safeLog({ kind: "registered", attempt: attemptNumber, ctx });
-				settle(registered);
+				settleOnce(registered);
 				return;
 			} catch (error) {
+				if (!isCurrentSession(generation)) return;
 				safeTiming({
 					phase: "registration",
 					outcome: "failed",
@@ -221,11 +227,12 @@ export function registerVehicleToolsWhenReady(
 				ctx,
 			});
 			safeLog({ kind: "exhausted", attempts, ctx });
-			settle(undefined);
+			settleOnce(undefined);
 			return;
 		}
 		const delayStartedAt = performance.now();
 		await sleep(readyRetryDelayMs(attemptNumber, options.retry));
+		if (!isCurrentSession(generation)) return;
 		safeTiming({
 			phase: "retry-delay",
 			outcome: "slept",
@@ -234,11 +241,16 @@ export function registerVehicleToolsWhenReady(
 			durationMs: Math.max(0, performance.now() - delayStartedAt),
 			ctx,
 		});
-		await attempt(attemptNumber + 1, ctx, totalStartedAt);
+		await attempt(attemptNumber + 1, ctx, totalStartedAt, generation);
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		void attempt(1, ctx, performance.now());
+		const generation = ++sessionGeneration;
+		void attempt(1, ctx, performance.now(), generation);
+	});
+	pi.on("session_shutdown", () => {
+		sessionGeneration++;
+		settleOnce(undefined);
 	});
 
 	return done;
