@@ -20,8 +20,10 @@ describe("classifyVehicleOperationSafety", () => {
 		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "destructive" })).toBe("ask");
 	});
 
-	test("ask for open-world too, matching DEFAULT_APPROVAL_EFFECTS", () => {
-		expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect: "open-world" })).toBe("ask");
+	test("asks for open-world and external-write by default", () => {
+		for (const effect of ["open-world", "external-write"] as const) {
+			expect(classifyVehicleOperationSafety({ permissionsSatisfied: true, effect }), effect).toBe("ask");
+		}
 	});
 
 	test("respects a caller-supplied requireApprovalForEffects mirroring a non-default server policy", () => {

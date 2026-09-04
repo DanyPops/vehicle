@@ -52,7 +52,7 @@ interface ApprovalPolicy {
 }
 
 export interface VehicleApprovalPolicyOptions {
-	/** Defaults to DEFAULT_APPROVAL_EFFECTS ([destructive, open-world]) -- the same set vehicle-client-pi historically hardcoded client-side. */
+	/** Defaults to DEFAULT_APPROVAL_EFFECTS ([destructive, open-world, external-write]). */
 	readonly requireApprovalForEffects?: readonly VehicleEffect[];
 	/** Defaults to a fresh HmacApprovalAuthority with a random per-instance secret. */
 	readonly authority?: VehicleApprovalAuthority;
@@ -122,12 +122,10 @@ export class VehicleApprovalPolicyManager {
 	constructor(private readonly collaborators: ApprovalPolicyCollaborators) {}
 
 	/**
-	 * Opt-in only -- never called automatically, so a Vehicle that never
-	 * configures approvals keeps today's exact manifest shape and invoke()
-	 * behavior (no gating at all). Registers the two built-in approval
-	 * events and the vehicle.approval.resolve operation at call time (not
-	 * construction), so they only ever appear in a manifest for a Vehicle
-	 * that actually uses them.
+	 * Records the registry's explicit approval-policy decision and registers
+	 * the approval events plus resolve/status operations. Risky operations fail
+	 * closed until the consumer calls this method; pass `enabled: false` only
+	 * when the deployment deliberately accepts ungated execution.
 	 */
 	configure(options: VehicleApprovalPolicyOptions = {}): void {
 		if (this.policy) throw new Error("Vehicle approval policy is already configured");
@@ -157,6 +155,16 @@ export class VehicleApprovalPolicyManager {
 			...this.policy,
 			...(patch.requireApprovalForEffects ? { requireApprovalForEffects: new Set(patch.requireApprovalForEffects) } : {}),
 			...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+		};
+	}
+
+	/** Returns the explicit policy state projected into the registry manifest. */
+	manifestState(): { readonly status: "enabled" | "disabled"; readonly requireApprovalForEffects: readonly VehicleEffect[] } {
+		const policy = this.policy;
+		if (!policy) throw new Error("Vehicle approval policy is not configured");
+		return {
+			status: policy.enabled ? "enabled" : "disabled",
+			requireApprovalForEffects: [...policy.requireApprovalForEffects],
 		};
 	}
 

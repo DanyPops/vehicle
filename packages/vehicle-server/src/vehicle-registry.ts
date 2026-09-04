@@ -18,6 +18,7 @@ import type {
 import {
 	boundedCauseMessage,
 	boundedValidationDetails,
+	DEFAULT_APPROVAL_EFFECTS,
 	DEFAULT_VEHICLE_PROTOCOL_SUPPORT,
 	isVehicleError,
 	negotiateVehicleProtocol,
@@ -367,20 +368,20 @@ export class VehicleRegistry {
 		this.approvalManager.update(patch);
 	}
 
-	/**
-	 * The single source of truth for "does invoking this operation right now require
-	 * approval" -- consulted by both enforceApprovalGate() (to decide whether to actually
-	 * gate) and manifest() (to report the live answer as VehicleManifestOperation's own
-	 * approvalRequired field, so a client re-fetching the manifest sees a policy change
-	 * with no separate sync mechanism needed). False whenever approvals were never
-	 * configured at all -- see VehicleApprovalPolicyManager.resolvesToApprovalRequired for
-	 * the rest of the logic once they are.
-	 */
+	/** Resolves the live gate decision, including secure defaults before explicit policy configuration. */
 	private resolvesToApprovalRequired(descriptor: VehicleOperationDescriptor): boolean {
-		return this.approvalManager?.resolvesToApprovalRequired(descriptor) ?? false;
+		return (
+			this.approvalManager?.resolvesToApprovalRequired(descriptor) ??
+			descriptor.requiresApproval ??
+			DEFAULT_APPROVAL_EFFECTS.includes(descriptor.effect)
+		);
 	}
 
-	/** No-op when approvals were never configured -- see VehicleApprovalPolicyManager.enforceGate. */
+	/**
+	 * Enforces the configured gate or fails closed with an actionable diagnostic when a
+	 * risky operation has no explicit registry policy. An operation-level
+	 * `requiresApproval: false` remains an explicit, narrow opt-out.
+	 */
 	private enforceApprovalGate(
 		key: string,
 		descriptor: VehicleOperationDescriptor,
@@ -389,7 +390,21 @@ export class VehicleRegistry {
 		operationId: string,
 		presentedCapability: string | undefined,
 	): void {
-		this.approvalManager?.enforceGate(key, descriptor, principal, input, operationId, presentedCapability);
+		if (this.approvalManager) {
+			this.approvalManager.enforceGate(key, descriptor, principal, input, operationId, presentedCapability);
+			return;
+		}
+		if (!this.resolvesToApprovalRequired(descriptor)) return;
+		throw new VehicleError(
+			"approval-policy-unconfigured",
+			`${key} is a risky operation with no explicit approval policy; call configureApprovals() to enable secure defaults or configureApprovals({ enabled: false }) to accept ungated execution for this deployment`,
+			{
+				category: "authorization",
+				operationId,
+				retryable: false,
+				details: { operation: key, effect: descriptor.effect },
+			},
+		);
 	}
 
 	register<Input, Output>(owner: string, binding: VehicleOperationBinding<Input, Output>): void {
@@ -469,9 +484,11 @@ export class VehicleRegistry {
 	}
 
 	manifest(): VehicleManifest {
+		const registrations = [...this.registrations.values()];
+		const configuredPolicy = this.approvalManager?.manifestState();
 		return {
 			...this.identity,
-			operations: [...this.registrations.values()].map((registration) => {
+			operations: registrations.map((registration) => {
 				const key = operationKey(registration.descriptor.name, registration.descriptor.version);
 				const state = this.availability.get(key);
 				return {
@@ -482,6 +499,15 @@ export class VehicleRegistry {
 				};
 			}),
 			events: this.eventPubSub.descriptors(),
+			approvalPolicy: configuredPolicy
+				? { ...configuredPolicy, unconfiguredRiskyOperations: [] }
+				: {
+						status: "unconfigured",
+						requireApprovalForEffects: [...DEFAULT_APPROVAL_EFFECTS],
+						unconfiguredRiskyOperations: registrations
+							.filter((registration) => this.resolvesToApprovalRequired(registration.descriptor))
+							.map((registration) => operationKey(registration.descriptor.name, registration.descriptor.version)),
+					},
 		};
 	}
 

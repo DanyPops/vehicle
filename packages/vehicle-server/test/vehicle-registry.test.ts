@@ -232,6 +232,7 @@ describe("VehicleRegistry", () => {
 			...ECHO_OPTIONS,
 			name: "test.keyed-echo",
 			effect: "external-write",
+			requiresApproval: false,
 			idempotency: { mode: "keyed", retentionMs: 60_000 },
 		});
 		const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
@@ -655,12 +656,31 @@ describe("VehicleRegistry events", () => {
 });
 
 describe("VehicleRegistry approval gate", () => {
-	it("never gates anything unless configureApprovals() is called -- destructive/open-world run freely by default", async () => {
+	it("fails closed when a risky operation has no approval decision", async () => {
 		const registry = destructiveEchoRegistry();
+		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
+			code: "approval-policy-unconfigured",
+			category: "authorization",
+			details: { operation: "test.destructive-echo@1", effect: "destructive" },
+		});
+		expect(registry.manifest()).toMatchObject({
+			approvalPolicy: {
+				status: "unconfigured",
+				requireApprovalForEffects: ["destructive", "open-world", "external-write"],
+				unconfiguredRiskyOperations: ["test.destructive-echo@1"],
+			},
+			events: [],
+		});
+	});
+
+	it("allows an explicit deployment-wide approval opt-out", async () => {
+		const registry = destructiveEchoRegistry();
+		registry.configureApprovals({ enabled: false });
+
 		await expect(registry.invoke("test.destructive-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).resolves.toEqual({
 			echoed: "go",
 		});
-		expect(registry.manifest().events).toEqual([]);
+		expect(registry.manifest().approvalPolicy).toMatchObject({ status: "disabled", unconfiguredRiskyOperations: [] });
 	});
 
 	it("configureApprovals() twice throws", () => {
@@ -839,14 +859,14 @@ describe("VehicleRegistry approval gate", () => {
 		).rejects.toMatchObject({ code: "not-found" });
 	});
 
-	it("requireApprovalForEffects is configurable per deployment -- can gate external-write too, and leaves read/local-write alone", async () => {
+	it("gates external writes by default while leaving read and local-write operations alone", async () => {
 		const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
 		const writeOp = defineVehicleOperation({ ...ECHO_OPTIONS, name: "test.write-echo", effect: "external-write" });
 		registry.register(
 			"echo-provider",
 			bindVehicleOperation(writeOp, () => async ({ input }) => ({ echoed: input.value })),
 		);
-		registry.configureApprovals({ requireApprovalForEffects: ["external-write"] });
+		registry.configureApprovals();
 
 		await expect(registry.invoke("test.write-echo", 1, { value: "go" }, { permissions: ["test:echo"] })).rejects.toMatchObject({
 			code: "approval-required",
@@ -874,17 +894,20 @@ describe("VehicleRegistry approval gate", () => {
 		});
 	});
 
-	it("an operation's own requiresApproval: false exempts it even though its effect is in the configured gated set", async () => {
+	it("an operation's own requiresApproval: false is an explicit narrow opt-out", async () => {
 		const registry = new VehicleRegistry({ name: "test", version: "1", description: "Test." });
 		const op = defineVehicleOperation({ ...ECHO_OPTIONS, name: "test.override-exempt", effect: "destructive", requiresApproval: false });
 		registry.register(
 			"echo-provider",
 			bindVehicleOperation(op, () => async ({ input }) => ({ echoed: input.value })),
 		);
-		registry.configureApprovals();
 
 		await expect(registry.invoke("test.override-exempt", 1, { value: "go" }, { permissions: ["test:echo"] })).resolves.toEqual({
 			echoed: "go",
+		});
+		expect(registry.manifest()).toMatchObject({
+			approvalPolicy: { status: "unconfigured", unconfiguredRiskyOperations: [] },
+			operations: [expect.objectContaining({ name: "test.override-exempt", approvalRequired: false })],
 		});
 	});
 
@@ -899,8 +922,12 @@ describe("VehicleRegistry approval gate", () => {
 
 		expect(registry.manifest().operations.map((op) => [op.name, op.approvalRequired])).toEqual([
 			["test.echo", false],
-			["test.destructive-echo", false],
+			["test.destructive-echo", true],
 		]);
+		expect(registry.manifest().approvalPolicy).toMatchObject({
+			status: "unconfigured",
+			unconfiguredRiskyOperations: ["test.destructive-echo@1"],
+		});
 
 		registry.configureApprovals();
 		expect(

@@ -27,8 +27,8 @@ function isVehiclePrincipal(value: unknown): value is VehiclePrincipal {
 	return typeof candidate["claims"] === "object" && candidate["claims"] !== null && !Array.isArray(candidate["claims"]);
 }
 
-/** Set once at registry-configuration time (VehicleRegistry.configureApprovals()); never on a per-invoke basis. */
-export const DEFAULT_APPROVAL_EFFECTS: readonly VehicleEffect[] = ["destructive", "open-world"];
+/** Secure default applied when a registry configures approvals and when an unconfigured registry diagnoses risky operations. */
+export const DEFAULT_APPROVAL_EFFECTS: readonly VehicleEffect[] = ["destructive", "open-world", "external-write"];
 
 /**
  * The name VehicleRegistry.configureApprovals() registers its built-in

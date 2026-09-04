@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { vehicleApprovalRequestedEvent, vehicleApprovalResolvedEvent } from "../../src/approvals/approval.ts";
+import { DEFAULT_APPROVAL_EFFECTS, vehicleApprovalRequestedEvent, vehicleApprovalResolvedEvent } from "../../src/approvals/approval.ts";
 
 const VALID_HASH = "a".repeat(64);
 
@@ -15,6 +15,12 @@ function validRequest(overrides: Record<string, unknown> = {}) {
 		...overrides,
 	};
 }
+
+describe("approval defaults", () => {
+	it("covers every consequential effect", () => {
+		expect(DEFAULT_APPROVAL_EFFECTS).toEqual(["destructive", "open-world", "external-write"]);
+	});
+});
 
 describe("vehicleApprovalRequestedEvent payload validation", () => {
 	it("accepts a well-formed request payload", () => {
