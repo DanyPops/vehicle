@@ -6,6 +6,7 @@ import { openVehicleMetricsStore } from "../src/vehicle-metrics-store.ts";
 import { registerVehicleMetricsOperations } from "../src/vehicle-metrics-operations.ts";
 
 const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 262_144 };
+const RECORD_CLIENT_EVENT_PERMISSION = "vehicle:metrics:record-client-event";
 
 function wiredRegistry() {
 	const registry = new VehicleRegistry({ name: "test-vehicle", version: "1", description: "Test." });
@@ -20,9 +21,12 @@ describe("registerVehicleMetricsOperations", () => {
 		const { registry } = wiredRegistry();
 		const manifest = registry.manifest();
 		const query = manifest.operations.find((op) => op.name === "metrics.query");
+		const queryVersions = manifest.operations.filter((op) => op.name === "metrics.query").map((op) => op.version);
 		const record = manifest.operations.find((op) => op.name === "metrics.recordClientEvent");
 		expect(query?.effect).toBe("read");
+		expect(queryVersions).toEqual([1, 2]);
 		expect(record?.effect).toBe("local-write");
+		expect(record?.permissions).toEqual([RECORD_CLIENT_EVENT_PERMISSION]);
 	});
 
 	it("metrics.query is discoverable and callable, and reflects invocations recorded directly against the store", async () => {
@@ -38,17 +42,50 @@ describe("registerVehicleMetricsOperations", () => {
 
 	it("metrics.query supports groupBy and time-range filters through the real operation call", async () => {
 		const { registry, store } = wiredRegistry();
-		store.record({ source: "server", vehicleName: "test-vehicle", toolName: "tasks.create", outcome: "success", ts: 1_000 });
-		store.record({ source: "server", vehicleName: "test-vehicle", toolName: "tasks.create", outcome: "failure", ts: 2_000 });
+		const now = Date.now();
+		store.record({ source: "server", vehicleName: "test-vehicle", toolName: "tasks.create", outcome: "success", ts: now - 1_000 });
+		store.record({ source: "server", vehicleName: "test-vehicle", toolName: "tasks.create", outcome: "failure", ts: now });
 
-		const grouped = (await registry.invoke("metrics.query", 1, { toolName: "tasks.create", groupBy: ["toolName"] }, { permissions: [] })) as {
-			key: { toolName: string };
-			count: number;
-		}[];
+		const grouped = (await registry.invoke(
+			"metrics.query",
+			1,
+			{ toolName: "tasks.create", groupBy: ["toolName"], limit: 10 },
+			{ permissions: [] },
+		)) as { key: { toolName: string }; count: number }[];
 		expect(grouped.find((row) => row.key.toolName === "tasks.create")?.count).toBe(2);
 
-		const ranged = (await registry.invoke("metrics.query", 1, { toolName: "tasks.create", since: 1_500 }, { permissions: [] })) as { count: number }[];
+		const ranged = (await registry.invoke("metrics.query", 1, { toolName: "tasks.create", since: now - 500 }, { permissions: [] })) as {
+			count: number;
+		}[];
 		expect(ranged[0]?.count).toBe(1);
+	});
+
+	it("metrics.query bounds groups and exposes truncation, error codes, and latency buckets", async () => {
+		const registry = new VehicleRegistry({ name: "test-vehicle", version: "1", description: "Test." });
+		const store = openVehicleMetricsStore(":memory:", Date.now, { queryDefaultLimit: 2, queryMaxLimit: 3 });
+		registerVehicleMetricsOperations(registry, store, "test-vehicle");
+		for (const [toolName, durationMs, errorCode] of [
+			["a", 5, undefined],
+			["b", 50, "not-found"],
+			["c", 1_500, "upstream-busy"],
+		] as const) {
+			store.record({ source: "server", vehicleName: "test-vehicle", toolName, outcome: errorCode ? "failure" : "success", durationMs, errorCode });
+		}
+
+		const result = (await registry.invoke("metrics.query", 2, { groupBy: ["toolName"], limit: 2 }, { permissions: [] })) as {
+			rows: { durationHistogram: Record<string, number> }[];
+			limit: number;
+			truncated: boolean;
+		};
+		expect(result.limit).toBe(2);
+		expect(result.truncated).toBe(true);
+		expect(result.rows).toHaveLength(2);
+		expect(result.rows[0]?.durationHistogram).toBeDefined();
+
+		const failures = (await registry.invoke("metrics.query", 2, { groupBy: ["errorCode"], limit: 3 }, { permissions: [] })) as {
+			rows: { key: { errorCode: string } }[];
+		};
+		expect(failures.rows.map((row) => row.key.errorCode)).toEqual(["", "not-found", "upstream-busy"]);
 	});
 
 	it("metrics.query rejects an invalid source filter -- enforced by the input schema's own enum, before the handler ever runs", async () => {
@@ -58,30 +95,60 @@ describe("registerVehicleMetricsOperations", () => {
 
 	it("metrics.recordClientEvent records a real client-reported shell meta-tool call, source: client", async () => {
 		const { registry, store } = wiredRegistry();
-		await registry.invoke("metrics.recordClientEvent", 1, { toolName: "tools_list", outcome: "success", durationMs: 5 }, { permissions: [] });
+		await registry.invoke(
+			"metrics.recordClientEvent",
+			1,
+			{ toolName: "tools_list", outcome: "success", durationMs: 5 },
+			{ permissions: [RECORD_CLIENT_EVENT_PERMISSION] },
+		);
 
 		const rows = store.query({ source: "client" });
 		expect(rows[0]?.count).toBe(1);
 	});
 
+	it("metrics.recordClientEvent requires its dedicated permission", async () => {
+		const { registry } = wiredRegistry();
+		await expect(
+			registry.invoke("metrics.recordClientEvent", 1, { toolName: "tools_list", outcome: "success" }, { permissions: [] }),
+		).rejects.toThrow(/requires permissions/);
+	});
+
 	it("metrics.recordClientEvent rejects a tool name outside the known shell-tool enum", async () => {
 		const { registry } = wiredRegistry();
-		await expect(registry.invoke("metrics.recordClientEvent", 1, { toolName: "papyrus:tasks.create", outcome: "success" }, { permissions: [] })).rejects.toThrow();
+		await expect(
+			registry.invoke(
+				"metrics.recordClientEvent",
+				1,
+				{ toolName: "papyrus:tasks.create", outcome: "success" },
+				{ permissions: [RECORD_CLIENT_EVENT_PERMISSION] },
+			),
+		).rejects.toThrow();
 	});
 
 	it("metrics.recordClientEvent rejects a missing required field", async () => {
 		const { registry } = wiredRegistry();
-		await expect(registry.invoke("metrics.recordClientEvent", 1, { toolName: "tools_list" }, { permissions: [] })).rejects.toThrow();
+		await expect(
+			registry.invoke("metrics.recordClientEvent", 1, { toolName: "tools_list" }, { permissions: [RECORD_CLIENT_EVENT_PERMISSION] }),
+		).rejects.toThrow();
 	});
 
-	it("metrics.recordClientEvent falls back to the real invocation's own callerSessionId/callerProjectRoot when the input omits them", async () => {
+	it("metrics.recordClientEvent rejects forged input identity and derives accepted identity from invocation context", async () => {
 		const { registry, store } = wiredRegistry();
-		await registry.invoke(
-			"metrics.recordClientEvent",
-			1,
-			{ toolName: "tools_man", outcome: "success" },
-			{ permissions: [], callerSessionId: "session-9", callerProjectRoot: "/home/x" },
-		);
+		const invocationContext = {
+			permissions: [RECORD_CLIENT_EVENT_PERMISSION],
+			callerSessionId: "session-9",
+			callerProjectRoot: "/real/private/root",
+			principal: { id: "principal-1", permissions: [RECORD_CLIENT_EVENT_PERMISSION] },
+		};
+		await expect(
+			registry.invoke(
+				"metrics.recordClientEvent",
+				1,
+				{ toolName: "tools_man", outcome: "success", callerSessionId: "forged-session", callerProjectRoot: "/forged/private/root" },
+				invocationContext,
+			),
+		).rejects.toThrow(/invalid input/);
+		await registry.invoke("metrics.recordClientEvent", 1, { toolName: "tools_man", outcome: "success" }, invocationContext);
 		// 2, not 1: the middleware also auto-records this very invoke() call itself (toolName:
 		// "metrics.recordClientEvent", source: "server") under the same real callerSessionId --
 		// filtering to source: "client" isolates the handler's own explicit report.

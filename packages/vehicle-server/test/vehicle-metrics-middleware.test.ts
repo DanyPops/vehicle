@@ -56,10 +56,11 @@ describe("createVehicleMetricsMiddleware", () => {
 		const rows = store.query({});
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({ count: 1, successCount: 0, failureCount: 1 });
+		expect(store.query({ groupBy: ["errorCode"] })[0]?.key.errorCode).toBe("handler-failed");
 		store.close();
 	});
 
-	it("captures callerSessionId/callerProjectRoot/principalId from the real invocation options", async () => {
+	it("captures session and principal identity while omitting the project root", async () => {
 		const store = openVehicleMetricsStore(":memory:");
 		const registry = registryWithEcho();
 		registry.useExecutionMiddleware(createVehicleMetricsMiddleware(store, "test-vehicle"));
@@ -82,6 +83,7 @@ describe("createVehicleMetricsMiddleware", () => {
 				throw new Error("disk full");
 			},
 			query: () => [],
+			queryResult: () => ({ rows: [], limit: 100, truncated: false }),
 			close: () => {},
 		};
 		const registry = registryWithEcho();
@@ -97,6 +99,7 @@ describe("createVehicleMetricsMiddleware", () => {
 				throw new Error("disk full");
 			},
 			query: () => [],
+			queryResult: () => ({ rows: [], limit: 100, truncated: false }),
 			close: () => {},
 		};
 		const registry = registryWithEcho();

@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { queryVehicleMetrics, resolveVehicleMetricsPath } from "../src/fleet/metrics.js";
+import { queryVehicleMetrics, queryVehicleMetricsResult, resolveVehicleMetricsPath } from "../src/fleet/metrics.js";
 
 /**
  * Best-effort recursive delete -- on Windows, a just-closed bun:sqlite Database can leave its
@@ -37,7 +37,6 @@ function seedMetricsDb(
 		errorCode?: string;
 		durationMs?: number;
 		callerSessionId?: string;
-		callerProjectRoot?: string;
 		principalId?: string;
 	}[],
 ): void {
@@ -54,14 +53,13 @@ function seedMetricsDb(
 			error_code TEXT,
 			duration_ms INTEGER,
 			caller_session_id TEXT,
-			caller_project_root TEXT,
 			principal_id TEXT
 		)
 	`);
 	const insert = db.prepare(`
 		INSERT INTO vehicle_tool_invocations
-			(ts, source, vehicle_name, tool_name, operation_version, outcome, error_code, duration_ms, caller_session_id, caller_project_root, principal_id)
-		VALUES ($ts, $source, $vehicleName, $toolName, $operationVersion, $outcome, $errorCode, $durationMs, $callerSessionId, $callerProjectRoot, $principalId)
+			(ts, source, vehicle_name, tool_name, operation_version, outcome, error_code, duration_ms, caller_session_id, principal_id)
+		VALUES ($ts, $source, $vehicleName, $toolName, $operationVersion, $outcome, $errorCode, $durationMs, $callerSessionId, $principalId)
 	`);
 	for (const row of rows) {
 		insert.run({
@@ -74,7 +72,6 @@ function seedMetricsDb(
 			$errorCode: row.errorCode ?? null,
 			$durationMs: row.durationMs ?? null,
 			$callerSessionId: row.callerSessionId ?? null,
-			$callerProjectRoot: row.callerProjectRoot ?? null,
 			$principalId: row.principalId ?? null,
 		});
 	}
@@ -122,7 +119,8 @@ describe("queryVehicleMetrics", () => {
 				{ ts: 2_000, source: "server", vehicleName: "papyrus", toolName: "tasks.create", outcome: "failure", durationMs: 20 },
 			]);
 			const rows = queryVehicleMetrics(path, {});
-			expect(rows).toEqual([{ key: {}, count: 2, successCount: 1, failureCount: 1, avgDurationMs: 15 }]);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({ key: {}, count: 2, successCount: 1, failureCount: 1, avgDurationMs: 15 });
 		} finally {
 			removeTestDir(dir);
 		}
@@ -157,9 +155,37 @@ describe("queryVehicleMetrics", () => {
 				{ ts: 3, source: "server", vehicleName: "papyrus", toolName: "docs.list", outcome: "failure" },
 			]);
 			const byTool = queryVehicleMetrics(path, { groupBy: ["toolName"] });
+			// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
 			const byToolMap = new Map(byTool.map((row) => [row.key["toolName"], row]));
 			expect(byToolMap.get("tasks.create")).toMatchObject({ count: 2, successCount: 2 });
 			expect(byToolMap.get("docs.list")).toMatchObject({ count: 1, failureCount: 1 });
+		} finally {
+			removeTestDir(dir);
+		}
+	});
+
+	it("bounds grouped output and exposes truncation, error groups, and latency buckets", () => {
+		const dir = mkdtempSync(join(tmpdir(), "armada-metrics-"));
+		const path = join(dir, "metrics.sqlite");
+		try {
+			seedMetricsDb(path, [
+				{ ts: 1, source: "server", vehicleName: "v", toolName: "a", outcome: "success", durationMs: 5 },
+				{ ts: 2, source: "server", vehicleName: "v", toolName: "b", outcome: "failure", errorCode: "not-found", durationMs: 1_500 },
+				{ ts: 3, source: "server", vehicleName: "v", toolName: "c", outcome: "failure", errorCode: "busy", durationMs: 500 },
+			]);
+			const result = queryVehicleMetricsResult(path, { groupBy: ["toolName"], limit: 2 });
+			expect(result).toMatchObject({ limit: 2, truncated: true });
+			expect(result.rows).toHaveLength(2);
+			expect(queryVehicleMetricsResult(path, {}).rows[0]?.durationHistogram).toEqual({
+				le10: 1,
+				le50: 1,
+				le100: 1,
+				le500: 2,
+				le1000: 2,
+				gt1000: 1,
+			});
+			// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
+			expect(queryVehicleMetricsResult(path, { groupBy: ["errorCode"] }).rows.map((row) => row.key["errorCode"])).toEqual(["", "busy", "not-found"]);
 		} finally {
 			removeTestDir(dir);
 		}

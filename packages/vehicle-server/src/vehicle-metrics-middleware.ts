@@ -43,7 +43,6 @@ export function createVehicleMetricsMiddleware(store: VehicleMetricsStore, vehic
 					outcome: "success",
 					durationMs: Date.now() - start,
 					callerSessionId: request.callerSessionId,
-					callerProjectRoot: request.callerProjectRoot,
 					principalId: request.principal?.id,
 				});
 				return result;
@@ -57,7 +56,6 @@ export function createVehicleMetricsMiddleware(store: VehicleMetricsStore, vehic
 					errorCode: isVehicleError(error) ? error.code : undefined,
 					durationMs: Date.now() - start,
 					callerSessionId: request.callerSessionId,
-					callerProjectRoot: request.callerProjectRoot,
 					principalId: request.principal?.id,
 				});
 				throw error;

@@ -43,7 +43,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && node -e \"if(process.platform!=='win32')require('node:fs').chmodSync('dist/cli.js',0o755)\"",
     "typecheck": "tsc --noEmit",
     "test": "bun run build && bun test test",
     "check": "bun run build && bun run typecheck && bun run test",

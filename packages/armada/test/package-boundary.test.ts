@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,9 @@ describe("published package boundary", () => {
 	it("exports the CLI, testing harness, and executable entry point", async () => {
 		expect(runCli).toBeTypeOf("function");
 		expect(createArmadaTestHarness).toBeTypeOf("function");
-		expect(await readFile(new URL("../dist/cli.js", import.meta.url), "utf8")).toMatch(/^#!\/usr\/bin\/env node/);
+		const cliUrl = new URL("../dist/cli.js", import.meta.url);
+		expect(await readFile(cliUrl, "utf8")).toMatch(/^#!\/usr\/bin\/env node/);
+		if (process.platform !== "win32") expect((await stat(cliUrl)).mode & 0o111).not.toBe(0);
 	});
 
 	it("executes the built CLI through an installed bin symlink", async () => {

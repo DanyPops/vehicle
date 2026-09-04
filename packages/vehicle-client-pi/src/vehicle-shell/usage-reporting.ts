@@ -17,6 +17,7 @@ import type { VehicleClient } from "@danypops/vehicle-core";
 
 const CLIENT_EVENT_OPERATION_NAME = "metrics.recordClientEvent";
 const CLIENT_EVENT_OPERATION_VERSION = 1;
+const CLIENT_EVENT_PERMISSION = "vehicle:metrics:record-client-event";
 
 export type ShellMetaToolName = "tools_list" | "tools_man" | "tools_type";
 
@@ -47,13 +48,12 @@ export async function reportShellToolUsage(
 ): Promise<void> {
 	await Promise.allSettled(
 		targets.map((vehicle) =>
-			vehicle.client.invoke(CLIENT_EVENT_OPERATION_NAME, CLIENT_EVENT_OPERATION_VERSION, {
-				toolName,
-				outcome,
-				durationMs,
-				callerSessionId,
-				callerProjectRoot,
-			}),
+			vehicle.client.invoke(
+				CLIENT_EVENT_OPERATION_NAME,
+				CLIENT_EVENT_OPERATION_VERSION,
+				{ toolName, outcome, durationMs },
+				{ permissions: [CLIENT_EVENT_PERMISSION], callerSessionId, callerProjectRoot },
+			),
 		),
 	);
 }

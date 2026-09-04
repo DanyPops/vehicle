@@ -110,13 +110,15 @@ manages it:
 armada metrics example --json
 armada metrics example --since 2024-01-01T00:00:00Z --until 2024-02-01T00:00:00Z
 armada metrics example --tool tasks.create --source server
-armada metrics example --group-by toolName,outcome
+armada metrics example --group-by toolName,errorCode --limit 100
 ```
 
 `--since`/`--until` accept either epoch milliseconds or an ISO-8601 date
 (`--since` inclusive, `--until` exclusive). `--group-by` accepts a
 comma-separated list of `toolName`, `vehicleName`, `source`,
-`callerSessionId`, `outcome`, `day`, `hour`. Reports "no metrics recorded
+`callerSessionId`, `outcome`, `errorCode`, `day`, `hour`. `--limit` bounds
+grouped output from 1 through 1,000; JSON output includes the effective limit,
+truncation state, and fixed latency buckets. Reports "no metrics recorded
 (yet)" rather than an error for a Vehicle that hasn't opted into metrics or
 has none recorded yet.
 

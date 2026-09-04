@@ -432,19 +432,20 @@ common dead-random-port restart transparent.
 
 ### Approval Gate
 
-`VehicleRegistry.configureApprovals()` is opt-in -- a Vehicle that never calls
-it keeps today's exact `manifest()` shape and `invoke()` behavior (no gating
-at all, no `vehicle.approval.resolve` operation, no `vehicle.approval.*`
-events). Calling it turns on real, verified approval for a configurable set
-of effects:
+A registry must make an explicit approval-policy decision before invoking a
+risky operation. Until `VehicleRegistry.configureApprovals()` is called,
+`destructive`, `open-world`, and `external-write` operations fail closed with
+`approval-policy-unconfigured`; `manifest().approvalPolicy` names every risky
+operation awaiting that decision. Calling `configureApprovals()` enables real,
+verified approval by default. A deployment that deliberately accepts ungated
+execution must say so with `configureApprovals({ enabled: false })`; a reviewed
+single operation can use `requiresApproval: false` as a narrower opt-out.
 
 ```ts
 import { HmacApprovalAuthority } from "@danypops/vehicle-server/approval-authority";
 
 registry.configureApprovals({
-  // Defaults to ["destructive", "open-world"]. A ticketing/PR-facing Vehicle
-  // can add "external-write" without forcing that requirement on every other
-  // Vehicle in the ecosystem.
+  // Defaults to ["destructive", "open-world", "external-write"].
   requireApprovalForEffects: ["destructive", "open-world", "external-write"],
   authority: new HmacApprovalAuthority(), // default if omitted
   timeoutMs: 5 * 60_000, // default: how long a request stays resolvable

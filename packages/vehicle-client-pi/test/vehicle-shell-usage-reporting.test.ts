@@ -12,17 +12,20 @@ function fakeVehicle(name: string, invoke = mock(async () => ({}) as unknown)): 
 }
 
 describe("reportShellToolUsage", () => {
-	it("calls metrics.recordClientEvent@1 on every target, with the given fields", async () => {
+	it("sends event data as input and identity plus permission as invocation context", async () => {
 		const invoke = mock(async () => ({}));
 		await reportShellToolUsage([fakeVehicle("papyrus", invoke)], "tools_list", "success", 42, "session-1", "/home/x");
 		expect(invoke).toHaveBeenCalledTimes(1);
-		expect(invoke).toHaveBeenCalledWith("metrics.recordClientEvent", 1, {
-			toolName: "tools_list",
-			outcome: "success",
-			durationMs: 42,
-			callerSessionId: "session-1",
-			callerProjectRoot: "/home/x",
-		});
+		expect(invoke).toHaveBeenCalledWith(
+			"metrics.recordClientEvent",
+			1,
+			{ toolName: "tools_list", outcome: "success", durationMs: 42 },
+			{
+				permissions: ["vehicle:metrics:record-client-event"],
+				callerSessionId: "session-1",
+				callerProjectRoot: "/home/x",
+			},
+		);
 	});
 
 	it("reports to every target given, not just the first", async () => {

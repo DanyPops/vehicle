@@ -4,12 +4,19 @@ import { lstat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type BenchmarkResult, benchmarkSystemdService, type SystemdBenchmarkRequest } from "./fleet/benchmark.js";
 import { executeCleanup, planDuplicateCleanup } from "./fleet/cleanup.js";
 import { type Diagnostic, diagnostic } from "./fleet/diagnostic.js";
 import { inspectHostProcesses, readVehicleHandles } from "./fleet/host-inspection.js";
 import { decodeArmadaManifest, MAX_MANIFEST_BYTES, type ManifestDecodeOutcome } from "./fleet/manifest.js";
 import { removeManifestVehicle, upsertManifestVehicle } from "./fleet/manifest-store.js";
-import { queryVehicleMetrics, resolveVehicleMetricsPath, type VehicleMetricsGroupDimension, type VehicleMetricsSummaryRow } from "./fleet/metrics.js";
+import {
+	type queryVehicleMetrics,
+	queryVehicleMetricsResult,
+	resolveVehicleMetricsPath,
+	type VehicleMetricsGroupDimension,
+	type VehicleMetricsSummaryRow,
+} from "./fleet/metrics.js";
 import { planFleet } from "./fleet/planner.js";
 import { createHandleReadinessProbe, readVehicleHandleFile } from "./fleet/readiness.js";
 import { reconcileFleet, restartVehicle } from "./fleet/reconciler.js";
@@ -38,9 +45,20 @@ export interface CliDependencies {
 	readonly resolveMetricsPath?: (vehicleName: string) => string;
 	/** Overridable for tests -- defaults to queryVehicleMetrics (fleet/metrics.ts), reading the real SQLite file. */
 	readonly queryMetrics?: (dbPath: string, query: Parameters<typeof queryVehicleMetrics>[1]) => readonly VehicleMetricsSummaryRow[];
+	/** Overridable for tests -- defaults to the Linux/systemd cgroup benchmark implementation. */
+	readonly runBenchmark?: (request: SystemdBenchmarkRequest) => Promise<BenchmarkResult>;
 }
 
-const METRICS_GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = ["toolName", "vehicleName", "source", "callerSessionId", "outcome", "day", "hour"];
+const METRICS_GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = [
+	"toolName",
+	"vehicleName",
+	"source",
+	"callerSessionId",
+	"outcome",
+	"errorCode",
+	"day",
+	"hour",
+];
 
 interface PlanArguments {
 	readonly manifestPath: string;
@@ -53,9 +71,53 @@ interface PlanArguments {
 	readonly tool?: string;
 	readonly source?: "server" | "client";
 	readonly groupBy?: readonly VehicleMetricsGroupDimension[];
+	readonly limit?: number;
+	readonly workloadCommand?: string;
+	readonly workloadArguments?: readonly string[];
+	readonly warmup?: number;
+	readonly repetitions?: number;
+	readonly concurrency?: number;
+	readonly deadlineMs?: number;
+	readonly sampleIntervalMs?: number;
+	readonly maxOutputBytes?: number;
 }
 
 type ArgumentOutcome = { readonly ok: true; readonly arguments: PlanArguments } | { readonly ok: false; readonly diagnostic: Diagnostic };
+
+const BENCHMARK_LIMITS = Object.freeze({
+	warmup: { default: 1, min: 0, max: 20 },
+	repetitions: { default: 5, min: 1, max: 100 },
+	concurrency: { default: 1, min: 1, max: 16 },
+	deadlineMs: { default: 60_000, min: 100, max: 300_000 },
+	sampleIntervalMs: { default: 50, min: 10, max: 1_000 },
+	maxOutputBytes: { default: 65_536, min: 1, max: 1_048_576 },
+});
+const MAX_BENCHMARK_ARGUMENTS = 64;
+const MAX_BENCHMARK_ARGUMENT_BYTES = 4_096;
+
+function parseBoundedInteger(value: string | undefined, name: string, min: number, max: number): number | Diagnostic {
+	const parsed = Number(value);
+	if (!value || !Number.isInteger(parsed) || parsed < min || parsed > max)
+		return diagnostic("CLI_ARGUMENT_INVALID", "error", name, `expected an integer from ${min} through ${max}`);
+	return parsed;
+}
+
+function cliHelp(): string {
+	return [
+		"usage: armada <plan|reconcile|status|doctor|cleanup|upsert|remove|restart|metrics|benchmark> [options]",
+		"",
+		"metrics <vehicle> [--since <time>] [--until <time>] [--tool <name>] [--source <server|client>] [--group-by <dimensions>] [--limit <1-1000>] [--json]",
+		"benchmark <vehicle> --exec <path> [--arg <value> ...] [--manifest <path>] [--json]",
+		`  --warmup <${BENCHMARK_LIMITS.warmup.min}-${BENCHMARK_LIMITS.warmup.max}>`,
+		`  --repetitions <${BENCHMARK_LIMITS.repetitions.min}-${BENCHMARK_LIMITS.repetitions.max}>`,
+		`  --concurrency <${BENCHMARK_LIMITS.concurrency.min}-${BENCHMARK_LIMITS.concurrency.max}>`,
+		`  --deadline-ms <${BENCHMARK_LIMITS.deadlineMs.min}-${BENCHMARK_LIMITS.deadlineMs.max}>`,
+		`  --sample-ms <${BENCHMARK_LIMITS.sampleIntervalMs.min}-${BENCHMARK_LIMITS.sampleIntervalMs.max}>`,
+		`  --max-output-bytes <${BENCHMARK_LIMITS.maxOutputBytes.min}-${BENCHMARK_LIMITS.maxOutputBytes.max}>`,
+		"",
+		"Benchmark output records bounded counters and digests; workload paths, arguments, URLs, and response content are omitted.",
+	].join("\n");
+}
 
 export function defaultManifestPath(
 	platform: NodeJS.Platform = process.platform,
@@ -82,6 +144,15 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 	let tool: string | undefined;
 	let source: "server" | "client" | undefined;
 	let groupBy: readonly VehicleMetricsGroupDimension[] | undefined;
+	let metricsLimit: number | undefined;
+	let workloadCommand: string | undefined;
+	const workloadArguments: string[] = [];
+	let warmup: number | undefined;
+	let repetitions: number | undefined;
+	let concurrency: number | undefined;
+	let deadlineMs: number | undefined;
+	let sampleIntervalMs: number | undefined;
+	let maxOutputBytes: number | undefined;
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index];
 		if (argument === "--json") {
@@ -113,7 +184,10 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			const value = args[index + 1];
 			const parsed = value === undefined ? Number.NaN : Number.isNaN(Number(value)) ? Date.parse(value) : Number(value);
 			if (!value || Number.isNaN(parsed)) {
-				return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", argument, "expected an epoch-ms number or an ISO-8601 date") };
+				return {
+					ok: false,
+					diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", argument, "expected an epoch-ms number or an ISO-8601 date"),
+				};
 			}
 			if (argument === "--since") since = parsed;
 			else until = parsed;
@@ -122,7 +196,8 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 		}
 		if (command === "metrics" && argument === "--tool") {
 			const value = args[index + 1];
-			if (!value) return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_MISSING", "error", "--tool", "a tool/operation name is required") };
+			if (!value)
+				return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_MISSING", "error", "--tool", "a tool/operation name is required") };
 			tool = value;
 			index++;
 			continue;
@@ -136,6 +211,13 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			index++;
 			continue;
 		}
+		if (command === "metrics" && argument === "--limit") {
+			const parsedValue = parseBoundedInteger(args[index + 1], "--limit", 1, 1_000);
+			if (typeof parsedValue !== "number") return { ok: false, diagnostic: parsedValue };
+			metricsLimit = parsedValue;
+			index++;
+			continue;
+		}
 		if (command === "metrics" && argument === "--group-by") {
 			const value = args[index + 1];
 			const requested = (value ?? "").split(",").filter((entry) => entry.length > 0);
@@ -143,15 +225,70 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			if (!value || requested.length === 0 || invalid !== undefined) {
 				return {
 					ok: false,
-					diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", "--group-by", `expected a comma-separated list of: ${METRICS_GROUP_DIMENSIONS.join(", ")}`),
+					diagnostic: diagnostic(
+						"CLI_ARGUMENT_INVALID",
+						"error",
+						"--group-by",
+						`expected a comma-separated list of: ${METRICS_GROUP_DIMENSIONS.join(", ")}`,
+					),
 				};
 			}
 			groupBy = requested as VehicleMetricsGroupDimension[];
 			index++;
 			continue;
 		}
+		if (command === "benchmark" && argument === "--exec") {
+			const value = args[index + 1];
+			if (!value) return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_MISSING", "error", "--exec", "an executable path is required") };
+			if (Buffer.byteLength(value) > MAX_BENCHMARK_ARGUMENT_BYTES)
+				return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", "--exec", "executable path is too long") };
+			workloadCommand = value;
+			index++;
+			continue;
+		}
+		if (command === "benchmark" && argument === "--arg") {
+			const value = args[index + 1];
+			if (value === undefined)
+				return { ok: false, diagnostic: diagnostic("CLI_ARGUMENT_MISSING", "error", "--arg", "a value is required") };
+			if (workloadArguments.length >= MAX_BENCHMARK_ARGUMENTS || Buffer.byteLength(value) > MAX_BENCHMARK_ARGUMENT_BYTES)
+				return {
+					ok: false,
+					diagnostic: diagnostic("CLI_ARGUMENT_INVALID", "error", "--arg", "workload arguments exceed the configured bounds"),
+				};
+			workloadArguments.push(value);
+			index++;
+			continue;
+		}
 		if (
-			(command === "cleanup" || command === "remove" || command === "restart" || command === "metrics") &&
+			command === "benchmark" &&
+			["--warmup", "--repetitions", "--concurrency", "--deadline-ms", "--sample-ms", "--max-output-bytes"].includes(argument ?? "")
+		) {
+			const key =
+				argument === "--warmup"
+					? "warmup"
+					: argument === "--repetitions"
+						? "repetitions"
+						: argument === "--concurrency"
+							? "concurrency"
+							: argument === "--deadline-ms"
+								? "deadlineMs"
+								: argument === "--sample-ms"
+									? "sampleIntervalMs"
+									: "maxOutputBytes";
+			const limit = BENCHMARK_LIMITS[key];
+			const parsedValue = parseBoundedInteger(args[index + 1], argument ?? "", limit.min, limit.max);
+			if (typeof parsedValue !== "number") return { ok: false, diagnostic: parsedValue };
+			if (key === "warmup") warmup = parsedValue;
+			else if (key === "repetitions") repetitions = parsedValue;
+			else if (key === "concurrency") concurrency = parsedValue;
+			else if (key === "deadlineMs") deadlineMs = parsedValue;
+			else if (key === "sampleIntervalMs") sampleIntervalMs = parsedValue;
+			else maxOutputBytes = parsedValue;
+			index++;
+			continue;
+		}
+		if (
+			(command === "cleanup" || command === "remove" || command === "restart" || command === "metrics" || command === "benchmark") &&
 			vehicle === undefined &&
 			argument !== undefined &&
 			!argument.startsWith("--")
@@ -174,6 +311,15 @@ function parsePlanArguments(args: readonly string[], dependencies: CliDependenci
 			...(tool === undefined ? {} : { tool }),
 			...(source === undefined ? {} : { source }),
 			...(groupBy === undefined ? {} : { groupBy }),
+			...(metricsLimit === undefined ? {} : { limit: metricsLimit }),
+			...(workloadCommand === undefined ? {} : { workloadCommand }),
+			...(workloadArguments.length === 0 ? {} : { workloadArguments }),
+			...(warmup === undefined ? {} : { warmup }),
+			...(repetitions === undefined ? {} : { repetitions }),
+			...(concurrency === undefined ? {} : { concurrency }),
+			...(deadlineMs === undefined ? {} : { deadlineMs }),
+			...(sampleIntervalMs === undefined ? {} : { sampleIntervalMs }),
+			...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
 		},
 	};
 }
@@ -206,6 +352,10 @@ function writeDiagnostics(diagnostics: readonly Diagnostic[], json: boolean, io:
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies): Promise<number> {
 	const [command, ...rest] = args;
+	if (command === "help" || command === "--help" || (command === "benchmark" && rest[0] === "--help")) {
+		dependencies.io.stdout(`${cliHelp()}\n`);
+		return 0;
+	}
 	if (
 		command !== "plan" &&
 		command !== "reconcile" &&
@@ -215,17 +365,11 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 		command !== "upsert" &&
 		command !== "remove" &&
 		command !== "restart" &&
-		command !== "metrics"
+		command !== "metrics" &&
+		command !== "benchmark"
 	) {
 		writeDiagnostics(
-			[
-				diagnostic(
-					"CLI_COMMAND_UNKNOWN",
-					"error",
-					command ?? "",
-					"usage: armada <plan|reconcile|status|doctor|cleanup|upsert|remove|restart|metrics> [--manifest <path>] [--json]",
-				),
-			],
+			[diagnostic("CLI_COMMAND_UNKNOWN", "error", command ?? "", cliHelp().split("\n", 1)[0] ?? "unknown command")],
 			false,
 			dependencies.io,
 		);
@@ -289,18 +433,24 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 			);
 			return 2;
 		}
-		const resolvePath = dependencies.resolveMetricsPath ?? ((name: string) => resolveVehicleMetricsPath(name, dependencies.platform, dependencies.env, dependencies.home));
-		const query = dependencies.queryMetrics ?? queryVehicleMetrics;
+		const resolvePath =
+			dependencies.resolveMetricsPath ??
+			((name: string) => resolveVehicleMetricsPath(name, dependencies.platform, dependencies.env, dependencies.home));
 		const dbPath = resolvePath(parsed.arguments.vehicle);
-		const rows = query(dbPath, {
+		const metricsQuery = {
 			...(parsed.arguments.since === undefined ? {} : { since: parsed.arguments.since }),
 			...(parsed.arguments.until === undefined ? {} : { until: parsed.arguments.until }),
 			...(parsed.arguments.tool === undefined ? {} : { toolName: parsed.arguments.tool }),
 			...(parsed.arguments.source === undefined ? {} : { source: parsed.arguments.source }),
 			...(parsed.arguments.groupBy === undefined ? {} : { groupBy: parsed.arguments.groupBy }),
-		});
+			...(parsed.arguments.limit === undefined ? {} : { limit: parsed.arguments.limit }),
+		};
+		const result = dependencies.queryMetrics
+			? { rows: dependencies.queryMetrics(dbPath, metricsQuery), limit: parsed.arguments.limit ?? 100, truncated: false }
+			: queryVehicleMetricsResult(dbPath, metricsQuery);
+		const rows = result.rows;
 		if (parsed.arguments.json) {
-			dependencies.io.stdout(`${JSON.stringify({ ok: true, vehicle: parsed.arguments.vehicle, rows })}\n`);
+			dependencies.io.stdout(`${JSON.stringify({ ok: true, vehicle: parsed.arguments.vehicle, ...result })}\n`);
 			return 0;
 		}
 		if (rows.length === 0) {
@@ -312,15 +462,82 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 				.map(([dimension, value]) => `${dimension}=${value}`)
 				.join(" ");
 			const avgText = row.avgDurationMs === null ? "" : `, avg ${Math.round(row.avgDurationMs)}ms`;
+			const histogramText = row.durationHistogram
+				? `, latency <=10/50/100/500/1000/>1000ms ${row.durationHistogram.le10}/${row.durationHistogram.le50}/${row.durationHistogram.le100}/${row.durationHistogram.le500}/${row.durationHistogram.le1000}/${row.durationHistogram.gt1000}`
+				: "";
 			const prefix = keyText.length > 0 ? `${keyText}: ` : "";
-			dependencies.io.stdout(`${prefix}${row.count} call(s) (${row.successCount} success, ${row.failureCount} failure)${avgText}\n`);
+			dependencies.io.stdout(`${prefix}${row.count} call(s) (${row.successCount} success, ${row.failureCount} failure)${avgText}${histogramText}\n`);
 		}
+		if (result.truncated) dependencies.io.stdout(`Showing ${rows.length} groups; increase --limit to inspect more (maximum 1000).\n`);
 		return 0;
 	}
 	const decoded = await readManifest(parsed.arguments.manifestPath);
 	if (!decoded.ok) {
 		writeDiagnostics(decoded.diagnostics, parsed.arguments.json, dependencies.io);
 		return 1;
+	}
+	if (command === "benchmark") {
+		const vehicle = decoded.manifest.vehicles.find((item) => item.name === parsed.arguments.vehicle);
+		if (!vehicle || !parsed.arguments.workloadCommand) {
+			writeDiagnostics(
+				[diagnostic("BENCHMARK_INPUT_INVALID", "error", "/benchmark", "benchmark requires a declared Vehicle name and --exec workload")],
+				parsed.arguments.json,
+				dependencies.io,
+			);
+			return 2;
+		}
+		if (dependencies.manager.kind !== "systemd") {
+			writeDiagnostics(
+				[diagnostic("BENCHMARK_UNSUPPORTED", "error", "/benchmark", "cgroup benchmarking requires a systemd user service")],
+				parsed.arguments.json,
+				dependencies.io,
+			);
+			return 1;
+		}
+		const generated = strategyForNativeManager("systemd").generateDescriptor(vehicle);
+		if (!generated.ok) {
+			writeDiagnostics(generated.diagnostics, parsed.arguments.json, dependencies.io);
+			return 1;
+		}
+		const request: SystemdBenchmarkRequest = {
+			vehicle: vehicle.name,
+			unit: generated.descriptor.identity,
+			command: parsed.arguments.workloadCommand,
+			arguments: parsed.arguments.workloadArguments ?? [],
+			warmup: parsed.arguments.warmup ?? BENCHMARK_LIMITS.warmup.default,
+			repetitions: parsed.arguments.repetitions ?? BENCHMARK_LIMITS.repetitions.default,
+			concurrency: parsed.arguments.concurrency ?? BENCHMARK_LIMITS.concurrency.default,
+			deadlineMs: parsed.arguments.deadlineMs ?? BENCHMARK_LIMITS.deadlineMs.default,
+			sampleIntervalMs: parsed.arguments.sampleIntervalMs ?? BENCHMARK_LIMITS.sampleIntervalMs.default,
+			maxOutputBytes: parsed.arguments.maxOutputBytes ?? BENCHMARK_LIMITS.maxOutputBytes.default,
+		};
+		let benchmark: BenchmarkResult;
+		try {
+			benchmark = await (dependencies.runBenchmark ?? ((input) => benchmarkSystemdService(input, processCommandRunner)))(request);
+		} catch {
+			writeDiagnostics(
+				[diagnostic("BENCHMARK_FAILED", "error", "/benchmark", "benchmark could not complete; verify the service and workload")],
+				parsed.arguments.json,
+				dependencies.io,
+			);
+			return 1;
+		}
+		if (parsed.arguments.json) {
+			dependencies.io.stdout(`${JSON.stringify({ ok: benchmark.workload.failureCount === 0, benchmark })}\n`);
+			return benchmark.workload.failureCount === 0 ? 0 : 1;
+		}
+		const memoryMiB =
+			benchmark.workload.observedPeakMemoryBytes === null
+				? "unavailable"
+				: `${(benchmark.workload.observedPeakMemoryBytes / 1_048_576).toFixed(1)} MiB`;
+		const cpu = benchmark.workload.cpuMs === null ? "unavailable" : `${benchmark.workload.cpuMs.toFixed(1)} ms`;
+		dependencies.io.stdout(
+			`${benchmark.vehicle}: ${benchmark.workload.successCount}/${benchmark.workload.invocations} successful; p50 ${benchmark.workload.latencyMs.p50 ?? "unavailable"} ms, p95 ${benchmark.workload.latencyMs.p95 ?? "unavailable"} ms; cgroup CPU ${cpu}; observed peak memory ${memoryMiB}\n`,
+		);
+		dependencies.io.stdout(
+			`idle control: ${benchmark.idle.wallMs.toFixed(1)} ms; CPU ${benchmark.idle.cpuMs?.toFixed(1) ?? "unavailable"} ms\n`,
+		);
+		return benchmark.workload.failureCount === 0 ? 0 : 1;
 	}
 	const inspected = await dependencies.manager.inspect(decoded.manifest.vehicles);
 	if (!inspected.ok) {

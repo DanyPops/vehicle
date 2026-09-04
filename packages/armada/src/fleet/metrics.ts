@@ -77,7 +77,7 @@ export function resolveVehicleMetricsPath(
 	return posix.join(dataHome, vehicleName, DEFAULT_METRICS_FILENAME);
 }
 
-export type VehicleMetricsGroupDimension = "toolName" | "vehicleName" | "source" | "callerSessionId" | "outcome" | "day" | "hour";
+export type VehicleMetricsGroupDimension = "toolName" | "vehicleName" | "source" | "callerSessionId" | "outcome" | "errorCode" | "day" | "hour";
 
 export interface VehicleMetricsQuery {
 	/** Epoch ms, inclusive. Omit for "since the beginning". */
@@ -89,6 +89,7 @@ export interface VehicleMetricsQuery {
 	readonly vehicleName?: string;
 	readonly callerSessionId?: string;
 	readonly groupBy?: readonly VehicleMetricsGroupDimension[];
+	readonly limit?: number;
 }
 
 export interface VehicleMetricsSummaryRow {
@@ -97,6 +98,38 @@ export interface VehicleMetricsSummaryRow {
 	readonly successCount: number;
 	readonly failureCount: number;
 	readonly avgDurationMs: number | null;
+	readonly durationHistogram?: Readonly<{ le10: number; le50: number; le100: number; le500: number; le1000: number; gt1000: number }>;
+}
+
+export interface VehicleMetricsQueryResult {
+	readonly rows: readonly VehicleMetricsSummaryRow[];
+	readonly limit: number;
+	readonly truncated: boolean;
+}
+
+interface MetricsSqlParameters {
+	readonly [key: string]: string | number;
+	$rowLimit: number;
+	$since?: number;
+	$until?: number;
+	$source?: string;
+	$toolName?: string;
+	$vehicleName?: string;
+	$callerSessionId?: string;
+}
+
+interface MetricsSqlRow {
+	readonly [key: string]: unknown;
+	readonly count: unknown;
+	readonly successCount: unknown;
+	readonly failureCount: unknown;
+	readonly avgDurationMs: unknown;
+	readonly durationLe10: unknown;
+	readonly durationLe50: unknown;
+	readonly durationLe100: unknown;
+	readonly durationLe500: unknown;
+	readonly durationLe1000: unknown;
+	readonly durationGt1000: unknown;
 }
 
 /** Same mapping as vehicle-metrics-store.ts's own GROUP_EXPRESSION. Column identifiers are drawn only from this fixed map (never caller-supplied text), so the SQL string interpolation below is safe. */
@@ -106,6 +139,7 @@ const GROUP_EXPRESSION: Readonly<Record<VehicleMetricsGroupDimension, string>> =
 	source: "source",
 	callerSessionId: "caller_session_id",
 	outcome: "outcome",
+	errorCode: "error_code",
 	day: "strftime('%Y-%m-%d', ts / 1000, 'unixepoch')",
 	hour: "strftime('%Y-%m-%dT%H:00', ts / 1000, 'unixepoch')",
 };
@@ -115,35 +149,38 @@ const GROUP_EXPRESSION: Readonly<Record<VehicleMetricsGroupDimension, string>> =
  * (rather than throwing) when the file doesn't exist yet -- a Vehicle that hasn't opted into
  * metrics, or simply hasn't recorded anything yet, is a normal state, not an error.
  */
-export function queryVehicleMetrics(dbPath: string, query: VehicleMetricsQuery = {}): readonly VehicleMetricsSummaryRow[] {
-	if (!existsSync(dbPath)) return [];
+export function queryVehicleMetricsResult(dbPath: string, query: VehicleMetricsQuery = {}): VehicleMetricsQueryResult {
+	const requestedLimit = query.limit ?? 100;
+	if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) throw new RangeError("limit must be a positive safe integer");
+	const limit = Math.min(requestedLimit, 1_000);
+	if (!existsSync(dbPath)) return { rows: [], limit, truncated: false };
 	const db = openReadOnlyDatabase(dbPath);
 	try {
 		const where: string[] = [];
-		const params: Record<string, string | number> = {};
+		const params: MetricsSqlParameters = { $rowLimit: limit + 1 };
 		if (query.since !== undefined) {
 			where.push("ts >= $since");
-			params["$since"] = query.since;
+			params.$since = query.since;
 		}
 		if (query.until !== undefined) {
 			where.push("ts < $until");
-			params["$until"] = query.until;
+			params.$until = query.until;
 		}
 		if (query.source !== undefined) {
 			where.push("source = $source");
-			params["$source"] = query.source;
+			params.$source = query.source;
 		}
 		if (query.toolName !== undefined) {
 			where.push("tool_name = $toolName");
-			params["$toolName"] = query.toolName;
+			params.$toolName = query.toolName;
 		}
 		if (query.vehicleName !== undefined) {
 			where.push("vehicle_name = $vehicleName");
-			params["$vehicleName"] = query.vehicleName;
+			params.$vehicleName = query.vehicleName;
 		}
 		if (query.callerSessionId !== undefined) {
 			where.push("caller_session_id = $callerSessionId");
-			params["$callerSessionId"] = query.callerSessionId;
+			params.$callerSessionId = query.callerSessionId;
 		}
 		const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
@@ -151,6 +188,7 @@ export function queryVehicleMetrics(dbPath: string, query: VehicleMetricsQuery =
 		const groupExpressions = groupBy.map((dimension) => GROUP_EXPRESSION[dimension]);
 		const selectKeys = groupBy.map((dimension, index) => `${groupExpressions[index]} AS "${dimension}"`);
 		const groupClause = groupExpressions.length > 0 ? `GROUP BY ${groupExpressions.join(", ")}` : "";
+		const orderClause = groupBy.length > 0 ? `ORDER BY ${groupBy.map((dimension) => `"${dimension}"`).join(", ")}` : "";
 
 		const sql = `
 			SELECT
@@ -158,24 +196,46 @@ export function queryVehicleMetrics(dbPath: string, query: VehicleMetricsQuery =
 				COUNT(*) AS count,
 				SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successCount,
 				SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) AS failureCount,
-				AVG(duration_ms) AS avgDurationMs
+				AVG(duration_ms) AS avgDurationMs,
+				SUM(CASE WHEN duration_ms <= 10 THEN 1 ELSE 0 END) AS durationLe10,
+				SUM(CASE WHEN duration_ms <= 50 THEN 1 ELSE 0 END) AS durationLe50,
+				SUM(CASE WHEN duration_ms <= 100 THEN 1 ELSE 0 END) AS durationLe100,
+				SUM(CASE WHEN duration_ms <= 500 THEN 1 ELSE 0 END) AS durationLe500,
+				SUM(CASE WHEN duration_ms <= 1000 THEN 1 ELSE 0 END) AS durationLe1000,
+				SUM(CASE WHEN duration_ms > 1000 THEN 1 ELSE 0 END) AS durationGt1000
 			FROM vehicle_tool_invocations
 			${whereClause}
 			${groupClause}
+			${orderClause}
+			LIMIT $rowLimit
 		`;
-		const rows = db.prepare(sql).all(params) as readonly Record<string, unknown>[];
-		return rows.map((row) => {
+		const rows = db.prepare(sql).all(params) as readonly MetricsSqlRow[];
+		const truncated = rows.length > limit;
+		return { rows: rows.slice(0, limit).map((row) => {
 			const key: Record<string, string> = {};
 			for (const dimension of groupBy) key[dimension] = String(row[dimension] ?? "");
 			return {
 				key,
-				count: Number(row["count"]),
-				successCount: Number(row["successCount"]),
-				failureCount: Number(row["failureCount"]),
-				avgDurationMs: row["avgDurationMs"] === null || row["avgDurationMs"] === undefined ? null : Number(row["avgDurationMs"]),
+				count: Number(row.count),
+				successCount: Number(row.successCount),
+				failureCount: Number(row.failureCount),
+				avgDurationMs: row.avgDurationMs === null || row.avgDurationMs === undefined ? null : Number(row.avgDurationMs),
+				durationHistogram: {
+					le10: Number(row.durationLe10),
+					le50: Number(row.durationLe50),
+					le100: Number(row.durationLe100),
+					le500: Number(row.durationLe500),
+					le1000: Number(row.durationLe1000),
+					gt1000: Number(row.durationGt1000),
+				},
 			};
-		});
+		}), limit, truncated };
 	} finally {
 		db.close();
 	}
+}
+
+/** Compatibility projection for callers that only consume aggregate rows. */
+export function queryVehicleMetrics(dbPath: string, query: VehicleMetricsQuery = {}): readonly VehicleMetricsSummaryRow[] {
+	return queryVehicleMetricsResult(dbPath, query).rows;
 }

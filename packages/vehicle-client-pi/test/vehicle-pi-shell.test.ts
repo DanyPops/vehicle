@@ -68,7 +68,7 @@ async function callTool(tools: ToolDefinition[], name: string, params: unknown) 
 	return tool.execute("call-1", params as never, undefined as never, undefined as never, { hasUI: false } as never);
 }
 
-/** Same as callTool, but with a real sessionManager/cwd -- for asserting metrics.recordClientEvent's own callerSessionId/callerProjectRoot fields thread through correctly. */
+/** Same as callTool, but with a real sessionManager/cwd for asserting metrics invocation context. */
 async function callToolWithContext(tools: ToolDefinition[], name: string, params: unknown, sessionId: string, cwd: string) {
 	const tool = tools.find((t) => t.name === name);
 	if (!tool) throw new Error(`tool ${name} not registered`);
@@ -86,9 +86,9 @@ async function flushBackgroundReporting(): Promise<void> {
 
 /** Records every invoke() call this client receives, alongside FakeClient's own default {ok: true} response -- for asserting the Vehicle Shell's own client-event reporting (usage-reporting.ts) without a real daemon. */
 class SpyClient extends FakeClient {
-	readonly invocations: { name: string; version: number; input: unknown }[] = [];
+	readonly invocations: { name: string; version: number; input: unknown; options?: VehicleInvocationOptions }[] = [];
 	override async invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> {
-		this.invocations.push({ name, version, input });
+		this.invocations.push({ name, version, input, options });
 		return super.invoke(name, version, input, options);
 	}
 }
@@ -1225,7 +1225,7 @@ describe("Vehicle Shell's own meta-tools across a simulated /reload", () => {
 });
 
 describe("Vehicle Shell meta-tools report their own usage to the relevant vehicle(s), server-side (no client-side storage)", () => {
-	it("tools_list reports to every discovered vehicle, with the real callerSessionId/callerProjectRoot and outcome: success", async () => {
+	it("tools_list reports event data separately from invocation identity", async () => {
 		const { pi, tools } = fakePi();
 		const client = new SpyClient(manifest([operation("tasks.create")]));
 		await registerVehicleTools(pi, client, { shell: {} });
@@ -1235,10 +1235,9 @@ describe("Vehicle Shell meta-tools report their own usage to the relevant vehicl
 
 		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
 		expect(reports).toHaveLength(1);
-		expect(reports[0]?.input).toEqual({
-			toolName: "tools_list",
-			outcome: "success",
-			durationMs: expect.any(Number),
+		expect(reports[0]?.input).toEqual({ toolName: "tools_list", outcome: "success", durationMs: expect.any(Number) });
+		expect(reports[0]?.options).toEqual({
+			permissions: ["vehicle:metrics:record-client-event"],
 			callerSessionId: "session-42",
 			callerProjectRoot: "/home/x/project",
 		});
@@ -1312,7 +1311,8 @@ describe("Vehicle Shell meta-tools report their own usage to the relevant vehicl
 		expect(result.content[0]?.text).toContain("tasks.create");
 		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
 		expect(reports).toHaveLength(1);
-		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list", callerSessionId: undefined, callerProjectRoot: undefined });
+		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list" });
+		expect(reports[0]?.options).toMatchObject({ callerSessionId: undefined, callerProjectRoot: undefined });
 	});
 
 	it("survives ctx itself being undefined -- a stricter case than a defined ctx missing sessionManager/cwd (some hand-rolled test harnesses across the ecosystem pass no 5th arg at all)", async () => {
@@ -1329,6 +1329,7 @@ describe("Vehicle Shell meta-tools report their own usage to the relevant vehicl
 		expect(result.content[0]?.text).toContain("tasks.create");
 		const reports = client.invocations.filter((call) => call.name === "metrics.recordClientEvent");
 		expect(reports).toHaveLength(1);
-		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list", callerSessionId: undefined, callerProjectRoot: undefined });
+		expect(reports[0]?.input).toMatchObject({ toolName: "tools_list" });
+		expect(reports[0]?.options).toMatchObject({ callerSessionId: undefined, callerProjectRoot: undefined });
 	});
 });

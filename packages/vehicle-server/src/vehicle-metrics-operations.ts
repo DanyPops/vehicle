@@ -22,6 +22,7 @@ import type { VehicleMetricsGroupDimension, VehicleMetricsOutcome, VehicleMetric
 
 const DEFAULT_OPERATION_PREFIX = "metrics";
 const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 1_048_576 };
+export const RECORD_CLIENT_EVENT_PERMISSION = "vehicle:metrics:record-client-event";
 
 export interface RegisterVehicleMetricsOperationsOptions {
 	/**
@@ -35,7 +36,7 @@ export interface RegisterVehicleMetricsOperationsOptions {
 	readonly operationPrefix?: string;
 }
 
-const GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = ["toolName", "vehicleName", "source", "callerSessionId", "outcome", "day", "hour"];
+const GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = ["toolName", "vehicleName", "source", "callerSessionId", "outcome", "errorCode", "day", "hour"];
 const OUTCOMES: readonly VehicleMetricsOutcome[] = ["success", "failure"];
 
 /** The only tool names a client is ever allowed to self-report -- vehicle-client-pi's own Vehicle Shell meta-tools, which never themselves reach this daemon's invoke() path. Every real operation invocation is already captured automatically by vehicle-metrics-middleware.ts; a client has no business reporting one of those itself. */
@@ -60,6 +61,14 @@ function optionalNumber(input: Record<string, unknown>, key: string): number | u
 	return typeof value === "number" ? value : undefined;
 }
 
+function optionalNonNegativeInteger(input: Record<string, unknown>, key: string, minimum: number): number | undefined {
+	const value = optionalNumber(input, key);
+	if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) {
+		throw new VehicleError("invalid-input", `${key} must be an integer greater than or equal to ${minimum}`, { category: "validation" });
+	}
+	return value;
+}
+
 function toQuery(input: Record<string, unknown>): VehicleMetricsQuery {
 	const groupByRaw = input.groupBy;
 	const groupBy = Array.isArray(groupByRaw)
@@ -77,6 +86,7 @@ function toQuery(input: Record<string, unknown>): VehicleMetricsQuery {
 		vehicleName: optionalString(input, "vehicleName"),
 		callerSessionId: optionalString(input, "callerSessionId"),
 		groupBy,
+		limit: optionalNonNegativeInteger(input, "limit", 1),
 	};
 }
 
@@ -96,12 +106,10 @@ export function registerVehicleMetricsOperations(
 ): void {
 	const prefix = options.operationPrefix ?? DEFAULT_OPERATION_PREFIX;
 	const owner = prefix === DEFAULT_OPERATION_PREFIX ? "metrics" : `${prefix}-metrics`;
-	const queryOperation = defineVehicleOperation({
+	const legacyQueryOperation = defineVehicleOperation({
 		name: `${prefix}.query`,
 		version: 1,
-		description:
-			`Queries ${vehicleName}'s own recorded tool/operation invocation history -- every real operation call (server-recorded automatically) and every client-reported Vehicle Shell meta-tool call (tools_list/tools_man/tools_type), forever-retained and filterable by time range. ` +
-			`since/until are epoch milliseconds (since inclusive, until exclusive); omit either for an open-ended range. groupBy accepts any of: ${GROUP_DIMENSIONS.join(", ")}. Omit groupBy for a single ungrouped total.`,
+		description: `Queries ${vehicleName}'s bounded invocation aggregates using the version 1 array response. Use version 2 for truncation metadata and latency buckets.`,
 		input: defineLooseObjectSchema(
 			{
 				since: { type: "integer" },
@@ -111,6 +119,34 @@ export function registerVehicleMetricsOperations(
 				vehicleName: { type: "string" },
 				callerSessionId: { type: "string" },
 				groupBy: { type: "array" },
+				limit: { type: "integer" },
+			},
+			[],
+		),
+		output: passthroughVehicleSchema,
+		permissions: [],
+		effect: "read",
+		idempotency: { mode: "safe" },
+		limits: LIMITS,
+	});
+	registry.register(owner, bindVehicleOperation(legacyQueryOperation, () => async (context) => store.query(toQuery(context.input))));
+
+	const queryOperation = defineVehicleOperation({
+		name: `${prefix}.query`,
+		version: 2,
+		description:
+			`Queries ${vehicleName}'s bounded tool/operation invocation history, including server-recorded operations and authorized Vehicle Shell meta-tool reports. ` +
+			`since/until are epoch milliseconds (since inclusive, until exclusive); groupBy accepts ${GROUP_DIMENSIONS.join(", ")}. Results include a fixed latency histogram, an effective row limit, and truncation state.`,
+		input: defineLooseObjectSchema(
+			{
+				since: { type: "integer" },
+				until: { type: "integer" },
+				source: { type: "string", enum: ["server", "client"] },
+				toolName: { type: "string" },
+				vehicleName: { type: "string" },
+				callerSessionId: { type: "string" },
+				groupBy: { type: "array" },
+				limit: { type: "integer" },
 			},
 			[],
 		),
@@ -122,7 +158,10 @@ export function registerVehicleMetricsOperations(
 	});
 	registry.register(
 		owner,
-		bindVehicleOperation(queryOperation, () => async (context) => store.query(toQuery(context.input))),
+		bindVehicleOperation(queryOperation, () => async (context) => {
+			const query = toQuery(context.input);
+			return store.queryResult(query);
+		}),
 	);
 
 	const recordClientEventOperation = defineVehicleOperation({
@@ -135,13 +174,11 @@ export function registerVehicleMetricsOperations(
 				toolName: { type: "string", enum: [...CLIENT_REPORTABLE_TOOL_NAMES] },
 				outcome: { type: "string", enum: [...OUTCOMES] },
 				durationMs: { type: "integer" },
-				callerSessionId: { type: "string" },
-				callerProjectRoot: { type: "string" },
 			},
 			["toolName", "outcome"],
 		),
 		output: passthroughVehicleSchema,
-		permissions: [],
+		permissions: [RECORD_CLIENT_EVENT_PERMISSION],
 		effect: "local-write",
 		idempotency: { mode: "unsafe" },
 		limits: LIMITS,
@@ -160,9 +197,8 @@ export function registerVehicleMetricsOperations(
 				vehicleName,
 				toolName,
 				outcome,
-				durationMs: optionalNumber(input, "durationMs"),
-				callerSessionId: optionalString(input, "callerSessionId") ?? context.callerSessionId,
-				callerProjectRoot: optionalString(input, "callerProjectRoot") ?? context.callerProjectRoot,
+				durationMs: optionalNonNegativeInteger(input, "durationMs", 0),
+				callerSessionId: context.callerSessionId,
 				principalId: context.principal?.id,
 			});
 			return { recorded: true };

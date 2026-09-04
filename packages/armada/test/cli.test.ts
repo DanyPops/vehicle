@@ -53,6 +53,110 @@ describe("armada CLI entrypoint", () => {
 		await symlink(modulePath, binPath);
 		expect(isCliEntrypoint(modulePath, binPath)).toBe(true);
 	});
+
+	it("documents benchmark bounds in help output", async () => {
+		const captured = output();
+		const code = await runCli(["--help"], { manager, io: captured.io });
+		expect(code).toBe(0);
+		const text = captured.stdout.join("");
+		expect(text).toContain("benchmark <vehicle>");
+		expect(text).toContain("--warmup");
+		expect(text).toContain("--repetitions");
+		expect(text).toContain("--concurrency");
+		expect(text).toContain("--deadline-ms");
+		expect(text).toContain("--max-output-bytes");
+	});
+});
+
+describe("armada benchmark", () => {
+	it("runs a bounded benchmark and omits workload arguments from JSON", async () => {
+		const directory = await tempDir("armada-cli-benchmark-");
+		const manifestPath = join(directory, "armada.json");
+		await writeFile(manifestPath, manifestJson());
+		const captured = output();
+		let input: unknown;
+		const code = await runCli(
+			[
+				"benchmark",
+				"papyrus",
+				"--manifest",
+				manifestPath,
+				"--exec",
+				"/private/workload",
+				"--arg",
+				"secret-token",
+				"--warmup",
+				"1",
+				"--repetitions",
+				"3",
+				"--concurrency",
+				"2",
+				"--deadline-ms",
+				"5000",
+				"--sample-ms",
+				"25",
+				"--max-output-bytes",
+				"2048",
+				"--json",
+			],
+			{
+				manager,
+				io: captured.io,
+				runBenchmark: (value) => {
+					input = value;
+					return Promise.resolve({
+						schemaVersion: 1,
+						vehicle: "papyrus",
+						configuration: { warmup: 1, repetitions: 3, concurrency: 2, deadlineMs: 5000, sampleIntervalMs: 25, maxOutputBytes: 2048 },
+						counters: { supported: ["cpu", "memory", "io", "pids"], unavailable: [] },
+						workload: {
+							invocations: 6,
+							successCount: 6,
+							failureCount: 0,
+							failureCodes: {},
+							wallMs: 10,
+							cpuMs: 5,
+							idleAdjustedCpuMs: 4,
+							memoryStartBytes: 1,
+							memoryEndBytes: 2,
+							observedPeakMemoryBytes: 3,
+							historicalPeakMemoryBytes: 4,
+							ioReadBytes: 1,
+							ioWriteBytes: 1,
+							peakPids: 2,
+							outputBytes: 6,
+							outputDigest: "a".repeat(64),
+							latencyMs: { p50: 1, p95: 2, max: 2 },
+						},
+						idle: {
+							wallMs: 10,
+							cpuMs: 1,
+							memoryStartBytes: 2,
+							memoryEndBytes: 2,
+							observedPeakMemoryBytes: 2,
+							historicalPeakMemoryBytes: 4,
+							ioReadBytes: 0,
+							ioWriteBytes: 0,
+							peakPids: 1,
+						},
+					});
+				},
+			},
+		);
+		expect(code).toBe(0);
+		expect(input).toMatchObject({ vehicle: "papyrus", command: "/private/workload", arguments: ["secret-token"] });
+		const json = captured.stdout.join("");
+		expect(JSON.parse(json)).toMatchObject({ ok: true, benchmark: { vehicle: "papyrus" } });
+		expect(json).not.toContain("/private/workload");
+		expect(json).not.toContain("secret-token");
+	});
+
+	it("rejects unsafe benchmark bounds before dispatch", async () => {
+		const captured = output();
+		const code = await runCli(["benchmark", "papyrus", "--exec", "node", "--concurrency", "100"], { manager, io: captured.io });
+		expect(code).toBe(2);
+		expect(captured.stderr.join("")).toContain("CLI_ARGUMENT_INVALID");
+	});
 });
 
 describe("armada plan", () => {
@@ -241,7 +345,23 @@ describe("armada metrics", () => {
 		let queriedPath: string | undefined;
 		let queriedWith: unknown;
 		const code = await runCli(
-			["metrics", "papyrus", "--since", "1000", "--until", "2000", "--tool", "tasks.create", "--source", "server", "--group-by", "toolName,outcome", "--json"],
+			[
+				"metrics",
+				"papyrus",
+				"--since",
+				"1000",
+				"--until",
+				"2000",
+				"--tool",
+				"tasks.create",
+				"--source",
+				"server",
+				"--group-by",
+				"toolName,outcome",
+				"--limit",
+				"25",
+				"--json",
+			],
 			{
 				manager,
 				io: captured.io,
@@ -265,10 +385,13 @@ describe("armada metrics", () => {
 			toolName: "tasks.create",
 			source: "server",
 			groupBy: ["toolName", "outcome"],
+			limit: 25,
 		});
 		expect(JSON.parse(captured.stdout.join(""))).toMatchObject({
 			ok: true,
 			vehicle: "papyrus",
+			limit: 25,
+			truncated: false,
 			rows: [{ key: { toolName: "tasks.create", outcome: "success" }, count: 3 }],
 		});
 	});
@@ -292,6 +415,12 @@ describe("armada metrics", () => {
 	it("rejects an invalid --since value", async () => {
 		const captured = output();
 		const code = await runCli(["metrics", "papyrus", "--since", "not-a-date"], { manager, io: captured.io });
+		expect(code).toBe(2);
+	});
+
+	it("rejects an invalid --limit", async () => {
+		const captured = output();
+		const code = await runCli(["metrics", "papyrus", "--limit", "0"], { manager, io: captured.io });
 		expect(code).toBe(2);
 	});
 
@@ -346,7 +475,7 @@ describe("armada metrics", () => {
 		await mkdirNode(dirname(dbPath), { recursive: true });
 		const db = new Database(dbPath, { create: true });
 		db.exec(
-			"CREATE TABLE vehicle_tool_invocations (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, vehicle_name TEXT NOT NULL, tool_name TEXT NOT NULL, operation_version INTEGER, outcome TEXT NOT NULL, error_code TEXT, duration_ms INTEGER, caller_session_id TEXT, caller_project_root TEXT, principal_id TEXT)",
+			"CREATE TABLE vehicle_tool_invocations (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, source TEXT NOT NULL, vehicle_name TEXT NOT NULL, tool_name TEXT NOT NULL, operation_version INTEGER, outcome TEXT NOT NULL, error_code TEXT, duration_ms INTEGER, caller_session_id TEXT, principal_id TEXT)",
 		);
 		db.prepare(
 			"INSERT INTO vehicle_tool_invocations (ts, source, vehicle_name, tool_name, outcome) VALUES ($ts, $source, $vehicleName, $toolName, $outcome)",
@@ -356,6 +485,12 @@ describe("armada metrics", () => {
 		const captured = output();
 		const code = await runCli(["metrics", "acme-vehicle", "--json"], { manager, io: captured.io, home, env });
 		expect(code).toBe(0);
-		expect(JSON.parse(captured.stdout.join(""))).toMatchObject({ ok: true, vehicle: "acme-vehicle", rows: [{ count: 1, successCount: 1 }] });
+		expect(JSON.parse(captured.stdout.join(""))).toMatchObject({
+			ok: true,
+			vehicle: "acme-vehicle",
+			limit: 100,
+			truncated: false,
+			rows: [{ count: 1, successCount: 1 }],
+		});
 	});
 });

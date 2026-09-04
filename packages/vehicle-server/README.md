@@ -21,10 +21,10 @@ pulls in what it uses.
 
 ## Tool/operation usage metrics
 
-`./metrics` (`openVehicleMetricsStore`) is a forever-retained, indexed,
-time-range-queryable SQLite record of every real operation invocation this
-Vehicle has served -- how much each operation is used, and by which agent
-(`callerSessionId`). Wire it into a running registry with two calls:
+`./metrics` (`openVehicleMetricsStore`) is an indexed, finite-retention,
+time-range-queryable SQLite record of operation invocations. It defaults to
+30 days and 100,000 rows, omits raw project-root paths, bounds grouped queries,
+and reports fixed latency buckets. Wire it into a running registry with two calls:
 
 ```ts
 import { VehicleRegistry } from "@danypops/vehicle-server";
@@ -32,19 +32,24 @@ import { openVehicleMetricsStore } from "@danypops/vehicle-server/metrics";
 import { createVehicleMetricsMiddleware } from "@danypops/vehicle-server/metrics-middleware";
 import { registerVehicleMetricsOperations } from "@danypops/vehicle-server/metrics-operations";
 
-const store = openVehicleMetricsStore(paths.metrics); // paths from resolveDaemonPaths()
+const store = openVehicleMetricsStore(paths.metrics, Date.now, {
+  maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+  maxRows: 100_000,
+}); // paths from resolveDaemonPaths()
 registry.useExecutionMiddleware(createVehicleMetricsMiddleware(store, "my-vehicle"));
 registerVehicleMetricsOperations(registry, store, "my-vehicle");
 ```
 
-This registers `my-vehicle:metrics.query` (discoverable through the same
-`tools_list`/`tools_man` path as every other operation) and
+This registers `my-vehicle:metrics.query` (version 1 preserves the aggregate
+array response; version 2 adds truncation metadata and latency buckets) and
 `my-vehicle:metrics.recordClientEvent` -- the one write path a client (e.g.
 vehicle-client-pi's Vehicle Shell) uses to report a `tools_list`/`tools_man`/
 `tools_type` call it observed, since those never themselves reach this
 daemon's `invoke()` path. Every real operation invocation (including
 `metrics.query`/`metrics.recordClientEvent` themselves) is captured
-automatically by the middleware -- no other wiring needed.
+automatically by the middleware. Client reports require the
+`vehicle:metrics:record-client-event` permission, and persisted identity comes
+from invocation context rather than event input.
 
 See the [workspace README](https://github.com/DanyPops/vehicle#readme) for
 the full module table and Vehicle package layout.
