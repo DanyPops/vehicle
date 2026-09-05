@@ -1,6 +1,6 @@
 {
 	"name": "@danypops/vehicle-conformance",
-	"version": "0.4.2",
+	"version": "0.4.3",
 	"description": "Runner-neutral conformance suite for VehicleClient implementations, with Bun and Vitest adapters over one shared assertion matrix.",
 	"license": "MIT",
 	"type": "module",
