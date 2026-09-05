@@ -99,6 +99,19 @@ const ConformanceKeyed = defineVehicleOperation({
 	output: outputSchema,
 	permissions: [],
 	effect: "external-write",
+	requiresApproval: false,
+	idempotency: { mode: "keyed", retentionMs: 60_000 },
+	limits: LIMITS,
+});
+
+const ConformanceUnconfiguredRisk = defineVehicleOperation({
+	name: "conformance.unconfigured-risk",
+	version: 1,
+	description: "Proves that risky operations require an explicit registry approval-policy decision.",
+	input: passthroughSchema,
+	output: outputSchema,
+	permissions: [],
+	effect: "external-write",
 	idempotency: { mode: "keyed", retentionMs: 60_000 },
 	limits: LIMITS,
 });
@@ -161,6 +174,10 @@ export function registerConformanceOperations(registry: VehicleRegistry): void {
 	);
 	registry.register(
 		"conformance",
+		bindVehicleOperation(ConformanceUnconfiguredRisk, () => async (context) => ({ echoed: context.input.value })),
+	);
+	registry.register(
+		"conformance",
 		bindVehicleOperation(ConformanceProgress, () => async (context) => {
 			context.reportProgress({ step: 1 });
 			context.reportProgress({ step: 2 });
@@ -210,6 +227,7 @@ export function registerVehicleClientConformance(runner: VehicleConformanceRunne
 					"conformance.never@1",
 					"conformance.progress@1",
 					"conformance.slow-progress@1",
+					"conformance.unconfigured-risk@1",
 				]);
 				const echo = manifest.operations.find((op) => op.name === "conformance.echo");
 				expect(echo?.permissions).toEqual(["conformance:echo"]);
@@ -297,6 +315,22 @@ export function registerVehicleClientConformance(runner: VehicleConformanceRunne
 				});
 				const result = await client.invoke<{ echoed: string }>("conformance.keyed", 1, { value: "x" }, { idempotencyKey: "k-1" });
 				expect(result).toEqual({ echoed: "x" });
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("reports an unconfigured risky operation as a hard failure", async () => {
+			const { client, cleanup } = await fixture.create();
+			try {
+				const manifest = await client.manifest();
+				expect(manifest.approvalPolicy).toMatchObject({
+					status: "unconfigured",
+					unconfiguredRiskyOperations: ["conformance.unconfigured-risk@1"],
+				});
+				await expect(
+					client.invoke("conformance.unconfigured-risk", 1, { value: "x" }, { idempotencyKey: "risk-1" }),
+				).rejects.toMatchObject({ code: "approval-policy-unconfigured", category: "authorization" });
 			} finally {
 				await cleanup();
 			}

@@ -26,6 +26,7 @@ function keyedOperation(name: string, options: { retentionMs?: number; errors?: 
 		output: passthroughSchema,
 		permissions: [],
 		effect: "external-write",
+		requiresApproval: false,
 		idempotency: { mode: "keyed", retentionMs: options.retentionMs ?? 60_000 },
 		limits: LIMITS,
 		errors: options.errors ?? [],
