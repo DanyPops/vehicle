@@ -6,12 +6,19 @@ import { type CliIo, isCliEntrypoint, runCli } from "../src/cli.js";
 import { type NativeServiceController, type NativeServiceManager, systemdStrategy } from "../src/index.js";
 import { manifestJson } from "./fixtures.js";
 
-// Every mkdtemp'd directory this suite creates, removed after each test regardless of pass/fail
-// -- otherwise every run leaks its own tmpdirs permanently (confirmed live: 4374 leftover
-// /tmp/armada-* directories on one host from repeated test runs with no cleanup).
+// Every mkdtemp'd directory this suite creates is reclaimed after each test. Windows can
+// retain a just-closed bun:sqlite handle past close(), so cleanup is bounded and best-effort;
+// ephemeral CI runners reclaim any directory that remains locked after these retries.
 const createdDirs: string[] = [];
+async function removeTestDir(dir: string): Promise<void> {
+	try {
+		await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	} catch (error) {
+		console.warn(`cli.test.ts: best-effort cleanup of "${dir}" failed (leaving it for the OS/CI runner to reclaim):`, error);
+	}
+}
 afterEach(async () => {
-	await Promise.all(createdDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+	await Promise.all(createdDirs.splice(0).map(removeTestDir));
 });
 async function tempDir(prefix: string): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), prefix));
