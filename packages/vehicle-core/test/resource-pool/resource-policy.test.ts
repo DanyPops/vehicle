@@ -51,7 +51,12 @@ describe("BoundedResourcePool resource policy", () => {
 		const policy = fakePolicy({ softActiveCeiling: () => 10 });
 		// partitionLimits isolates the global ceiling from the default per-partition cap (which
 		// otherwise defaults to maxActive and would itself block a 3rd same-partition admission).
-		const pool = new Pool<string, PooledResource>({ maxActive: 2, absoluteMaxActive: 5, partitionLimits: { lang: 10 }, resourcePolicy: policy });
+		const pool = new Pool<string, PooledResource>({
+			maxActive: 2,
+			absoluteMaxActive: 5,
+			partitionLimits: { lang: 10 },
+			resourcePolicy: policy,
+		});
 
 		await pool.acquire("a", "lang", () => fakeResource("a", closed));
 		await pool.acquire("b", "lang", () => fakeResource("b", closed));

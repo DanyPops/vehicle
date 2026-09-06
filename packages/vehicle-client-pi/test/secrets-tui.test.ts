@@ -451,7 +451,9 @@ describe("registerSharedSecretsCommand", () => {
 	it("self-declares shared: true on the actual pi.registerCommand call -- lets a smoke-test-based conflict scan (e.g. pi-packed's own doctor) tell a genuine, coincidental name collision apart from two consumers deliberately landing on the same shared name by design", () => {
 		resetAll();
 		let capturedOptions: { shared?: boolean } | undefined;
-		const pi = { registerCommand: (_name: string, options: { shared?: boolean }) => (capturedOptions = options) } as unknown as ExtensionAPI;
+		const pi = {
+			registerCommand: (_name: string, options: { shared?: boolean }) => (capturedOptions = options),
+		} as unknown as ExtensionAPI;
 		registerSharedSecretsCommand(pi, { source: "enigma", resolve: () => ({ backends: [] }) });
 		expect(capturedOptions?.shared).toBe(true);
 	});

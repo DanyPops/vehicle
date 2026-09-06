@@ -280,10 +280,7 @@ export class VehicleApprovalPolicyManager {
 			},
 			safeParse(value) {
 				const row = value as { requestId?: unknown; status?: unknown; outcome?: unknown };
-				if (
-					typeof row?.requestId !== "string" ||
-					(row.status !== "pending" && row.status !== "resolved" && row.status !== "unknown")
-				) {
+				if (typeof row?.requestId !== "string" || (row.status !== "pending" && row.status !== "resolved" && row.status !== "unknown")) {
 					return { success: false, issues: [{ path: [], message: "invalid approval status output" }] };
 				}
 				return {

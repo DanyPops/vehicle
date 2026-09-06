@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { bindVehicleOperation, defineLooseObjectSchema, defineVehicleOperation, passthroughVehicleSchema } from "@danypops/vehicle-core";
-import { VehicleRegistry } from "../src/vehicle-registry.ts";
 import { createVehicleMetricsMiddleware } from "../src/vehicle-metrics-middleware.ts";
-import { openVehicleMetricsStore } from "../src/vehicle-metrics-store.ts";
 import { registerVehicleMetricsOperations } from "../src/vehicle-metrics-operations.ts";
+import { openVehicleMetricsStore } from "../src/vehicle-metrics-store.ts";
+import { VehicleRegistry } from "../src/vehicle-registry.ts";
 
 const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 262_144 };
 const RECORD_CLIENT_EVENT_PERMISSION = "vehicle:metrics:record-client-event";
@@ -69,7 +69,14 @@ describe("registerVehicleMetricsOperations", () => {
 			["b", 50, "not-found"],
 			["c", 1_500, "upstream-busy"],
 		] as const) {
-			store.record({ source: "server", vehicleName: "test-vehicle", toolName, outcome: errorCode ? "failure" : "success", durationMs, errorCode });
+			store.record({
+				source: "server",
+				vehicleName: "test-vehicle",
+				toolName,
+				outcome: errorCode ? "failure" : "success",
+				durationMs,
+				errorCode,
+			});
 		}
 
 		const result = (await registry.invoke("metrics.query", 2, { groupBy: ["toolName"], limit: 2 }, { permissions: [] })) as {

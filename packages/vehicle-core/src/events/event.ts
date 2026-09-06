@@ -1,5 +1,5 @@
-import { cloneJson, type JsonSchema } from "../schemas/json.js";
 import type { VehicleSchemaCodec } from "../schemas/codec.js";
+import { cloneJson, type JsonSchema } from "../schemas/json.js";
 
 /**
  * A named, schema'd event type a provider declares as part of its

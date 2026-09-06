@@ -43,7 +43,11 @@ describe("negotiateVehicleProtocol", () => {
 				requiredCapabilities: ["unknown"],
 				optionalCapabilities: [],
 			}),
-		).toEqual({ ok: false, code: "protocol-capability-unsupported", message: 'Vehicle protocol requires unsupported capability "unknown"' });
+		).toEqual({
+			ok: false,
+			code: "protocol-capability-unsupported",
+			message: 'Vehicle protocol requires unsupported capability "unknown"',
+		});
 		expect(
 			negotiateVehicleProtocol(server, {
 				minimumVersion: 1,

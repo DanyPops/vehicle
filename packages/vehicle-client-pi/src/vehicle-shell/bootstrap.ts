@@ -8,11 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAgentNotifier, frameAsBackgroundNotification } from "../agent-poll-ticker.js";
 import { reportModuleLoad, reportShellRegistered } from "../client-diagnostics.js";
 import { tryExtensionRuntimeAction } from "../pi-tool-availability.js";
-import {
-	__resetVehicleShellReregistrationFlagForTests,
-	markVehicleShellNeedsReregistration,
-	vehicleShellNeedsReregistration,
-} from "./reregistration.js";
+import { markSharedRegistration } from "../shared-registration-marker.js";
 import {
 	computeToolContextBudget,
 	DEFAULT_BUDGET_FRACTION_OF_REMAINING,
@@ -20,6 +16,11 @@ import {
 	DEFAULT_MAX_TOOL_BUDGET_TOKENS,
 	DEFAULT_MIN_TOOL_BUDGET_TOKENS,
 } from "./context-budget.js";
+import {
+	__resetVehicleShellReregistrationFlagForTests,
+	markVehicleShellNeedsReregistration,
+	vehicleShellNeedsReregistration,
+} from "./reregistration.js";
 import {
 	applyShellActivation,
 	DEFAULT_AGGREGATE_CACHE_TTL_MS,
@@ -37,7 +38,6 @@ import {
 import { buildToolboxReminderMessage, ToolboxReminderTracker } from "./toolbox-reminder.js";
 import { createToolsListTool, createToolsManTool, createToolsTypeTool } from "./tools.js";
 import { WeightedLruTracker } from "./weighted-lru.js";
-import { markSharedRegistration } from "../shared-registration-marker.js";
 
 /**
  * Maps the two deprecated flat TTL fields onto a scale factor for the budget bounds -- see

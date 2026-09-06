@@ -145,7 +145,8 @@ export class BoundedResourcePool<OwnerKey extends string, Resource extends Poole
 		}
 		this.lastEffectiveMaxActive = this.maxActive;
 		for (const [partitionKey, limit] of Object.entries(this.partitionLimits)) {
-			if (!partitionKey || !Number.isSafeInteger(limit) || limit < 1) throw new TypeError("partition limits must be positive safe integers keyed by partition key");
+			if (!partitionKey || !Number.isSafeInteger(limit) || limit < 1)
+				throw new TypeError("partition limits must be positive safe integers keyed by partition key");
 		}
 		this.reservedForegroundSlots = options.reservedForegroundSlots ?? 0;
 		if (!Number.isSafeInteger(this.reservedForegroundSlots) || this.reservedForegroundSlots < 0) {
@@ -193,7 +194,11 @@ export class BoundedResourcePool<OwnerKey extends string, Resource extends Poole
 			const entry = candidate[1];
 			if (entry.activeLeases > 0 || (partitionKey !== undefined && entry.partitionKey !== partitionKey)) continue;
 			const current = selected?.[1];
-			if (!current || entry.lastUsedAt < current.lastUsedAt || (entry.lastUsedAt === current.lastUsedAt && entry.recencySequence < current.recencySequence))
+			if (
+				!current ||
+				entry.lastUsedAt < current.lastUsedAt ||
+				(entry.lastUsedAt === current.lastUsedAt && entry.recencySequence < current.recencySequence)
+			)
 				selected = candidate;
 		}
 		return selected;
@@ -215,7 +220,8 @@ export class BoundedResourcePool<OwnerKey extends string, Resource extends Poole
 			throw error;
 		}
 		this.entries.delete(entry[0]);
-		const kind = reason === "admission" ? "admission-evicted" : reason === "dead-replacement" ? "dead-replaced" : "resource-pressure-evicted";
+		const kind =
+			reason === "admission" ? "admission-evicted" : reason === "dead-replacement" ? "dead-replaced" : "resource-pressure-evicted";
 		this.options.observe?.({ kind, partitionKey: entry[1].partitionKey });
 		this.notifyAdmissionWaiters();
 	}
@@ -361,7 +367,12 @@ export class BoundedResourcePool<OwnerKey extends string, Resource extends Poole
 	}
 
 	/** Acquires a lease for (ownerKey, partitionKey), reusing an already-admitted resource if one is warm, or admitting a fresh one via `create()` -- called only on an actual cache miss, never speculatively. workKind defaults to "foreground". */
-	async acquire(ownerKey: OwnerKey, partitionKey: string, create: () => Resource, workKind: ResourceWorkKind = "foreground"): Promise<PoolLease<Resource>> {
+	async acquire(
+		ownerKey: OwnerKey,
+		partitionKey: string,
+		create: () => Resource,
+		workKind: ResourceWorkKind = "foreground",
+	): Promise<PoolLease<Resource>> {
 		const deadline = Date.now() + this.waitTimeoutMs(workKind);
 		let admissionGranted = false;
 		for (;;) {
@@ -539,7 +550,9 @@ export class BoundedResourcePool<OwnerKey extends string, Resource extends Poole
 			let reaped = await this.reconcileResourcesUnsafe();
 			const now = this.now();
 			const effectiveMaxIdleMs = this.options.resourcePolicy?.maxIdleMs(maxIdleMs, this.activePartitions()) ?? maxIdleMs;
-			const idle = Array.from(this.entries.entries()).filter(([, entry]) => entry.activeLeases === 0 && now - entry.lastUsedAt > effectiveMaxIdleMs);
+			const idle = Array.from(this.entries.entries()).filter(
+				([, entry]) => entry.activeLeases === 0 && now - entry.lastUsedAt > effectiveMaxIdleMs,
+			);
 			for (const [key, entry] of idle) {
 				try {
 					await entry.resource.close();

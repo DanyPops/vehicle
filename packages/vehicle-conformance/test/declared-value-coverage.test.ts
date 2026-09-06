@@ -33,7 +33,10 @@ function webSpiderFixedRender(value: string, rawPayload: unknown, options: ToolS
 		return [`# ${payload.markdown.split("\n")[0]?.replace(/^#\s*/, "")}`.slice(0, options.width)];
 	}
 	const results = payload.results ?? [];
-	return [`${value}: ${results.length} result(s)`.slice(0, options.width), ...results.map((r) => `  ${r.title} (${r.url})`.slice(0, options.width))];
+	return [
+		`${value}: ${results.length} result(s)`.slice(0, options.width),
+		...results.map((r) => `  ${r.title} (${r.url})`.slice(0, options.width)),
+	];
 }
 
 const cases: ToolShellDeclaredValueCase[] = WEB_SPIDER_FORMATS.map((value) => ({ value, rawPayload: webSpiderPayloadFor(value) }));

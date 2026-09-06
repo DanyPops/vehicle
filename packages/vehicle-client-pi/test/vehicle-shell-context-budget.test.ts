@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { computeToolContextBudget, type ContextBudgetOptions } from "../src/vehicle-shell/context-budget.ts";
+import { type ContextBudgetOptions, computeToolContextBudget } from "../src/vehicle-shell/context-budget.ts";
 
 const options: ContextBudgetOptions = { minToolBudgetTokens: 1_000, maxToolBudgetTokens: 20_000, fractionOfRemaining: 0.2 };
 

@@ -156,14 +156,10 @@ describe("registerVehicleToolsWhenReady", () => {
 		const client = new FakeClient(manifest([operation("issues.search")]));
 		const timings: VehicleReadyTimingEvent[] = [];
 		let attempts = 0;
-		const ready = registerVehicleToolsWhenReady(
-			pi,
-			() => Promise.resolve(++attempts === 1 ? undefined : client),
-			{
-				retry: { attempts: 2, initialDelayMs: 1, maxDelayMs: 1 },
-				onTiming: (event) => timings.push(event),
-			},
-		);
+		const ready = registerVehicleToolsWhenReady(pi, () => Promise.resolve(++attempts === 1 ? undefined : client), {
+			retry: { attempts: 2, initialDelayMs: 1, maxDelayMs: 1 },
+			onTiming: (event) => timings.push(event),
+		});
 
 		await emit("session_start");
 		await ready;

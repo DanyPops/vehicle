@@ -54,7 +54,9 @@ function createIndexes(db: MinimalDatabase): void {
 
 function identitySalt(db: MinimalDatabase): string {
 	db.exec("CREATE TABLE IF NOT EXISTS vehicle_metrics_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-	const existing = db.prepare("SELECT value FROM vehicle_metrics_metadata WHERE key = 'identity_salt'").get() as { value?: unknown } | undefined;
+	const existing = db.prepare("SELECT value FROM vehicle_metrics_metadata WHERE key = 'identity_salt'").get() as
+		| { value?: unknown }
+		| undefined;
 	if (typeof existing?.value === "string" && existing.value.length >= 32) return existing.value;
 	const value = randomBytes(32).toString("hex");
 	db.prepare("INSERT OR REPLACE INTO vehicle_metrics_metadata (key, value) VALUES ('identity_salt', $value)").run({ $value: value });
@@ -114,7 +116,15 @@ export interface VehicleMetricsRecordInput {
 	readonly ts?: number;
 }
 
-export type VehicleMetricsGroupDimension = "toolName" | "vehicleName" | "source" | "callerSessionId" | "outcome" | "errorCode" | "day" | "hour";
+export type VehicleMetricsGroupDimension =
+	| "toolName"
+	| "vehicleName"
+	| "source"
+	| "callerSessionId"
+	| "outcome"
+	| "errorCode"
+	| "day"
+	| "hour";
 
 export interface VehicleMetricsQuery {
 	readonly since?: number;
@@ -188,7 +198,11 @@ function normalizeErrorCode(value: string | undefined): string | null {
 }
 
 /** Opens a portable SQLite metrics store with finite retention and query defaults. */
-export function openVehicleMetricsStore(path: string, now: () => number = Date.now, options: VehicleMetricsStoreOptions = {}): VehicleMetricsStore {
+export function openVehicleMetricsStore(
+	path: string,
+	now: () => number = Date.now,
+	options: VehicleMetricsStoreOptions = {},
+): VehicleMetricsStore {
 	const maxAgeMs = positiveInteger(options.maxAgeMs ?? DEFAULT_MAX_AGE_MS, "maxAgeMs");
 	const maxRows = positiveInteger(options.maxRows ?? DEFAULT_MAX_ROWS, "maxRows");
 	const queryMaxLimit = positiveInteger(options.queryMaxLimit ?? MAX_QUERY_LIMIT, "queryMaxLimit");

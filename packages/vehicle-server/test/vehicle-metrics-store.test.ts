@@ -1,14 +1,21 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
 import { openVehicleMetricsStore } from "../src/vehicle-metrics-store.ts";
 
 describe("VehicleMetricsStore", () => {
 	it("records and queries a single invocation, ungrouped", () => {
 		const store = openVehicleMetricsStore(":memory:", () => 1_000);
-		store.record({ source: "server", vehicleName: "papyrus", toolName: "tasks.create", operationVersion: 1, outcome: "success", durationMs: 42 });
+		store.record({
+			source: "server",
+			vehicleName: "papyrus",
+			toolName: "tasks.create",
+			operationVersion: 1,
+			outcome: "success",
+			durationMs: 42,
+		});
 		const rows = store.query({});
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({ key: {}, count: 1, successCount: 1, failureCount: 0, avgDurationMs: 42 });
@@ -144,7 +151,10 @@ describe("VehicleMetricsStore", () => {
 			try {
 				rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 			} catch (error) {
-				console.warn(`vehicle-metrics-store.test.ts: best-effort cleanup of "${dir}" failed (leaving it for the OS/CI runner to reclaim):`, error);
+				console.warn(
+					`vehicle-metrics-store.test.ts: best-effort cleanup of "${dir}" failed (leaving it for the OS/CI runner to reclaim):`,
+					error,
+				);
 			}
 		}
 	});
@@ -191,7 +201,11 @@ describe("VehicleMetricsStore", () => {
 		expect(result.rows).toHaveLength(2);
 		const totals = store.queryResult({});
 		expect(totals.rows[0]?.durationHistogram).toEqual({ le10: 1, le50: 2, le100: 2, le500: 3, le1000: 3, gt1000: 1 });
-		expect(store.queryResult({ groupBy: ["errorCode"], limit: 3 }).rows.map((row) => row.key.errorCode)).toEqual(["", "not-found", "upstream-busy"]);
+		expect(store.queryResult({ groupBy: ["errorCode"], limit: 3 }).rows.map((row) => row.key.errorCode)).toEqual([
+			"",
+			"not-found",
+			"upstream-busy",
+		]);
 		store.close();
 	});
 
@@ -236,15 +250,18 @@ describe("VehicleMetricsStore", () => {
 			const migrated = new Database(path);
 			const columns = migrated.query("PRAGMA table_info(vehicle_tool_invocations)").all() as { name: string }[];
 			expect(columns.map((column) => column.name)).not.toContain("caller_project_root");
-			const identities = migrated
-				.query("SELECT caller_session_id, principal_id FROM vehicle_tool_invocations ORDER BY id")
-				.all() as { caller_session_id: string | null; principal_id: string | null }[];
+			const identities = migrated.query("SELECT caller_session_id, principal_id FROM vehicle_tool_invocations ORDER BY id").all() as {
+				caller_session_id: string | null;
+				principal_id: string | null;
+			}[];
 			expect(identities[0]).toEqual({ caller_session_id: null, principal_id: null });
 			expect(identities[1]?.caller_session_id).toMatch(/^hmac-sha256:[0-9a-f]{64}$/);
 			expect(identities[1]?.principal_id).toMatch(/^hmac-sha256:[0-9a-f]{64}$/);
 			expect(JSON.stringify(identities)).not.toContain("new-session");
 			expect(JSON.stringify(identities)).not.toContain("person@example.test");
-			expect(migrated.query("SELECT LENGTH(value) AS length FROM vehicle_metrics_metadata WHERE key = 'identity_salt'").get()).toEqual({ length: 64 });
+			expect(migrated.query("SELECT LENGTH(value) AS length FROM vehicle_metrics_metadata WHERE key = 'identity_salt'").get()).toEqual({
+				length: 64,
+			});
 			migrated.close();
 		} finally {
 			rmSync(dir, { recursive: true, force: true });

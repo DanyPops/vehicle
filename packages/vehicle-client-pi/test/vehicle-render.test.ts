@@ -293,12 +293,7 @@ describe("renderVehicleCall", () => {
 			},
 		});
 		const firstBody = Array.from({ length: 10 }, (_, index) => `line-${index + 1}`).join("\n");
-		const first = renderVehicleCall(
-			streaming,
-			{ body: firstBody },
-			fakeTheme,
-			callContext({ argsComplete: false, isPartial: true }),
-		);
+		const first = renderVehicleCall(streaming, { body: firstBody }, fakeTheme, callContext({ argsComplete: false, isPartial: true }));
 		const secondBody = `${firstBody}\nline-11`;
 		const second = renderVehicleCall(
 			streaming,

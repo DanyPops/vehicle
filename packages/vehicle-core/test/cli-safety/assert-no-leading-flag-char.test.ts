@@ -54,7 +54,9 @@ describe("assertNoLeadingFlagChar", () => {
 		} catch (error) {
 			expect(error).toBeInstanceOf(UnsafeCliArgument);
 			expect((error as UnsafeCliArgument).fieldName).toBeUndefined();
-			expect((error as Error).message).toBe('"-c" cannot be used as a CLI argument -- it would be interpreted as a flag, not a literal value');
+			expect((error as Error).message).toBe(
+				'"-c" cannot be used as a CLI argument -- it would be interpreted as a flag, not a literal value',
+			);
 		}
 	});
 });

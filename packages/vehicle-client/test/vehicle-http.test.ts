@@ -149,7 +149,11 @@ function countingFetch(pathSubstring: string): { fetchImpl: typeof globalThis.fe
 	return { fetchImpl, count: () => count };
 }
 
-function startTestServer(options: { logger?: Logger; invocationAuthority?: VehicleHttpProviderOptions["invocationAuthority"] } = {}): { baseUrl: string; token: string; registry: VehicleRegistry } {
+function startTestServer(options: { logger?: Logger; invocationAuthority?: VehicleHttpProviderOptions["invocationAuthority"] } = {}): {
+	baseUrl: string;
+	token: string;
+	registry: VehicleRegistry;
+} {
 	const token = "test-token";
 	const registry = new VehicleRegistry({ name: "test-vehicle", version: "1.0.0", description: "Test Vehicle" });
 	registry.register(
@@ -228,7 +232,9 @@ describe("Vehicle HTTP provider + RemoteVehicleClient: local/HTTP parity", () =>
 		const { baseUrl } = startTestServer();
 		const client = new RemoteVehicleClient({ baseUrl, token: "wrong-token" });
 		await expect(client.manifest()).rejects.toThrow();
-		await expect(client.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] })).rejects.toThrow();
+		await expect(
+			client.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] }),
+		).rejects.toThrow();
 	});
 
 	it("invoke() round-trips input/output exactly like LocalVehicleClient would", async () => {

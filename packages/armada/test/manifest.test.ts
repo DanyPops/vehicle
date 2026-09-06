@@ -155,9 +155,7 @@ describe("decodeArmadaManifest", () => {
 	});
 
 	it("accepts and preserves a Vehicle's contentSignature", () => {
-		const outcome = decodeArmadaManifest(
-			manifestJson([{ ...JSON.parse(manifestJson()).vehicles[0], contentSignature: "a".repeat(64) }]),
-		);
+		const outcome = decodeArmadaManifest(manifestJson([{ ...JSON.parse(manifestJson()).vehicles[0], contentSignature: "a".repeat(64) }]));
 		expect(outcome.ok).toBe(true);
 		if (!outcome.ok) return;
 		expect(outcome.manifest.vehicles[0]?.contentSignature).toBe("a".repeat(64));

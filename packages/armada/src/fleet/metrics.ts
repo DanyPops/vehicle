@@ -19,8 +19,9 @@
  * types, so this file needs neither "bun-types" nor a node:sqlite type version bump in this
  * package's own tsconfig (which targets plain "node" types only).
  */
-import { createRequire } from "node:module";
+
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 
@@ -77,7 +78,15 @@ export function resolveVehicleMetricsPath(
 	return posix.join(dataHome, vehicleName, DEFAULT_METRICS_FILENAME);
 }
 
-export type VehicleMetricsGroupDimension = "toolName" | "vehicleName" | "source" | "callerSessionId" | "outcome" | "errorCode" | "day" | "hour";
+export type VehicleMetricsGroupDimension =
+	| "toolName"
+	| "vehicleName"
+	| "source"
+	| "callerSessionId"
+	| "outcome"
+	| "errorCode"
+	| "day"
+	| "hour";
 
 export interface VehicleMetricsQuery {
 	/** Epoch ms, inclusive. Omit for "since the beginning". */
@@ -211,25 +220,29 @@ export function queryVehicleMetricsResult(dbPath: string, query: VehicleMetricsQ
 		`;
 		const rows = db.prepare(sql).all(params) as readonly MetricsSqlRow[];
 		const truncated = rows.length > limit;
-		return { rows: rows.slice(0, limit).map((row) => {
-			const key: Record<string, string> = {};
-			for (const dimension of groupBy) key[dimension] = String(row[dimension] ?? "");
-			return {
-				key,
-				count: Number(row.count),
-				successCount: Number(row.successCount),
-				failureCount: Number(row.failureCount),
-				avgDurationMs: row.avgDurationMs === null || row.avgDurationMs === undefined ? null : Number(row.avgDurationMs),
-				durationHistogram: {
-					le10: Number(row.durationLe10),
-					le50: Number(row.durationLe50),
-					le100: Number(row.durationLe100),
-					le500: Number(row.durationLe500),
-					le1000: Number(row.durationLe1000),
-					gt1000: Number(row.durationGt1000),
-				},
-			};
-		}), limit, truncated };
+		return {
+			rows: rows.slice(0, limit).map((row) => {
+				const key: Record<string, string> = {};
+				for (const dimension of groupBy) key[dimension] = String(row[dimension] ?? "");
+				return {
+					key,
+					count: Number(row.count),
+					successCount: Number(row.successCount),
+					failureCount: Number(row.failureCount),
+					avgDurationMs: row.avgDurationMs === null || row.avgDurationMs === undefined ? null : Number(row.avgDurationMs),
+					durationHistogram: {
+						le10: Number(row.durationLe10),
+						le50: Number(row.durationLe50),
+						le100: Number(row.durationLe100),
+						le500: Number(row.durationLe500),
+						le1000: Number(row.durationLe1000),
+						gt1000: Number(row.durationGt1000),
+					},
+				};
+			}),
+			limit,
+			truncated,
+		};
 	} finally {
 		db.close();
 	}

@@ -111,9 +111,9 @@ describe("Vehicle protocol negotiation", () => {
 		expect(() => registry.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] })).toThrow(
 			expect.objectContaining({ code: "protocol-version-incompatible" }),
 		);
-		expect(() => registry.negotiate({ minimumVersion: 2, maximumVersion: 2, requiredCapabilities: ["jobs"], optionalCapabilities: [] })).toThrow(
-			expect.objectContaining({ code: "protocol-capability-unsupported" }),
-		);
+		expect(() =>
+			registry.negotiate({ minimumVersion: 2, maximumVersion: 2, requiredCapabilities: ["jobs"], optionalCapabilities: [] }),
+		).toThrow(expect.objectContaining({ code: "protocol-capability-unsupported" }));
 	});
 });
 
@@ -572,9 +572,14 @@ describe("VehicleRegistry", () => {
 			});
 
 			const requestId = await requestApprovalGate(registry);
-			const resolution = (await registry.invoke("vehicle.approval.resolve", 1, { requestId, decision: "granted" }, {
-				permissions: ["vehicle:approvals:resolve"],
-			})) as { capability: string };
+			const resolution = (await registry.invoke(
+				"vehicle.approval.resolve",
+				1,
+				{ requestId, decision: "granted" },
+				{
+					permissions: ["vehicle:approvals:resolve"],
+				},
+			)) as { capability: string };
 			const result = await registry.invoke(
 				"test.destructive-echo",
 				1,

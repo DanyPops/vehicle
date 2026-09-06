@@ -88,7 +88,9 @@ describe("resolveVehicleMetricsPath", () => {
 	});
 
 	it("macOS: ~/Library/Application Support/<vehicle>/metrics.sqlite", () => {
-		expect(resolveVehicleMetricsPath("papyrus", "darwin", {}, "/Users/x")).toBe("/Users/x/Library/Application Support/papyrus/metrics.sqlite");
+		expect(resolveVehicleMetricsPath("papyrus", "darwin", {}, "/Users/x")).toBe(
+			"/Users/x/Library/Application Support/papyrus/metrics.sqlite",
+		);
 	});
 
 	it("Windows: %LOCALAPPDATA%/<vehicle>/Data/metrics.sqlite", () => {
@@ -185,7 +187,11 @@ describe("queryVehicleMetrics", () => {
 				gt1000: 1,
 			});
 			// biome-ignore lint/complexity/useLiteralKeys: required by noPropertyAccessFromIndexSignature
-			expect(queryVehicleMetricsResult(path, { groupBy: ["errorCode"] }).rows.map((row) => row.key["errorCode"])).toEqual(["", "busy", "not-found"]);
+			expect(queryVehicleMetricsResult(path, { groupBy: ["errorCode"] }).rows.map((row) => row.key["errorCode"])).toEqual([
+				"",
+				"busy",
+				"not-found",
+			]);
 		} finally {
 			removeTestDir(dir);
 		}

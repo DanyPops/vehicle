@@ -9,8 +9,8 @@
  * masking a real failure's own error.
  */
 import { isVehicleError } from "@danypops/vehicle-core";
-import type { VehicleExecutionMiddleware, VehicleExecutionRequest } from "./vehicle-registry.js";
 import type { VehicleMetricsStore } from "./vehicle-metrics-store.js";
+import type { VehicleExecutionMiddleware, VehicleExecutionRequest } from "./vehicle-registry.js";
 
 /** Distinct id namespace per vehicleName -- useExecutionMiddleware() rejects a duplicate id, and a process can host more than one VehicleRegistry (rare, but not disallowed). */
 export function vehicleMetricsMiddlewareId(vehicleName: string): string {

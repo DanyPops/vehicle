@@ -335,11 +335,9 @@ export class VehicleRegistry {
 			throw new Error(`Vehicle execution middleware "${middleware.id}" is already registered`);
 		}
 		if (this.executionMiddlewares.length >= MAX_EXECUTION_MIDDLEWARES) {
-			throw new VehicleError(
-				"capacity-exceeded",
-				`Cannot register more than ${MAX_EXECUTION_MIDDLEWARES} Vehicle execution middlewares`,
-				{ category: "conflict" },
-			);
+			throw new VehicleError("capacity-exceeded", `Cannot register more than ${MAX_EXECUTION_MIDDLEWARES} Vehicle execution middlewares`, {
+				category: "conflict",
+			});
 		}
 		this.executionMiddlewares.push(middleware);
 	}

@@ -55,11 +55,13 @@ describe("connectUnixRpc", () => {
 		});
 		try {
 			const transport = connectUnixRpc({ path });
-			const response = await transport(new Request("http://unix.local/vehicle/invoke", {
-				method: "POST",
-				headers: { authorization: "Bearer test-token", "content-type": "application/json" },
-				body: JSON.stringify({ name: "missing", version: 1, input: {} }),
-			}));
+			const response = await transport(
+				new Request("http://unix.local/vehicle/invoke", {
+					method: "POST",
+					headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+					body: JSON.stringify({ name: "missing", version: 1, input: {} }),
+				}),
+			);
 			expect(response.status).toBe(404);
 			expect(contexts).toEqual([{ transport: "unix", peer: { pid: process.pid, uid: process.getuid?.(), gid: process.getgid?.() } }]);
 		} finally {

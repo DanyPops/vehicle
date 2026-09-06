@@ -42,6 +42,7 @@ export interface VehicleConformanceRunner {
 	it(name: string, body: () => void | Promise<void>): unknown;
 	expect(actual: unknown, message?: string): VehicleConformanceMatchers;
 }
+
 import { bindVehicleOperation, defineVehicleOperation, defineVehicleSchema, VehicleError } from "@danypops/vehicle-core";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
 
@@ -328,9 +329,9 @@ export function registerVehicleClientConformance(runner: VehicleConformanceRunne
 					status: "unconfigured",
 					unconfiguredRiskyOperations: ["conformance.unconfigured-risk@1"],
 				});
-				await expect(
-					client.invoke("conformance.unconfigured-risk", 1, { value: "x" }, { idempotencyKey: "risk-1" }),
-				).rejects.toMatchObject({ code: "approval-policy-unconfigured", category: "authorization" });
+				await expect(client.invoke("conformance.unconfigured-risk", 1, { value: "x" }, { idempotencyKey: "risk-1" })).rejects.toMatchObject(
+					{ code: "approval-policy-unconfigured", category: "authorization" },
+				);
 			} finally {
 				await cleanup();
 			}

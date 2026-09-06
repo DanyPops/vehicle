@@ -83,7 +83,9 @@ describe("BoundedResourcePool foreground reservation", () => {
 		const firstQueued = pool.acquire("bg-b", "lang", () => fakeResource("bg-b", closed), "background");
 		await new Promise((resolve) => setTimeout(resolve, 10)); // let firstQueued actually enter the wait
 
-		await expect(pool.acquire("bg-c", "lang", () => fakeResource("bg-c", closed), "background")).rejects.toBeInstanceOf(ResourceAdmissionQueueFull);
+		await expect(pool.acquire("bg-c", "lang", () => fakeResource("bg-c", closed), "background")).rejects.toBeInstanceOf(
+			ResourceAdmissionQueueFull,
+		);
 
 		await expect(firstQueued).rejects.toBeInstanceOf(ResourceAdmissionQueueTimedOut);
 	});
@@ -155,10 +157,15 @@ describe("BoundedResourcePool foreground reservation", () => {
 			backgroundAdmissionQueueTimeoutMs: 2_000,
 		});
 		const held = await pool.acquire("held", "lang", () => fakeResource("held", []));
-		const background = pool.acquire("background", "lang", () => {
-			admitted.push("background");
-			return fakeResource("background", []);
-		}, "background");
+		const background = pool.acquire(
+			"background",
+			"lang",
+			() => {
+				admitted.push("background");
+				return fakeResource("background", []);
+			},
+			"background",
+		);
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		const foreground = pool.acquire("foreground", "lang", () => {
 			admitted.push("foreground");

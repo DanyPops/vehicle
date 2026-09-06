@@ -32,7 +32,6 @@ import {
 import type { RegisterVehicleToolsWhenReadyOptions } from "./vehicle-pi/ready-retry.js";
 import { registerVehicleToolsWhenReady as registerVehicleToolsWhenReadyImpl } from "./vehicle-pi/ready-retry.js";
 import { reportRenderCoverageGaps } from "./vehicle-pi/render-coverage.js";
-import { estimateToolWeightTokens } from "./vehicle-shell/tool-weight.js";
 import {
 	assertNamesAvailable,
 	buildOperationActivator,
@@ -60,6 +59,7 @@ import {
 	resolveSafetyState,
 	sanitizedFailure,
 } from "./vehicle-safety-classification.js";
+import { estimateToolWeightTokens } from "./vehicle-shell/tool-weight.js";
 import {
 	applyVehicleShellActivation,
 	refreshVehicleShellManagedTools,

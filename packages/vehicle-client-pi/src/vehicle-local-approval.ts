@@ -133,6 +133,7 @@ export async function requestLocalApproval(
 		title: `Approve ${displayLabel(descriptor)}?`,
 		message: `${operationKey(descriptor)} (${descriptor.effect} effect) requests approval before it can run.\n\nInput:\n${formatJson(input)}`,
 	};
-	if (requester) return requester(context, { descriptor, input, signal, presentation, prompt: { title, message }, timeoutMs: resolvedTimeoutMs });
+	if (requester)
+		return requester(context, { descriptor, input, signal, presentation, prompt: { title, message }, timeoutMs: resolvedTimeoutMs });
 	return requestPiApproval(context, { title, message, presentation, signal, timeout: resolvedTimeoutMs });
 }

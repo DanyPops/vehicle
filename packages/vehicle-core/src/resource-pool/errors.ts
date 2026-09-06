@@ -5,7 +5,9 @@ export class ResourceCapacityExceeded extends Error {
 		readonly maxActive: number,
 		readonly partitionLimit: number,
 	) {
-		super(`no idle resource can be evicted to admit partition "${partitionKey}" within global capacity ${maxActive} and partition capacity ${partitionLimit}`);
+		super(
+			`no idle resource can be evicted to admit partition "${partitionKey}" within global capacity ${maxActive} and partition capacity ${partitionLimit}`,
+		);
 		this.name = "ResourceCapacityExceeded";
 	}
 }

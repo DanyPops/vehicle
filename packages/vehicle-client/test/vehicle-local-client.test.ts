@@ -58,7 +58,9 @@ describe("LocalVehicleClient", () => {
 		const client = clientWith();
 		await client.close();
 		await expect(client.manifest()).rejects.toMatchObject({ code: "client-closed", category: "unavailable" });
-		await expect(client.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] })).rejects.toMatchObject({ code: "client-closed" });
+		await expect(
+			client.negotiate({ minimumVersion: 1, maximumVersion: 1, requiredCapabilities: [], optionalCapabilities: [] }),
+		).rejects.toMatchObject({ code: "client-closed" });
 		await expect(client.invoke("test.echo", 1, { value: "hi" })).rejects.toMatchObject({ code: "client-closed" });
 	});
 });

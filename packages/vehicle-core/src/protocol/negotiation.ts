@@ -42,10 +42,7 @@ export const DEFAULT_VEHICLE_PROTOCOL_SUPPORT: VehicleProtocolSupport = Object.f
 
 function validVersionRange(minimumVersion: number, maximumVersion: number): boolean {
 	return (
-		Number.isSafeInteger(minimumVersion) &&
-		minimumVersion > 0 &&
-		Number.isSafeInteger(maximumVersion) &&
-		maximumVersion >= minimumVersion
+		Number.isSafeInteger(minimumVersion) && minimumVersion > 0 && Number.isSafeInteger(maximumVersion) && maximumVersion >= minimumVersion
 	);
 }
 
@@ -67,12 +64,13 @@ export function isVehicleProtocolAgreement(value: unknown): value is VehicleProt
 }
 
 /** Negotiates one bounded protocol agreement without performing transport I/O. */
-export function negotiateVehicleProtocol(
-	support: VehicleProtocolSupport,
-	offer: VehicleProtocolOffer,
-): VehicleProtocolNegotiationResult {
+export function negotiateVehicleProtocol(support: VehicleProtocolSupport, offer: VehicleProtocolOffer): VehicleProtocolNegotiationResult {
 	if (!validVersionRange(support.minimumVersion, support.maximumVersion) || !validCapabilities(support.capabilities)) {
-		return { ok: false, code: "protocol-support-invalid", message: "Vehicle protocol support is malformed or exceeds its capability bound" };
+		return {
+			ok: false,
+			code: "protocol-support-invalid",
+			message: "Vehicle protocol support is malformed or exceeds its capability bound",
+		};
 	}
 	if (
 		!validVersionRange(offer.minimumVersion, offer.maximumVersion) ||

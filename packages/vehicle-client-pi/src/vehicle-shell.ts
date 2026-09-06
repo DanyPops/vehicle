@@ -54,11 +54,11 @@ export {
 } from "./vehicle-shell/toolbox-reminder.js";
 export { VehicleShellTtlTracker } from "./vehicle-shell/ttl-tracker.js";
 export {
+	type ReportableVehicle,
 	reportableVehiclesByName,
 	reportShellToolUsage,
 	reportShellToolUsageToAllDiscovered,
-	safeReportShellToolUsage,
-	type ReportableVehicle,
 	type ShellMetaToolName,
+	safeReportShellToolUsage,
 } from "./vehicle-shell/usage-reporting.js";
 export { type WeightedLruSnapshotEntry, WeightedLruTracker } from "./vehicle-shell/weighted-lru.js";

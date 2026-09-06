@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { renderToTerminal } from "@danypops/pi-tui-harness";
 import type { VehicleManifest, VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import { initTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { renderToTerminal } from "@danypops/pi-tui-harness";
 import { createTool } from "../src/vehicle-pi/tool-creation.ts";
 
 // Never actually invoked by either test -- both only construct the tool definition and drive

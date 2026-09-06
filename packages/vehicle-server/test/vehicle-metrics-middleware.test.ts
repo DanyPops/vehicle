@@ -1,8 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { bindVehicleOperation, defineLooseObjectSchema, defineVehicleOperation, passthroughVehicleSchema, VehicleError } from "@danypops/vehicle-core";
-import { VehicleRegistry } from "../src/vehicle-registry.ts";
+import {
+	bindVehicleOperation,
+	defineLooseObjectSchema,
+	defineVehicleOperation,
+	passthroughVehicleSchema,
+	VehicleError,
+} from "@danypops/vehicle-core";
 import { createVehicleMetricsMiddleware, vehicleMetricsMiddlewareId } from "../src/vehicle-metrics-middleware.ts";
 import { openVehicleMetricsStore, type VehicleMetricsStore } from "../src/vehicle-metrics-store.ts";
+import { VehicleRegistry } from "../src/vehicle-registry.ts";
 
 const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 262_144 };
 
@@ -65,12 +71,17 @@ describe("createVehicleMetricsMiddleware", () => {
 		const registry = registryWithEcho();
 		registry.useExecutionMiddleware(createVehicleMetricsMiddleware(store, "test-vehicle"));
 
-		await registry.invoke("test.echo", 1, { value: "hi" }, {
-			permissions: [],
-			callerSessionId: "session-1",
-			callerProjectRoot: "/home/x/project",
-			principal: { id: "agent-1" },
-		});
+		await registry.invoke(
+			"test.echo",
+			1,
+			{ value: "hi" },
+			{
+				permissions: [],
+				callerSessionId: "session-1",
+				callerProjectRoot: "/home/x/project",
+				principal: { id: "agent-1" },
+			},
+		);
 
 		const rows = store.query({ callerSessionId: "session-1" });
 		expect(rows[0]?.count).toBe(1);

@@ -16,9 +16,20 @@
  * `<prefix>` defaults to "metrics" -- see RegisterVehicleMetricsOperationsOptions.operationPrefix
  * for a Vehicle whose own domain already owns that namespace.
  */
-import { bindVehicleOperation, defineLooseObjectSchema, defineVehicleOperation, passthroughVehicleSchema, VehicleError } from "@danypops/vehicle-core";
+import {
+	bindVehicleOperation,
+	defineLooseObjectSchema,
+	defineVehicleOperation,
+	passthroughVehicleSchema,
+	VehicleError,
+} from "@danypops/vehicle-core";
+import type {
+	VehicleMetricsGroupDimension,
+	VehicleMetricsOutcome,
+	VehicleMetricsQuery,
+	VehicleMetricsStore,
+} from "./vehicle-metrics-store.js";
 import type { VehicleRegistry } from "./vehicle-registry.js";
-import type { VehicleMetricsGroupDimension, VehicleMetricsOutcome, VehicleMetricsQuery, VehicleMetricsStore } from "./vehicle-metrics-store.js";
 
 const DEFAULT_OPERATION_PREFIX = "metrics";
 const LIMITS = { defaultTimeoutMs: 5_000, maxTimeoutMs: 30_000, maxRequestBytes: 65_536, maxResponseBytes: 1_048_576 };
@@ -36,7 +47,16 @@ export interface RegisterVehicleMetricsOperationsOptions {
 	readonly operationPrefix?: string;
 }
 
-const GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = ["toolName", "vehicleName", "source", "callerSessionId", "outcome", "errorCode", "day", "hour"];
+const GROUP_DIMENSIONS: readonly VehicleMetricsGroupDimension[] = [
+	"toolName",
+	"vehicleName",
+	"source",
+	"callerSessionId",
+	"outcome",
+	"errorCode",
+	"day",
+	"hour",
+];
 const OUTCOMES: readonly VehicleMetricsOutcome[] = ["success", "failure"];
 
 /** The only tool names a client is ever allowed to self-report -- vehicle-client-pi's own Vehicle Shell meta-tools, which never themselves reach this daemon's invoke() path. Every real operation invocation is already captured automatically by vehicle-metrics-middleware.ts; a client has no business reporting one of those itself. */
@@ -72,7 +92,10 @@ function optionalNonNegativeInteger(input: Record<string, unknown>, key: string,
 function toQuery(input: Record<string, unknown>): VehicleMetricsQuery {
 	const groupByRaw = input.groupBy;
 	const groupBy = Array.isArray(groupByRaw)
-		? groupByRaw.filter((value): value is VehicleMetricsGroupDimension => typeof value === "string" && (GROUP_DIMENSIONS as readonly string[]).includes(value))
+		? groupByRaw.filter(
+				(value): value is VehicleMetricsGroupDimension =>
+					typeof value === "string" && (GROUP_DIMENSIONS as readonly string[]).includes(value),
+			)
 		: undefined;
 	const source = optionalString(input, "source");
 	if (source !== undefined && source !== "server" && source !== "client") {
@@ -129,7 +152,10 @@ export function registerVehicleMetricsOperations(
 		idempotency: { mode: "safe" },
 		limits: LIMITS,
 	});
-	registry.register(owner, bindVehicleOperation(legacyQueryOperation, () => async (context) => store.query(toQuery(context.input))));
+	registry.register(
+		owner,
+		bindVehicleOperation(legacyQueryOperation, () => async (context) => store.query(toQuery(context.input))),
+	);
 
 	const queryOperation = defineVehicleOperation({
 		name: `${prefix}.query`,
@@ -167,8 +193,7 @@ export function registerVehicleMetricsOperations(
 	const recordClientEventOperation = defineVehicleOperation({
 		name: `${prefix}.recordClientEvent`,
 		version: 1,
-		description:
-			`Records one client-observed Vehicle Shell meta-tool call (${CLIENT_REPORTABLE_TOOL_NAMES.join("/")}) against ${vehicleName}'s own metrics store -- these tools never themselves reach this daemon's invoke() path, so a client reports them explicitly. Every real operation invocation is already captured automatically; this is not a general-purpose event sink.`,
+		description: `Records one client-observed Vehicle Shell meta-tool call (${CLIENT_REPORTABLE_TOOL_NAMES.join("/")}) against ${vehicleName}'s own metrics store -- these tools never themselves reach this daemon's invoke() path, so a client reports them explicitly. Every real operation invocation is already captured automatically; this is not a general-purpose event sink.`,
 		input: defineLooseObjectSchema(
 			{
 				toolName: { type: "string", enum: [...CLIENT_REPORTABLE_TOOL_NAMES] },

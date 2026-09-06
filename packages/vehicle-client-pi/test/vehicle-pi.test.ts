@@ -480,7 +480,12 @@ describe("invokeVehicleOperation's extracted steps, exercised in isolation", () 
 		const client = new ApprovalFlowClient(manifest([descriptor]));
 		const resolveFailingClient = {
 			manifest: () => client.manifest(),
-			invoke: async <Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> => {
+			invoke: async <Output = unknown>(
+				name: string,
+				version: number,
+				input: unknown,
+				options?: VehicleInvocationOptions,
+			): Promise<Output> => {
 				if (name === "vehicle.approval.resolve") throw new Error("resolve endpoint unreachable");
 				return client.invoke<Output>(name, version, input, options);
 			},

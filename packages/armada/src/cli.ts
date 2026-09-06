@@ -466,7 +466,9 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
 				? `, latency <=10/50/100/500/1000/>1000ms ${row.durationHistogram.le10}/${row.durationHistogram.le50}/${row.durationHistogram.le100}/${row.durationHistogram.le500}/${row.durationHistogram.le1000}/${row.durationHistogram.gt1000}`
 				: "";
 			const prefix = keyText.length > 0 ? `${keyText}: ` : "";
-			dependencies.io.stdout(`${prefix}${row.count} call(s) (${row.successCount} success, ${row.failureCount} failure)${avgText}${histogramText}\n`);
+			dependencies.io.stdout(
+				`${prefix}${row.count} call(s) (${row.successCount} success, ${row.failureCount} failure)${avgText}${histogramText}\n`,
+			);
 		}
 		if (result.truncated) dependencies.io.stdout(`Showing ${rows.length} groups; increase --limit to inspect more (maximum 1000).\n`);
 		return 0;

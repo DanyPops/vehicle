@@ -1,10 +1,10 @@
 import { describe, expect, it, mock } from "bun:test";
 import {
+	type ReportableVehicle,
 	reportableVehiclesByName,
 	reportShellToolUsage,
 	reportShellToolUsageToAllDiscovered,
 	safeReportShellToolUsage,
-	type ReportableVehicle,
 } from "../src/vehicle-shell/usage-reporting.ts";
 
 function fakeVehicle(name: string, invoke = mock(async () => ({}) as unknown)): ReportableVehicle {
@@ -71,9 +71,12 @@ describe("safeReportShellToolUsage", () => {
 	});
 
 	it("never throws even when invoke() itself throws synchronously", () => {
-		const throwing = fakeVehicle("broken", mock(() => {
-			throw new Error("boom");
-		}) as never);
+		const throwing = fakeVehicle(
+			"broken",
+			mock(() => {
+				throw new Error("boom");
+			}) as never,
+		);
 		expect(() => safeReportShellToolUsage([throwing], "tools_list", "success", 0, undefined, undefined)).not.toThrow();
 	});
 });

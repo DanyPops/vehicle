@@ -72,11 +72,17 @@ async function callTool(tools: ToolDefinition[], name: string, params: unknown) 
 async function callToolWithContext(tools: ToolDefinition[], name: string, params: unknown, sessionId: string, cwd: string) {
 	const tool = tools.find((t) => t.name === name);
 	if (!tool) throw new Error(`tool ${name} not registered`);
-	return tool.execute("call-1", params as never, undefined as never, undefined as never, {
-		hasUI: false,
-		cwd,
-		sessionManager: { getSessionId: () => sessionId },
-	} as never);
+	return tool.execute(
+		"call-1",
+		params as never,
+		undefined as never,
+		undefined as never,
+		{
+			hasUI: false,
+			cwd,
+			sessionManager: { getSessionId: () => sessionId },
+		} as never,
+	);
 }
 
 /** tools_list's own usage report runs concurrently with (never blocking) its real response -- see usage-reporting.ts's reportShellToolUsageToAllDiscovered. A test asserting it happened needs to let that background work actually land first. */
@@ -87,7 +93,12 @@ async function flushBackgroundReporting(): Promise<void> {
 /** Records every invoke() call this client receives, alongside FakeClient's own default {ok: true} response -- for asserting the Vehicle Shell's own client-event reporting (usage-reporting.ts) without a real daemon. */
 class SpyClient extends FakeClient {
 	readonly invocations: { name: string; version: number; input: unknown; options?: VehicleInvocationOptions }[] = [];
-	override async invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> {
+	override async invoke<Output = unknown>(
+		name: string,
+		version: number,
+		input: unknown,
+		options?: VehicleInvocationOptions,
+	): Promise<Output> {
 		this.invocations.push({ name, version, input, options });
 		return super.invoke(name, version, input, options);
 	}
@@ -541,7 +552,11 @@ describe("registerVehicleTools with shell activation", () => {
 		it("fires only once the configured turn threshold is crossed, never before", async () => {
 			const { pi, harness } = fakePi();
 			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-				shell: { coreOperations: ["tasks.create"], budget: zeroBudget, toolboxReminder: { minTurnsSinceInactive: 2, minMsSinceInactive: Number.POSITIVE_INFINITY } },
+				shell: {
+					coreOperations: ["tasks.create"],
+					budget: zeroBudget,
+					toolboxReminder: { minTurnsSinceInactive: 2, minMsSinceInactive: Number.POSITIVE_INFINITY },
+				},
 			});
 
 			// The reminder tracker's own turn counter advances on every turn_end regardless of eviction
@@ -585,7 +600,11 @@ describe("registerVehicleTools with shell activation", () => {
 		it("never forces reactivation -- the nudged tool stays inactive, only a message was sent", async () => {
 			const { pi, harness } = fakePi();
 			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-				shell: { coreOperations: ["tasks.create"], budget: zeroBudget, toolboxReminder: { minTurnsSinceInactive: 1, minMsSinceInactive: Number.POSITIVE_INFINITY } },
+				shell: {
+					coreOperations: ["tasks.create"],
+					budget: zeroBudget,
+					toolboxReminder: { minTurnsSinceInactive: 1, minMsSinceInactive: Number.POSITIVE_INFINITY },
+				},
 			});
 			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
 			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // evicted
@@ -614,7 +633,11 @@ describe("registerVehicleTools with shell activation", () => {
 		it("reactivating via tools_man before the threshold clears the episode -- no stale nudge later", async () => {
 			const { pi, tools, harness } = fakePi();
 			await registerVehicleTools(pi, new FakeClient(manifest([operation("tasks.create")])), {
-				shell: { coreOperations: ["tasks.create"], budget: zeroBudget, toolboxReminder: { minTurnsSinceInactive: 2, minMsSinceInactive: Number.POSITIVE_INFINITY } },
+				shell: {
+					coreOperations: ["tasks.create"],
+					budget: zeroBudget,
+					toolboxReminder: { minTurnsSinceInactive: 2, minMsSinceInactive: Number.POSITIVE_INFINITY },
+				},
 			});
 			await harness.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] });
 			await harness.emit("turn_end", { turnIndex: 1, message: {}, toolResults: [] }); // evicted
@@ -989,7 +1012,11 @@ describe("the shared meta-tools are registered exactly once, no matter how many 
 			});
 
 			const result = (await callTool(tools, "tools_type", { names: ["papyrus:tasks.create"] })) as { content: Array<{ text: string }> };
-			const weight = estimateToolWeightTokens({ name: "tasks_create", description: descriptor.description, parameters: descriptor.inputSchema });
+			const weight = estimateToolWeightTokens({
+				name: "tasks_create",
+				description: descriptor.description,
+				parameters: descriptor.inputSchema,
+			});
 			// The only tracked entry is trivially its own lowest-priority one -- reported as near eviction.
 			expect(result.content[0]?.text).toBe(
 				`papyrus:tasks.create: active -- callable now as tasks_create (~${weight} token(s) of context) -- least protected right now, likely first evicted under context pressure.`,
@@ -1245,7 +1272,12 @@ describe("Vehicle Shell meta-tools report their own usage to the relevant vehicl
 
 	it("tools_list still returns its own real result even when the target vehicle's metrics.recordClientEvent call rejects", async () => {
 		class ThrowingMetricsClient extends FakeClient {
-			override async invoke<Output = unknown>(name: string, version: number, input: unknown, options?: VehicleInvocationOptions): Promise<Output> {
+			override async invoke<Output = unknown>(
+				name: string,
+				version: number,
+				input: unknown,
+				options?: VehicleInvocationOptions,
+			): Promise<Output> {
 				if (name === "metrics.recordClientEvent") throw new Error("daemon unreachable");
 				return super.invoke(name, version, input, options);
 			}

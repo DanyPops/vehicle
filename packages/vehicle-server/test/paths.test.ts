@@ -78,12 +78,20 @@ describe("resolveDaemonPaths", () => {
 		expect(paths.serviceDescriptor).toBe("C:\\Users\\x\\AppData\\Roaming\\acme-daemon\\Config\\acme.service");
 	});
 
-	it("metricsFilename override replaces the default \"metrics.sqlite\" name, on every platform", () => {
+	it('metricsFilename override replaces the default "metrics.sqlite" name, on every platform', () => {
 		const namesWithOverride = { ...NAMES, metricsFilename: "usage.sqlite" };
-		expect(resolveDaemonPaths(namesWithOverride, { platform: "linux", env: {}, home: "/home/x", uid: 1000 }).metrics).toBe("/home/x/.local/share/acme-daemon/usage.sqlite");
-		expect(resolveDaemonPaths(namesWithOverride, { platform: "darwin", home: "/Users/x" }).metrics).toBe("/Users/x/Library/Application Support/acme-daemon/usage.sqlite");
+		expect(resolveDaemonPaths(namesWithOverride, { platform: "linux", env: {}, home: "/home/x", uid: 1000 }).metrics).toBe(
+			"/home/x/.local/share/acme-daemon/usage.sqlite",
+		);
+		expect(resolveDaemonPaths(namesWithOverride, { platform: "darwin", home: "/Users/x" }).metrics).toBe(
+			"/Users/x/Library/Application Support/acme-daemon/usage.sqlite",
+		);
 		expect(
-			resolveDaemonPaths(namesWithOverride, { platform: "win32", home: "C:\\Users\\x", env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" } }).metrics,
+			resolveDaemonPaths(namesWithOverride, {
+				platform: "win32",
+				home: "C:\\Users\\x",
+				env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" },
+			}).metrics,
 		).toBe("C:\\Users\\x\\AppData\\Local\\acme-daemon\\Data\\usage.sqlite");
 	});
 });

@@ -1,6 +1,6 @@
 import type { VehicleJobWakeBudget } from "../jobs/wake-log.js";
-import { cloneJson, type JsonSchema } from "../schemas/json.js";
 import type { VehicleSchemaCodec } from "../schemas/codec.js";
+import { cloneJson, type JsonSchema } from "../schemas/json.js";
 import type { VehicleOperationHandler } from "./context.js";
 import type { VehicleEffect } from "./effect.js";
 

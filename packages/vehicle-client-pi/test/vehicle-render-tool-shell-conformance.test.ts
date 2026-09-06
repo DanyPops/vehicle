@@ -8,8 +8,9 @@
  * vehicle-conformance's own tool-shell-dual-channel.test.ts, which only proves the harness
  * against a hand-built synthetic fixture.
  */
-import type { VehicleOperationDescriptor } from "@danypops/vehicle-core";
+
 import { runToolShellDualChannelConformance, type ToolShellDualChannelFixture } from "@danypops/vehicle-conformance";
+import type { VehicleOperationDescriptor } from "@danypops/vehicle-core";
 import { initTheme, Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { renderVehicleCall, renderVehicleResult } from "../src/vehicle-render.ts";
 import {
@@ -167,7 +168,8 @@ const fixture: ToolShellDualChannelFixture = {
 				{ value: "progress", rawPayload: { current: 3, total: 10 } },
 			],
 			renderDeclaredValue: (value: string, rawPayload: unknown, options: { width: 40 | 80 | 120; expanded: boolean }) => {
-				const presentation = value === "progress" ? projectGenericVehicleProgress(rawPayload) : projectGenericVehiclePresentation(rawPayload);
+				const presentation =
+					value === "progress" ? projectGenericVehicleProgress(rawPayload) : projectGenericVehiclePresentation(rawPayload);
 				return renderResultLines({ presentation }, "MODEL_ONLY", options);
 			},
 		};

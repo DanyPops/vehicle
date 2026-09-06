@@ -161,9 +161,7 @@ function collectStreamFields(
 	}
 	if (Array.isArray(value)) {
 		const itemSchema =
-			typeof schema?.items === "object" && schema.items !== null && !Array.isArray(schema.items)
-				? (schema.items as SchemaNode)
-				: undefined;
+			typeof schema?.items === "object" && schema.items !== null && !Array.isArray(schema.items) ? (schema.items as SchemaNode) : undefined;
 		for (let index = 0; index < value.length; index++) {
 			collectStreamFields(value[index], itemSchema, `${path}[${index}]`, cwd, fields);
 		}
@@ -260,8 +258,7 @@ export function renderVehicleCall(
 		...(identity ? [theme.fg("accent", identity)] : []),
 		...(rest ? [theme.fg("dim", rest)] : []),
 	];
-	const component =
-		context.lastComponent instanceof VehicleCallRenderComponent ? context.lastComponent : new VehicleCallRenderComponent();
+	const component = context.lastComponent instanceof VehicleCallRenderComponent ? context.lastComponent : new VehicleCallRenderComponent();
 	const preview = context.isPartial && !context.argsComplete ? streamPreview(args, descriptor.inputSchema, context.cwd) : undefined;
 	component.setContent(effectStyle(theme, descriptor.effect, segments.join(" ")), preview === undefined ? undefined : `${preview}▌`);
 	return component;

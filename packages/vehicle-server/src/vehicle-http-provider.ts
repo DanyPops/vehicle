@@ -180,7 +180,9 @@ function transportContext(value: unknown): VehicleHttpTransportContext {
 	return { transport: candidate.transport, peer };
 }
 
-export function createVehicleHttpApp(options: VehicleHttpProviderOptions): { fetch(request: Request, context?: unknown): Promise<Response> } {
+export function createVehicleHttpApp(options: VehicleHttpProviderOptions): {
+	fetch(request: Request, context?: unknown): Promise<Response>;
+} {
 	const inFlight = new Map<string, AbortController>();
 	const logger = options.logger ?? NOOP_LOGGER;
 
@@ -264,11 +266,16 @@ function isInvocationAuthority(value: unknown): value is VehicleInvocationAuthor
 		candidate.permissions.some(
 			(permission) => typeof permission !== "string" || !permission.trim() || permission.length > MAX_ATTESTED_PERMISSION_LENGTH,
 		)
-	) return false;
+	)
+		return false;
 	if (candidate.principal === undefined) return true;
 	if (typeof candidate.principal !== "object" || candidate.principal === null) return false;
 	const principal = candidate.principal as { id?: unknown; claims?: unknown };
-	return typeof principal.id === "string" && principal.id.trim().length > 0 && (principal.claims === undefined || (typeof principal.claims === "object" && principal.claims !== null));
+	return (
+		typeof principal.id === "string" &&
+		principal.id.trim().length > 0 &&
+		(principal.claims === undefined || (typeof principal.claims === "object" && principal.claims !== null))
+	);
 }
 
 async function resolveInvocationAuthority(
@@ -322,7 +329,7 @@ async function handleInvoke(
 		signal: controller.signal,
 		deadline: typeof body.deadlineMs === "number" ? Date.now() + body.deadlineMs : undefined,
 		permissions: authority ? [...authority.permissions] : Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
-		principal: authority?.principal ?? ((body.principal as VehiclePrincipal | undefined) ?? undefined),
+		principal: authority?.principal ?? (body.principal as VehiclePrincipal | undefined) ?? undefined,
 		idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
 		expectedRevision: body.expectedRevision as string | number | undefined,
 		approvalCapability: typeof body.approvalCapability === "string" ? body.approvalCapability : undefined,
@@ -476,7 +483,7 @@ async function handleJobSubmit(
 	}
 	const submitOptions: VehicleJobSubmitOptions = {
 		permissions: authority ? [...authority.permissions] : Array.isArray(body.permissions) ? (body.permissions as string[]) : undefined,
-		principal: authority?.principal ?? ((body.principal as VehiclePrincipal | undefined) ?? undefined),
+		principal: authority?.principal ?? (body.principal as VehiclePrincipal | undefined) ?? undefined,
 		idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
 		expectedRevision: body.expectedRevision as string | number | undefined,
 		approvalCapability: typeof body.approvalCapability === "string" ? body.approvalCapability : undefined,
