@@ -9,6 +9,7 @@ import { createAgentNotifier, frameAsBackgroundNotification } from "../agent-pol
 import { reportModuleLoad, reportShellRegistered } from "../client-diagnostics.js";
 import { tryExtensionRuntimeAction } from "../pi-tool-availability.js";
 import { markSharedRegistration } from "../shared-registration-marker.js";
+import { registerShellCommand } from "./command.js";
 import {
 	computeToolContextBudget,
 	DEFAULT_BUDGET_FRACTION_OF_REMAINING,
@@ -90,9 +91,13 @@ function armReregistrationDetection(pi: ExtensionAPI): void {
 function registerShellToolsAndListeners(pi: ExtensionAPI, handle: VehicleShellHandle, claimedElsewhere: boolean): void {
 	reportShellRegistered("vehicle", handle.listToolName, handle.manToolName, !claimedElsewhere);
 	if (!claimedElsewhere) {
-		pi.registerTool(markSharedRegistration(createToolsListTool(handle.listToolName, handle.manToolName, handle)));
-		pi.registerTool(markSharedRegistration(createToolsManTool(pi, handle.listToolName, handle.manToolName, handle)));
-		pi.registerTool(markSharedRegistration(createToolsTypeTool(handle.listToolName, handle.manToolName, handle.typeToolName, handle)));
+		const tools = {
+			list: createToolsListTool(handle.listToolName, handle.manToolName, handle),
+			man: createToolsManTool(pi, handle.listToolName, handle.manToolName, handle),
+			type: createToolsTypeTool(handle.listToolName, handle.manToolName, handle.typeToolName, handle),
+		};
+		for (const tool of Object.values(tools)) pi.registerTool(markSharedRegistration(tool));
+		registerShellCommand(pi, tools);
 	}
 
 	pi.on("tool_execution_end", (event) => {

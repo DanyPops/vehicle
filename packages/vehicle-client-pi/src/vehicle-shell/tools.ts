@@ -128,7 +128,9 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 					verbosity?: "low" | "high";
 				};
 				reportToolsListExecute("vehicle", query);
+				_signal?.throwIfAborted();
 				const operations = await cachedAggregatedOperations(handle, handle.aggregateCacheTtlMs);
+				_signal?.throwIfAborted();
 
 				let score: (descriptor: VehicleOperationDescriptor) => number | undefined;
 				if (mode === "regex") {
@@ -202,6 +204,7 @@ export function createToolsManTool(
 			if (!Check(shellNamesSchema, params)) return shellInputError();
 			const names = (params as { names: string[] }).names;
 			reportToolsManExecute("vehicle", names);
+			_signal?.throwIfAborted();
 			const byKey = new Map(handle.managedTools.map((tool) => [`${tool.vehicleName}:${tool.operationName}`, tool]));
 			const vehicles = await discoverAllVehicles();
 			const byVehicleName = new Map(vehicles.map((vehicle) => [vehicle.name, vehicle]));
@@ -213,6 +216,7 @@ export function createToolsManTool(
 			// own cachedAggregatedOperations -- activation/documentation is consequential enough (and rare
 			// enough per turn) that it must always see live state, never something up to a TTL window stale.
 			const allOperations = await namespacedOperationsOf(vehicles);
+			_signal?.throwIfAborted();
 
 			const touchedVehicleNames = new Set<string>();
 			const pages = await Promise.all(
@@ -306,8 +310,10 @@ export function createToolsTypeTool(
 			const names = (params as { names: string[] }).names;
 			// Same as tools_man: deliberately always fresh, never tools_list's own cache -- a status check
 			// that itself lags reality would defeat its whole diagnostic purpose.
+			_signal?.throwIfAborted();
 			const vehicles = await discoverAllVehicles();
 			const allOperations = await namespacedOperationsOf(vehicles);
+			_signal?.throwIfAborted();
 			const results = names.map((name) => ({
 				name,
 				result: classifyOperationName(name, allOperations, handle.managedTools, handle.tracker),
