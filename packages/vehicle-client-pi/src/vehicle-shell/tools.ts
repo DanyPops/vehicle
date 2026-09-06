@@ -11,6 +11,7 @@ import {
 } from "@danypops/vehicle-core";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Check } from "typebox/value";
 import { reportToolsListExecute, reportToolsManExecute } from "../client-diagnostics.js";
 import {
 	compileShellQueryRegex,
@@ -23,6 +24,7 @@ import {
 	shellQueryScore,
 } from "./formatting.js";
 import { classifyOperationName, formatOperationTypeLine, resolveOperationName } from "./name-resolution.js";
+import { boundShellText, pageShellOperations, shellInputError, shellNamesSchema } from "./output-bounds.js";
 import {
 	applyShellActivation,
 	cachedAggregatedOperations,
@@ -34,14 +36,28 @@ import { estimateToolWeightTokens } from "./tool-weight.js";
 import { reportableVehiclesByName, reportShellToolUsageToAllDiscovered, safeReportShellToolUsage } from "./usage-reporting.js";
 
 export function createToolsListTool(listToolName: string, manToolName: string, handle: VehicleShellHandle): ToolDefinition {
-	return {
+	const tool: ToolDefinition = {
 		name: listToolName,
 		label: "List Tools",
-		description: `Lists every registered Vehicle's own operations, one line each, namespaced "<vehicle>:<operation>" (e.g. "papyrus:tasks.create"). Optionally filter by a keyword matched against the name and description, and/or by effect (${VEHICLE_EFFECTS.join(" | ")}) -- e.g. effect:"read" to browse only side-effect-free operations first. mode:"regex" treats query as a case-insensitive regular expression instead of a plain substring/prefix match (apropos's own default matching mode). scope:"name" restricts matching to the name alone, skipping the description. verbosity:"high" adds each match's own parameter/schema summary, avoiding a separate ${manToolName} round trip when browsing several operations' shape at once. Use ${manToolName} on a name from this list (or any name you already know) to see its full documentation (permissions/effect/idempotency too) and make it callable.`,
+		description: `Finds Vehicle operations as vehicle:operation names, without activation. Defaults: 50 results, 16 KiB full response. Filter by query, vehicle, namespace or effect; regex mode is case-insensitive, scope:name searches names only. High verbosity includes parameter summaries. Follow the returned cursor with the same filters; restart on stale-cursor. Summaries may be truncated. Use ${manToolName} to read a manual and activate exact names.`,
 		parameters: Type.Object({
-			query: Type.Optional(
-				Type.String({ description: "Keyword to filter by (matched against operation name and description); omit to list everything." }),
+			vehicle: Type.Optional(Type.String({ minLength: 1, maxLength: 64, description: "Exact Vehicle name." })),
+			namespace: Type.Optional(
+				Type.String({ minLength: 1, maxLength: 128, description: "Operation namespace, e.g. tasks or subscription.resets." }),
 			),
+			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+			maxBytes: Type.Optional(
+				Type.Integer({
+					minimum: 1024,
+					maximum: 65536,
+					default: 16384,
+					description: "Full UTF-8 JSON response ceiling, including details.",
+				}),
+			),
+			cursor: Type.Optional(
+				Type.String({ maxLength: 80, description: "Continuation from this catalog and the same filters; restart if stale." }),
+			),
+			query: Type.Optional(Type.String({ maxLength: 512, description: "Keyword matched against name and description." })),
 			mode: Type.Optional(
 				Type.Union([Type.Literal("substring"), Type.Literal("regex")], {
 					description:
@@ -75,15 +91,36 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 			const callerSessionId = ctx?.sessionManager?.getSessionId();
 			const callerProjectRoot = ctx?.cwd;
 			const report = (outcome: "success" | "failure") =>
-				reportShellToolUsageToAllDiscovered(discoverAllVehicles, "tools_list", outcome, Date.now() - startedAt, callerSessionId, callerProjectRoot);
+				reportShellToolUsageToAllDiscovered(
+					discoverAllVehicles,
+					"tools_list",
+					outcome,
+					Date.now() - startedAt,
+					callerSessionId,
+					callerProjectRoot,
+				);
 			try {
+				if (!Check(tool.parameters, params)) {
+					report("failure");
+					return shellInputError();
+				}
 				const {
+					vehicle,
+					namespace,
+					limit = 50,
+					maxBytes = 16_384,
+					cursor,
 					query = "",
 					mode = "substring",
 					effect,
 					scope = "all",
 					verbosity = "low",
 				} = params as {
+					vehicle?: string;
+					namespace?: string;
+					limit?: number;
+					maxBytes?: number;
+					cursor?: string;
 					query?: string;
 					mode?: "substring" | "regex";
 					effect?: VehicleEffect;
@@ -103,7 +140,12 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 						// normal, expected user input, not a bug.
 						report("success");
 						return {
-							content: [{ type: "text", text: `Invalid regex "${query}": ${error instanceof Error ? error.message : String(error)}` }],
+							content: [
+								{
+									type: "text",
+									text: boundShellText(`Invalid regex "${query}": ${error instanceof Error ? error.message : String(error)}`, 128),
+								},
+							],
 							details: {},
 						};
 					}
@@ -114,6 +156,9 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 
 				const matches = operations
 					.flatMap((descriptor, index) => {
+						const separator = descriptor.name.indexOf(":");
+						if (vehicle !== undefined && descriptor.name.slice(0, separator) !== vehicle) return [];
+						if (namespace !== undefined && !descriptor.name.slice(separator + 1).startsWith(`${namespace}.`)) return [];
 						if (effect !== undefined && descriptor.effect !== effect) return [];
 						const thisScore = score(descriptor);
 						return thisScore === undefined ? [] : [{ descriptor, index, score: thisScore }];
@@ -121,38 +166,40 @@ export function createToolsListTool(listToolName: string, manToolName: string, h
 					.sort((left, right) => left.score - right.score || left.index - right.index)
 					.map((entry) => entry.descriptor);
 				const formatMatch = verbosity === "high" ? formatOperationOneLinerVerbose : formatOperationOneLiner;
-				const text =
-					matches.length === 0
-						? `No operations matched "${query}"${effect ? ` with effect "${effect}"` : ""}.`
-						: matches.map((descriptor) => formatMatch(descriptor)).join("\n");
-				report("success");
-				return {
-					content: [{ type: "text", text }],
-					details: { operations: matches.map((descriptor) => ({ name: descriptor.name, description: descriptor.description })) },
-				};
+				const result = pageShellOperations(
+					matches,
+					{ limit, maxBytes, cursor, filterKey: JSON.stringify({ query, mode, effect, scope, verbosity, vehicle, namespace }) },
+					formatMatch,
+				);
+				if (matches.length === 0 && !("isError" in result))
+					result.content[0]!.text = boundShellText(`No operations matched "${query}"${effect ? ` with effect "${effect}"` : ""}.`, 128);
+				report("isError" in result ? "failure" : "success");
+				return result;
 			} catch (error) {
 				report("failure");
 				throw error;
 			}
 		},
 	};
+	return tool;
 }
 
-export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manToolName: string, handle: VehicleShellHandle): ToolDefinition {
+export function createToolsManTool(
+	pi: ExtensionAPI,
+	listToolName: string,
+	manToolName: string,
+	handle: VehicleShellHandle,
+): ToolDefinition {
 	return {
 		name: manToolName,
 		label: "Tool Manual",
-		description: `Shows full documentation for one or more Vehicle operations by their exact namespaced name (as seen from ${listToolName} or already known) and makes each one callable starting next turn. A name doesn't need to have been listed first. A bare, unprefixed name (no "vehicle:" part) also resolves as long as exactly one vehicle provides it -- ambiguous across more than one vehicle refuses and lists every real candidate instead of guessing.`,
-		parameters: Type.Object({
-			names: Type.Array(Type.String(), {
-				description: 'Exact operation name(s), namespaced ("papyrus:tasks.create") or bare ("tasks.create") when unambiguous.',
-				minItems: 1,
-			}),
-		}),
+		description: `Reads bounded manuals and activates up to 16 Vehicle operations for the next turn. Use exact vehicle:operation names from ${listToolName}, or unambiguous bare names. Ambiguous, unavailable and policy-blocked names are refused. Response ceiling: 64 KiB; oversized manuals carry explicit truncation markers.`,
+		parameters: shellNamesSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now();
 			const callerSessionId = ctx?.sessionManager?.getSessionId();
 			const callerProjectRoot = ctx?.cwd;
+			if (!Check(shellNamesSchema, params)) return shellInputError();
 			const names = (params as { names: string[] }).names;
 			reportToolsManExecute("vehicle", names);
 			const byKey = new Map(handle.managedTools.map((tool) => [`${tool.vehicleName}:${tool.operationName}`, tool]));
@@ -209,8 +256,15 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 					} catch (error) {
 						return `${fullName}: could not activate -- ${error instanceof Error ? error.message : String(error)}.`;
 					}
-					const weightTokens = estimateToolWeightTokens({ name: toolName, description: namespaced.description, parameters: namespaced.inputSchema });
-					handle.managedTools = [...handle.managedTools, { vehicleName, toolName, operationName, available: true, blocked: false, weightTokens }];
+					const weightTokens = estimateToolWeightTokens({
+						name: toolName,
+						description: namespaced.description,
+						parameters: namespaced.inputSchema,
+					});
+					handle.managedTools = [
+						...handle.managedTools,
+						{ vehicleName, toolName, operationName, available: true, blocked: false, weightTokens },
+					];
 					handle.tracker.seed(toolName, weightTokens);
 					return `${formatOperationManPage(namespaced, toolName, seeAlso)}\n\n(now callable as ${toolName})`;
 				}),
@@ -224,7 +278,11 @@ export function createToolsManTool(pi: ExtensionAPI, listToolName: string, manTo
 				callerSessionId,
 				callerProjectRoot,
 			);
-			return { content: [{ type: "text", text: pages.join("\n\n---\n\n") }], details: {} };
+			const bounded = pages.map((page) => boundShellText(page, Math.floor(9_000 / pages.length)));
+			return {
+				content: [{ type: "text", text: bounded.join("\n\n---\n\n") }],
+				details: { truncated: bounded.some((page, index) => page !== pages[index]) },
+			};
 		},
 	};
 }
@@ -238,17 +296,13 @@ export function createToolsTypeTool(
 	return {
 		name: typeToolName,
 		label: "Tool Type",
-		description: `Reports how each name currently resolves -- "active" (callable right now, with the real toolName, its own estimated context weight in tokens, and whether it's currently the least-protected active tool -- likely first evicted under context pressure), "dormant" (known, needs ${manToolName} to activate), "blocked" (known but currently unavailable or blocked by safety policy), "unreachable" (a namespaced name whose vehicle used to be known but produces nothing live right now), "ambiguous" (a bare name matching more than one vehicle -- use one of the listed full names), or "unknown" (no such operation anywhere currently discoverable). Read-only -- unlike ${manToolName}, never activates or evicts anything, so calling this never changes what's callable.`,
-		parameters: Type.Object({
-			names: Type.Array(Type.String(), {
-				description: 'Exact or bare operation name(s), e.g. "papyrus:tasks.create" or "tasks.create".',
-				minItems: 1,
-			}),
-		}),
+		description: `Inspects up to 16 exact or bare operation names without activation or eviction: active, dormant, blocked, unreachable, ambiguous or unknown. Active results include the Pi tool name, estimated token weight and eviction priority. Use ${manToolName} to activate dormant tools. Response ceiling: 64 KiB; narrow the batch on output-budget-exceeded.`,
+		parameters: shellNamesSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now();
 			const callerSessionId = ctx?.sessionManager?.getSessionId();
 			const callerProjectRoot = ctx?.cwd;
+			if (!Check(shellNamesSchema, params)) return shellInputError();
 			const names = (params as { names: string[] }).names;
 			// Same as tools_man: deliberately always fresh, never tools_list's own cache -- a status check
 			// that itself lags reality would defeat its whole diagnostic purpose.
@@ -275,10 +329,11 @@ export function createToolsTypeTool(
 				callerSessionId,
 				callerProjectRoot,
 			);
-			return {
-				content: [{ type: "text", text }],
-				details: { results: results.map(({ name, result }) => ({ name, ...result })) },
+			const response = {
+				content: [{ type: "text" as const, text }],
+				details: { results: results.map(({ name, result }) => ({ name, ...result })), truncated: false },
 			};
+			return Buffer.byteLength(JSON.stringify(response)) <= 65_536 ? response : shellInputError("output-budget-exceeded");
 		},
 	};
 }

@@ -93,7 +93,13 @@ describe("registerVehicleTools broker discovery across two real, separately-runn
 				XDG_RUNTIME_DIR: sharedEnv.XDG_RUNTIME_DIR,
 				XDG_DATA_HOME: sharedEnv.XDG_DATA_HOME,
 				XDG_STATE_HOME: sharedEnv.XDG_STATE_HOME,
-				[SCRIPT_ENV_VAR]: encodeFauxScript([{ type: "toolCall", name: "tools_list", arguments: {} }]),
+				[SCRIPT_ENV_VAR]: encodeFauxScript([
+					{
+						type: "toolCall",
+						name: "tools_list",
+						arguments: { query: "^(pipes:ci\\.help|papyrus:(tasks\\.create|notes\\.capture))$", mode: "regex", scope: "name" },
+					},
+				]),
 			},
 		});
 
@@ -113,6 +119,7 @@ describe("registerVehicleTools broker discovery across two real, separately-runn
 			expect(end.toolName).toBe("tools_list");
 			expect(end.isError).toBe(false);
 			const text = JSON.stringify(end.result);
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(16_384);
 			// Both real daemons' operations, uniformly namespaced -- neither is the accidental,
 			// unprefixed "local" vehicle the old whichever-wins-ownership design would have made pipes.
 			expect(text).toContain("pipes:ci.help");

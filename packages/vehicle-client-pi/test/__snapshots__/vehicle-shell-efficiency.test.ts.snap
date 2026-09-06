@@ -1,0 +1,85 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`shell exposure controls preserves cold/warm discovery: {"ttl":0,"query":""}: bounded candidate 1`] = `
+{
+  "estimatedResultTokens": 460,
+  "estimatedSchemaTokens": 832,
+  "operationCount": 24,
+  "operationDigest": "3f12941be381da921e8f5415c41e7416ff089a50ec9f85feed9d0278fb0e8f76",
+  "providerUsage": null,
+  "resultUtf8Bytes": 1861,
+  "schemaUtf8Bytes": 3450,
+}
+`;
+
+exports[`shell exposure controls preserves cold/warm discovery: {"ttl":0,"query":"records"}: bounded candidate 1`] = `
+{
+  "estimatedResultTokens": 230,
+  "estimatedSchemaTokens": 832,
+  "operationCount": 12,
+  "operationDigest": "f933cef3c29c8873b578187072dcac7c3b5cd3c0b146e3be1d25ee8e9ae47793",
+  "providerUsage": null,
+  "resultUtf8Bytes": 931,
+  "schemaUtf8Bytes": 3450,
+}
+`;
+
+exports[`shell exposure controls preserves cold/warm discovery: {"ttl":0,"query":"absent"}: bounded candidate 1`] = `
+{
+  "estimatedResultTokens": 15,
+  "estimatedSchemaTokens": 832,
+  "operationCount": 0,
+  "operationDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "providerUsage": null,
+  "resultUtf8Bytes": 60,
+  "schemaUtf8Bytes": 3450,
+}
+`;
+
+exports[`shell exposure controls preserves cold/warm discovery: {"ttl":60000,"query":""}: bounded candidate 1`] = `
+{
+  "estimatedResultTokens": 460,
+  "estimatedSchemaTokens": 832,
+  "operationCount": 24,
+  "operationDigest": "3f12941be381da921e8f5415c41e7416ff089a50ec9f85feed9d0278fb0e8f76",
+  "providerUsage": null,
+  "resultUtf8Bytes": 1861,
+  "schemaUtf8Bytes": 3450,
+}
+`;
+
+exports[`shell exposure controls preserves cold/warm discovery: {"ttl":60000,"query":"records"}: bounded candidate 1`] = `
+{
+  "estimatedResultTokens": 230,
+  "estimatedSchemaTokens": 832,
+  "operationCount": 12,
+  "operationDigest": "f933cef3c29c8873b578187072dcac7c3b5cd3c0b146e3be1d25ee8e9ae47793",
+  "providerUsage": null,
+  "resultUtf8Bytes": 931,
+  "schemaUtf8Bytes": 3450,
+}
+`;
+
+exports[`shell exposure controls preserves cold/warm discovery: {"ttl":60000,"query":"absent"}: bounded candidate 1`] = `
+{
+  "estimatedResultTokens": 15,
+  "estimatedSchemaTokens": 832,
+  "operationCount": 0,
+  "operationDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "providerUsage": null,
+  "resultUtf8Bytes": 60,
+  "schemaUtf8Bytes": 3450,
+}
+`;
+
+exports[`shell exposure controls activates only the requested identity on repeat: bounded activation candidate 1`] = `
+{
+  "estimatedResultTokens": 115,
+  "estimatedSchemaTokens": 892,
+  "operationCount": 1,
+  "operationDigest": "2ec1d5e7a3d2a34b58bc20f43e1b8ccb48ed9fa361c354ee4fc3610108fe6e4e",
+  "providerUsage": null,
+  "resultUtf8Bytes": 458,
+  "schemaUtf8Bytes": 3733,
+}
+`;

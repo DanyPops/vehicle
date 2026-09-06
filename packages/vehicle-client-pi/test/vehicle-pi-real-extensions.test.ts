@@ -90,7 +90,13 @@ describe("the real @danypops/pi-pipes + @danypops/pi-papyrus extensions, each ba
 				XDG_RUNTIME_DIR: sharedEnv.XDG_RUNTIME_DIR,
 				XDG_DATA_HOME: sharedEnv.XDG_DATA_HOME,
 				XDG_STATE_HOME: sharedEnv.XDG_STATE_HOME,
-				[SCRIPT_ENV_VAR]: encodeFauxScript([{ type: "toolCall", name: "tools_list", arguments: {} }]),
+				[SCRIPT_ENV_VAR]: encodeFauxScript([
+					{
+						type: "toolCall",
+						name: "tools_list",
+						arguments: { query: "^(pipes:ci\\.help|papyrus:(tasks\\.create|notes\\.capture))$", mode: "regex", scope: "name" },
+					},
+				]),
 			},
 		});
 
@@ -110,6 +116,7 @@ describe("the real @danypops/pi-pipes + @danypops/pi-papyrus extensions, each ba
 			expect(end.toolName).toBe("tools_list");
 			expect(end.isError).toBe(false);
 			const text = JSON.stringify(end.result);
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(16_384);
 			// Neither extension "owns" tools_list anymore -- the shared, neutral meta-tools namespace
 			// every vehicle's operations uniformly, regardless of which one happened to trigger their
 			// own creation. No more hedging on which side wins: both real daemons' real operations must
