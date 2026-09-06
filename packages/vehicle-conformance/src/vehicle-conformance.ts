@@ -43,28 +43,15 @@ export interface VehicleConformanceRunner {
 	expect(actual: unknown, message?: string): VehicleConformanceMatchers;
 }
 
-import { bindVehicleOperation, defineVehicleOperation, defineVehicleSchema, VehicleError } from "@danypops/vehicle-core";
+export * from "./operation-contracts.js";
+
+import { bindVehicleOperation, defineVehicleOperation, VehicleError } from "@danypops/vehicle-core";
+import { defineStrictVehicleSchema } from "@danypops/vehicle-core/typebox";
 import type { VehicleRegistry } from "@danypops/vehicle-server";
+import { Type } from "typebox";
 
-const passthroughSchema = defineVehicleSchema<{ value: string }>({
-	jsonSchema: { type: "object", properties: { value: { type: "string" } }, additionalProperties: false },
-	safeParse(value: unknown) {
-		if (typeof value === "object" && value !== null && typeof (value as { value?: unknown }).value === "string") {
-			return { success: true, value: value as { value: string } };
-		}
-		return { success: false, issues: [{ path: ["value"], message: "value must be a string" }] };
-	},
-});
-
-const outputSchema = defineVehicleSchema<{ echoed: string }>({
-	jsonSchema: { type: "object", properties: { echoed: { type: "string" } }, additionalProperties: false },
-	safeParse(value: unknown) {
-		if (typeof value === "object" && value !== null && typeof (value as { echoed?: unknown }).echoed === "string") {
-			return { success: true, value: value as { echoed: string } };
-		}
-		return { success: false, issues: [{ path: ["echoed"], message: "echoed must be a string" }] };
-	},
-});
+const inputSchema = defineStrictVehicleSchema(Type.Object({ value: Type.String({ maxLength: 64 }) }, { additionalProperties: false }));
+const outputSchema = defineStrictVehicleSchema(Type.Object({ echoed: Type.String({ maxLength: 64 }) }, { additionalProperties: false }));
 
 const LIMITS = { defaultTimeoutMs: 200, maxTimeoutMs: 2_000, maxRequestBytes: 256, maxResponseBytes: 256 } as const;
 
@@ -72,9 +59,21 @@ const ConformanceEcho = defineVehicleOperation({
 	name: "conformance.echo",
 	version: 1,
 	description: "Echoes its input.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: ["conformance:echo"],
+	effect: "read",
+	idempotency: { mode: "safe" },
+	limits: LIMITS,
+});
+
+const ConformanceInvalidOutput = defineVehicleOperation({
+	name: "conformance.invalid-output",
+	version: 1,
+	description: "Exercises output-contract enforcement.",
+	input: inputSchema,
+	output: outputSchema,
+	permissions: [],
 	effect: "read",
 	idempotency: { mode: "safe" },
 	limits: LIMITS,
@@ -84,7 +83,7 @@ const ConformanceBoom = defineVehicleOperation({
 	name: "conformance.boom",
 	version: 1,
 	description: "Always throws a real VehicleError from its handler.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: [],
 	effect: "read",
@@ -96,7 +95,7 @@ const ConformanceKeyed = defineVehicleOperation({
 	name: "conformance.keyed",
 	version: 1,
 	description: "Requires a keyed idempotency key.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: [],
 	effect: "external-write",
@@ -109,7 +108,7 @@ const ConformanceUnconfiguredRisk = defineVehicleOperation({
 	name: "conformance.unconfigured-risk",
 	version: 1,
 	description: "Proves that risky operations require an explicit registry approval-policy decision.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: [],
 	effect: "external-write",
@@ -121,7 +120,7 @@ const ConformanceProgress = defineVehicleOperation({
 	name: "conformance.progress",
 	version: 1,
 	description: "Reports two progress events, then resolves.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: [],
 	effect: "read",
@@ -133,7 +132,7 @@ const ConformanceNever = defineVehicleOperation({
 	name: "conformance.never",
 	version: 1,
 	description: "Never resolves on its own -- only via cancellation or deadline.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: [],
 	effect: "read",
@@ -148,7 +147,7 @@ const ConformanceSlowProgress = defineVehicleOperation({
 	version: 1,
 	description:
 		"Reports one progress event partway through a real delay, then resolves -- streaming: true declares it must never silently block.",
-	input: passthroughSchema,
+	input: inputSchema,
 	output: outputSchema,
 	permissions: [],
 	effect: "read",
@@ -159,6 +158,10 @@ const ConformanceSlowProgress = defineVehicleOperation({
 
 /** Registers the fixed conformance operation set onto `registry`. Every fixture must call this before handing back its client. */
 export function registerConformanceOperations(registry: VehicleRegistry): void {
+	registry.register(
+		"conformance",
+		bindVehicleOperation(ConformanceInvalidOutput, () => async () => ({ echoed: 42 }) as unknown as { echoed: string }),
+	);
 	registry.register(
 		"conformance",
 		bindVehicleOperation(ConformanceEcho, () => async (context) => ({ echoed: context.input.value })),
@@ -224,6 +227,7 @@ export function registerVehicleClientConformance(runner: VehicleConformanceRunne
 				expect(names).toEqual([
 					"conformance.boom@1",
 					"conformance.echo@1",
+					"conformance.invalid-output@1",
 					"conformance.keyed@1",
 					"conformance.never@1",
 					"conformance.progress@1",
@@ -279,6 +283,26 @@ export function registerVehicleClientConformance(runner: VehicleConformanceRunne
 				await expect(client.invoke("conformance.echo", 1, { value: 123 }, { permissions: ["conformance:echo"] })).rejects.toMatchObject({
 					code: "invalid-input",
 				});
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("rejects additional input properties", async () => {
+			const { client, cleanup } = await fixture.create();
+			try {
+				await expect(
+					client.invoke("conformance.echo", 1, { value: "hi", extra: true }, { permissions: ["conformance:echo"] }),
+				).rejects.toMatchObject({ code: "invalid-input" });
+			} finally {
+				await cleanup();
+			}
+		});
+
+		it("rejects invalid handler output", async () => {
+			const { client, cleanup } = await fixture.create();
+			try {
+				await expect(client.invoke("conformance.invalid-output", 1, { value: "hi" }, {})).rejects.toMatchObject({ code: "invalid-output" });
 			} finally {
 				await cleanup();
 			}

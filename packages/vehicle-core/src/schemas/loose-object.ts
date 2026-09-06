@@ -39,6 +39,7 @@ function matchesLooseObjectPropertyType(type: string, value: unknown): boolean {
  * `enum`). Every consumer projecting a plain-object input onto a
  * VehicleOperation needs the same required/type/extra-key/enum checks; this
  * is that check written once.
+ * @deprecated Use defineStrictVehicleOperation from @danypops/vehicle-core/typebox for new public operations.
  */
 export function defineLooseObjectSchema(
 	properties: Record<string, LooseObjectProperty>,
@@ -75,7 +76,9 @@ export function defineLooseObjectSchema(
 	});
 }
 
-/** Accepts any value unvalidated -- for an operation whose output shape isn't worth a dedicated schema (an internal/low-stakes result, or one already validated upstream by the domain logic it wraps). */
+/** Accepts any value unvalidated.
+ * @deprecated Use defineStrictVehicleSchema from @danypops/vehicle-core/typebox for public output contracts.
+ */
 export const passthroughVehicleSchema: VehicleSchemaCodec<unknown> = defineVehicleSchema<unknown>({
 	jsonSchema: { type: "object" },
 	safeParse: (value) => ({ success: true, value }),

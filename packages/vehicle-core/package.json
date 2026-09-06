@@ -1,7 +1,7 @@
 {
 	"name": "@danypops/vehicle-core",
-	"version": "0.19.2",
-	"description": "Vehicle's runtime-neutral wire contract: operation descriptors, schema codecs, failure shapes. Zero runtime dependencies, zero Bun-specific code -- the one thing every Vehicle client and server package depends on.",
+	"version": "0.20.0",
+	"description": "Vehicle's runtime-neutral wire contract: operation descriptors, schema codecs, failure shapes. Dependency-free root entry, optional TypeBox schema adapter, zero Bun-specific code -- the one thing every Vehicle client and server package depends on.",
 	"license": "MIT",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -10,6 +10,10 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
+		},
+		"./typebox": {
+			"types": "./dist/typebox/index.d.ts",
+			"default": "./dist/typebox/index.js"
 		},
 		"./persistence": {
 			"types": "./dist/persistence/index.d.ts",
@@ -21,8 +25,11 @@
 		"test": "bun test test",
 		"typecheck": "tsc --noEmit"
 	},
+	"peerDependencies": { "typebox": "^1.3.6" },
+	"peerDependenciesMeta": { "typebox": { "optional": true } },
 	"devDependencies": {
 		"@types/node": "^22.0.0",
+		"typebox": "^1.3.6",
 		"typescript": "^5.9.3"
 	},
 	"repository": {
